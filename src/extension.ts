@@ -16,10 +16,10 @@ import * as path from 'path';
 // Helper function to update status bar item
 function updateKeepConnectionStatusBar(statusBarItem: vscode.StatusBarItem, connectionManager: ConnectionManager) {
     const isEnabled = connectionManager.getKeepConnectionOpen();
-    statusBarItem.text = isEnabled ? '🔗 Keep Connection ON' : '🚫 Keep Connection OFF';
+    statusBarItem.text = isEnabled ? '🔗 Keep Connection ON' : '⛓️‍💥 Keep Connection OFF';
     statusBarItem.tooltip = isEnabled 
-        ? 'Keep Connection Open: ENABLED - Kliknij aby wyłączyć'
-        : 'Keep Connection Open: DISABLED - Kliknij aby włączyć';
+        ? 'Keep Connection Open: ENABLED - Click to disable'
+        : 'Keep Connection Open: DISABLED - Click to enable';
     statusBarItem.backgroundColor = isEnabled ? new vscode.ThemeColor('statusBarItem.prominentBackground') : undefined;
 }
 
@@ -214,8 +214,8 @@ export function activate(context: vscode.ExtensionContext) {
             const newState = !currentState;
             vscode.window.showInformationMessage(
                 newState 
-                    ? 'Keep connection open: ENABLED - Połączenie będzie utrzymane między zapytaniami'
-                    : 'Keep connection open: DISABLED - Połączenie będzie zamykane po każdym zapytaniu'
+                    ? 'Keep connection open: ENABLED - connection will remain open after queries'
+                    : 'Keep connection open: DISABLED - connection will be closed after each query'
             );
         }),
         vscode.commands.registerCommand('netezza.openLogin', () => {
@@ -239,36 +239,36 @@ export function activate(context: vscode.ExtensionContext) {
 
                 // Show confirmation dialog
                 const confirmation = await vscode.window.showWarningMessage(
-                    `Czy na pewno chcesz usunąć ${item.objType.toLowerCase()} "${fullName}"?`,
+                    `Are you sure you want to delete ${item.objType.toLowerCase()} "${fullName}"?`,
                     { modal: true },
-                    'Tak, usuń',
-                    'Anuluj'
+                    'Yes, delete',
+                    'Cancel'
                 );
 
-                if (confirmation === 'Tak, usuń') {
+                if (confirmation === 'Yes, delete') {
                     try {
                         // Get connection string
                         const connectionString = await connectionManager.getConnectionString();
                         if (!connectionString) {
-                            vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                            vscode.window.showErrorMessage('No database connection');
                             return;
                         }
 
                         // Execute DROP statement
                         await vscode.window.withProgress({
                             location: vscode.ProgressLocation.Notification,
-                            title: `Usuwanie ${item.objType.toLowerCase()} ${fullName}...`,
+                            title: `Deleting ${item.objType.toLowerCase()} ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
                             await runQuery(context, sql, true);
                         });
 
-                        vscode.window.showInformationMessage(`Usunięto ${item.objType.toLowerCase()}: ${fullName}`);
+                        vscode.window.showInformationMessage(`Deleted ${item.objType.toLowerCase()}: ${fullName}`);
 
                         // Refresh schema view
                         schemaProvider.refresh();
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Błąd podczas usuwania: ${err.message}`);
+                        vscode.window.showErrorMessage(`Error during deletion: ${err.message}`);
                     }
                 }
             }
@@ -286,14 +286,14 @@ export function activate(context: vscode.ExtensionContext) {
 
                 // Step 1: Select privilege type
                 const privilege = await vscode.window.showQuickPick([
-                    { label: 'SELECT', description: 'Uprawnienia do odczytu danych' },
-                    { label: 'INSERT', description: 'Uprawnienia do wstawiania danych' },
-                    { label: 'UPDATE', description: 'Uprawnienia do aktualizacji danych' },
-                    { label: 'DELETE', description: 'Uprawnienia do usuwania danych' },
-                    { label: 'ALL', description: 'Wszystkie uprawnienia (SELECT, INSERT, UPDATE, DELETE)' },
-                    { label: 'LIST', description: 'Uprawnienia do listowania obiektów' }
+                    { label: 'SELECT', description: 'Privileges to read data' },
+                    { label: 'INSERT', description: 'Privileges to insert data' },
+                    { label: 'UPDATE', description: 'Privileges to update data' },
+                    { label: 'DELETE', description: 'Privileges to delete data' },
+                    { label: 'ALL', description: 'All privileges (SELECT, INSERT, UPDATE, DELETE)' },
+                    { label: 'LIST', description: 'Privileges to list objects' }
                 ], {
-                    placeHolder: 'Wybierz typ uprawnień'
+                    placeHolder: 'Select privilege type'
                 });
 
                 if (!privilege) {
@@ -302,14 +302,14 @@ export function activate(context: vscode.ExtensionContext) {
 
                 // Step 2: Enter user/group name
                 const grantee = await vscode.window.showInputBox({
-                    prompt: 'Podaj nazwę użytkownika lub grupy',
-                    placeHolder: 'np. SOME_USER lub GROUP_NAME',
+                    prompt: 'Enter user or group name',
+                    placeHolder: 'e.g. SOME_USER or GROUP_NAME',
                     validateInput: (value) => {
                         if (!value || value.trim().length === 0) {
-                            return 'Nazwa użytkownika/grupy nie może być pusta';
+                            return 'User/group name cannot be empty';
                         }
                         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value.trim())) {
-                            return 'Nieprawidłowa nazwa użytkownika/grupy';
+                            return 'Invalid user/group name';
                         }
                         return null;
                     }
@@ -323,33 +323,33 @@ export function activate(context: vscode.ExtensionContext) {
 
                 // Step 3: Confirm and execute
                 const confirmation = await vscode.window.showInformationMessage(
-                    `Wykonać: ${sql}`,
+                    `Execute: ${sql}`,
                     { modal: true },
-                    'Tak, wykonaj',
-                    'Anuluj'
+                    'Yes, execute',
+                    'Cancel'
                 );
 
-                if (confirmation === 'Tak, wykonaj') {
+                if (confirmation === 'Yes, execute') {
                     try {
                         // Get connection string
                         const connectionString = await connectionManager.getConnectionString();
                         if (!connectionString) {
-                            vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                            vscode.window.showErrorMessage('No database connection');
                             return;
                         }
 
                         // Execute GRANT statement
                         await vscode.window.withProgress({
                             location: vscode.ProgressLocation.Notification,
-                            title: `Nadawanie uprawnień ${privilege.label} na ${fullName}...`,
+                            title: `Granting ${privilege.label} on ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
                             await runQuery(context, sql, true);
                         });
 
-                        vscode.window.showInformationMessage(`Nadano uprawnienia ${privilege.label} na ${fullName} dla ${grantee.trim().toUpperCase()}`);
+                        vscode.window.showInformationMessage(`Granted ${privilege.label} on ${fullName} to ${grantee.trim().toUpperCase()}`);
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Błąd podczas nadawania uprawnień: ${err.message}`);
+                        vscode.window.showErrorMessage(`Error granting privileges: ${err.message}`);
                     }
                 }
             }
@@ -366,7 +366,7 @@ export function activate(context: vscode.ExtensionContext) {
                     { label: 'PAGES START', description: 'Groom pages from start' },
                     { label: 'VERSIONS', description: 'Groom versions (clean up old row versions)' }
                 ], {
-                    placeHolder: 'Wybierz tryb GROOM'
+                    placeHolder: 'Select GROOM mode'
                 });
 
                 if (!mode) {
@@ -379,7 +379,7 @@ export function activate(context: vscode.ExtensionContext) {
                     { label: 'NONE', description: 'No backupset', value: 'NONE' },
                     { label: 'Custom', description: 'Specify custom backupset ID', value: 'CUSTOM' }
                 ], {
-                    placeHolder: 'Wybierz opcję RECLAIM BACKUPSET'
+                    placeHolder: 'Select RECLAIM BACKUPSET option'
                 });
 
                 if (!backupsetOption) {
@@ -391,14 +391,14 @@ export function activate(context: vscode.ExtensionContext) {
                 // If custom, ask for backupset ID
                 if (backupsetOption.value === 'CUSTOM') {
                     const customId = await vscode.window.showInputBox({
-                        prompt: 'Podaj ID backupset',
+                        prompt: 'Enter backupset ID',
                         placeHolder: 'np. 12345',
                         validateInput: (value) => {
                             if (!value || value.trim().length === 0) {
-                                return 'ID backupset nie może być puste';
+                                return 'Backupset ID cannot be empty';
                             }
                             if (!/^\d+$/.test(value.trim())) {
-                                return 'ID backupset musi być liczbą';
+                                return 'Backupset ID must be a number';
                             }
                             return null;
                         }
@@ -415,18 +415,18 @@ export function activate(context: vscode.ExtensionContext) {
 
                 // Step 3: Confirm and execute
                 const confirmation = await vscode.window.showWarningMessage(
-                    `Wykonać GROOM na tabeli "${fullName}"?\n\n${sql}\n\nUwaga: Operacja może być czasochłonna dla dużych tabel.`,
+                    `Execute GROOM on table "${fullName}"?\n\n${sql}\n\nWarning: This operation may be time-consuming for large tables.`,
                     { modal: true },
-                    'Tak, wykonaj',
-                    'Anuluj'
+                    'Yes, execute',
+                    'Cancel'
                 );
 
-                if (confirmation === 'Tak, wykonaj') {
+                if (confirmation === 'Yes, execute') {
                     try {
                         // Get connection string
                         const connectionString = await connectionManager.getConnectionString();
                         if (!connectionString) {
-                            vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                            vscode.window.showErrorMessage('No database connection');
                             return;
                         }
 
@@ -441,9 +441,9 @@ export function activate(context: vscode.ExtensionContext) {
                         });
 
                         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-                        vscode.window.showInformationMessage(`GROOM zakończony pomyślnie (${duration}s): ${fullName}`);
+                        vscode.window.showInformationMessage(`GROOM completed successfully (${duration}s): ${fullName}`);
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Błąd podczas GROOM: ${err.message}`);
+                        vscode.window.showErrorMessage(`Error during GROOM: ${err.message}`);
                     }
                 }
             }
@@ -453,8 +453,8 @@ export function activate(context: vscode.ExtensionContext) {
                 const fullName = `${item.dbName}.${item.schema}.${item.label}`;
 
                 const comment = await vscode.window.showInputBox({
-                    prompt: 'Podaj komentarz do tabeli',
-                    placeHolder: 'np. Tabela zawiera dane klientów',
+                    prompt: 'Enter comment for table',
+                    placeHolder: 'e.g. Table contains customer data',
                     value: item.objectDescription || ''
                 });
 
@@ -467,15 +467,15 @@ export function activate(context: vscode.ExtensionContext) {
                 try {
                     const connectionString = await connectionManager.getConnectionString();
                     if (!connectionString) {
-                        vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                        vscode.window.showErrorMessage('No database connection');
                         return;
                     }
 
                     await runQuery(context, sql, true);
-                    vscode.window.showInformationMessage(`Dodano komentarz do tabeli: ${fullName}`);
+                    vscode.window.showInformationMessage(`Comment added to table: ${fullName}`);
                     schemaProvider.refresh();
                 } catch (err: any) {
-                    vscode.window.showErrorMessage(`Błąd podczas dodawania komentarza: ${err.message}`);
+                    vscode.window.showErrorMessage(`Error adding comment: ${err.message}`);
                 }
             }
         }),
@@ -485,33 +485,33 @@ export function activate(context: vscode.ExtensionContext) {
                 const sql = `GENERATE EXPRESS STATISTICS ON ${fullName};`;
 
                 const confirmation = await vscode.window.showInformationMessage(
-                    `Wygenerować statystyki dla tabeli "${fullName}"?\n\n${sql}`,
+                    `Generate statistics for table "${fullName}"?\n\n${sql}`,
                     { modal: true },
-                    'Tak, generuj',
-                    'Anuluj'
+                    'Yes, generate',
+                    'Cancel'
                 );
 
-                if (confirmation === 'Tak, generuj') {
+                if (confirmation === 'Yes, generate') {
                     try {
                         const connectionString = await connectionManager.getConnectionString();
                         if (!connectionString) {
-                            vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                            vscode.window.showErrorMessage('No database connection');
                             return;
                         }
 
                         const startTime = Date.now();
                         await vscode.window.withProgress({
                             location: vscode.ProgressLocation.Notification,
-                            title: `Generowanie statystyk dla ${fullName}...`,
+                            title: `Generating statistics for ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
                             await runQuery(context, sql, true);
                         });
 
                         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-                        vscode.window.showInformationMessage(`Statystyki wygenerowane pomyślnie (${duration}s): ${fullName}`);
+                        vscode.window.showInformationMessage(`Statistics generated successfully (${duration}s): ${fullName}`);
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Błąd podczas generowania statystyk: ${err.message}`);
+                        vscode.window.showErrorMessage(`Error generating statistics: ${err.message}`);
                     }
                 }
             }
@@ -522,31 +522,31 @@ export function activate(context: vscode.ExtensionContext) {
                 const sql = `TRUNCATE TABLE ${fullName};`;
 
                 const confirmation = await vscode.window.showWarningMessage(
-                    `⚠️ UWAGA: Czy na pewno chcesz usunąć WSZYSTKIE dane z tabeli "${fullName}"?\n\n${sql}\n\nTa operacja jest NIEODWRACALNA!`,
+                    `⚠️ WARNING: Are you sure you want to delete ALL data from the table "${fullName}"?\n\n${sql}\n\nThis operation is IRREVERSIBLE!`,
                     { modal: true },
-                    'Tak, usuń wszystkie dane',
-                    'Anuluj'
+                    'Yes, delete all data',
+                    'Cancel'
                 );
 
-                if (confirmation === 'Tak, usuń wszystkie dane') {
+                if (confirmation === 'Yes, delete all data') {
                     try {
                         const connectionString = await connectionManager.getConnectionString();
                         if (!connectionString) {
-                            vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                            vscode.window.showErrorMessage('No database connection');
                             return;
                         }
 
                         await vscode.window.withProgress({
                             location: vscode.ProgressLocation.Notification,
-                            title: `Czyszczenie tabeli ${fullName}...`,
+                            title: `Clearing table ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
                             await runQuery(context, sql, true);
                         });
 
-                        vscode.window.showInformationMessage(`Tabela wyczyszczona: ${fullName}`);
+                        vscode.window.showInformationMessage(`Table cleared: ${fullName}`);
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Błąd podczas czyszczenia tabeli: ${err.message}`);
+                        vscode.window.showErrorMessage(`Error clearing table: ${err.message}`);
                     }
                 }
             }
@@ -556,15 +556,15 @@ export function activate(context: vscode.ExtensionContext) {
                 const fullName = `${item.dbName}.${item.schema}.${item.label}`;
 
                 const constraintName = await vscode.window.showInputBox({
-                    prompt: 'Podaj nazwę klucza głównego (constraint)',
-                    placeHolder: `np. PK_${item.label}`,
+                    prompt: 'Enter primary key constraint name',
+                    placeHolder: `e.g. PK_${item.label}`,
                     value: `PK_${item.label}`,
                     validateInput: (value) => {
                         if (!value || value.trim().length === 0) {
-                            return 'Nazwa constraint nie może być pusta';
+                            return 'Constraint name cannot be empty';
                         }
                         if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(value.trim())) {
-                            return 'Nieprawidłowa nazwa constraint';
+                            return 'Invalid constraint name';
                         }
                         return null;
                     }
@@ -575,11 +575,11 @@ export function activate(context: vscode.ExtensionContext) {
                 }
 
                 const columns = await vscode.window.showInputBox({
-                    prompt: 'Podaj nazwy kolumn klucza głównego (oddzielone przecinkami)',
-                    placeHolder: 'np. COL1, COL2 lub ID',
+                    prompt: 'Enter primary key column names (comma separated)',
+                    placeHolder: 'e.g. COL1, COL2 or ID',
                     validateInput: (value) => {
                         if (!value || value.trim().length === 0) {
-                            return 'Musisz podać przynajmniej jedną kolumnę';
+                            return 'You must provide at least one column';
                         }
                         return null;
                     }
@@ -593,32 +593,32 @@ export function activate(context: vscode.ExtensionContext) {
                 const sql = `ALTER TABLE ${fullName} ADD CONSTRAINT ${constraintName.trim().toUpperCase()} PRIMARY KEY (${columnList});`;
 
                 const confirmation = await vscode.window.showInformationMessage(
-                    `Dodać klucz główny do tabeli "${fullName}"?\n\n${sql}`,
+                    `Add primary key to table "${fullName}"?\n\n${sql}`,
                     { modal: true },
-                    'Tak, dodaj',
-                    'Anuluj'
+                    'Yes, add',
+                    'Cancel'
                 );
 
-                if (confirmation === 'Tak, dodaj') {
+                if (confirmation === 'Yes, add') {
                     try {
                         const connectionString = await connectionManager.getConnectionString();
                         if (!connectionString) {
-                            vscode.window.showErrorMessage('Brak połączenia z bazą danych');
+                            vscode.window.showErrorMessage('No database connection');
                             return;
                         }
 
                         await vscode.window.withProgress({
                             location: vscode.ProgressLocation.Notification,
-                            title: `Dodawanie klucza głównego do ${fullName}...`,
+                            title: `Adding primary key to ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
                             await runQuery(context, sql, true);
                         });
 
-                        vscode.window.showInformationMessage(`Klucz główny dodany: ${constraintName.trim().toUpperCase()}`);
+                        vscode.window.showInformationMessage(`Primary key added: ${constraintName.trim().toUpperCase()}`);
                         schemaProvider.refresh();
                     } catch (err: any) {
-                        vscode.window.showErrorMessage(`Błąd podczas dodawania klucza głównego: ${err.message}`);
+                        vscode.window.showErrorMessage(`Error adding primary key: ${err.message}`);
                     }
                 }
             }
@@ -1620,17 +1620,17 @@ export function activate(context: vscode.ExtensionContext) {
             if (hasXmlSpreadsheet) {
                 const action = await vscode.window.showQuickPick([
                     {
-                        label: '📊 Importuj do tabeli Netezza',
-                        description: 'Wykryto format "XML Spreadsheet" - importuj dane do bazy',
+                        label: '📊 import to Netezza table',
+                        description: 'Detected "XML Spreadsheet" format - import data to database',
                         value: 'import'
                     },
                     {
-                        label: '📝 Wklej jako tekst',
-                        description: 'Wklej zawartość schowka jako zwykły tekst',
+                        label: '📝 Paste as text',
+                        description: 'Paste clipboard content as plain text',
                         value: 'paste'
                     }
                 ], {
-                    placeHolder: 'Wykryto format "XML Spreadsheet" w schowku - wybierz akcję'
+                    placeHolder: 'Detected "XML Spreadsheet" format in clipboard - choose an action'
                 });
 
                 if (action?.value === 'import') {
@@ -1654,7 +1654,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
         } catch (error: any) {
-            vscode.window.showErrorMessage(`Błąd podczas wklejania: ${error.message}`);
+            vscode.window.showErrorMessage(`Error during paste: ${error.message}`);
         }
     });
 

@@ -411,7 +411,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 query = `SELECT OBJNAME, OBJID FROM ${dbName}.._V_OBJECT_DATA WHERE SCHEMA='${schemaName}' AND OBJTYPE='TABLE' ORDER BY OBJNAME LIMIT 1000`;
             } else {
                 // No schema specified (double dot), fetch all tables in DB or default schema?
-                // User said "BAZA..TABELA", usually means skipping schema (default) or searching all.
+                // User said "DATABASE..TABLE", usually means skipping schema (default) or searching all.
                 // Let's fetch all for now, or maybe limit to 'ADMIN' if it's too many.
                 query = `SELECT OBJNAME, OBJID, SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE OBJTYPE='TABLE' ORDER BY OBJNAME LIMIT 1000`;
             }
