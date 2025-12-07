@@ -1,0 +1,400 @@
+{
+  "name": "justybaselite-netezza",
+  "displayName": "JustyBaseLite - Netezza",
+  "description": "Execute Netezza / IBM PureData System for Analytics SQL queries via ODBC",
+  "version": "0.0.3",
+  "publisher": "krzysztof-d",
+  "author": {
+    "name": "krzysztof-d",
+    "url": "https://www.linkedin.com/in/krzysztof-du%C5%9Bko-124b48195/"
+  },
+  "license": "MIT",
+  "icon": "Icon.png",
+  "galleryBanner": {
+    "color": "#0066CC",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "keywords": [
+    "netezza",
+    "IBM PureData System for Analytics",
+    "SQL",
+    "nz",
+    "database",
+    "ODBC"
+  ],
+  "categories": [
+    "Programming Languages",
+    "Data Science",
+    "Other"
+  ],
+  "homepage": "https://github.com/KrzysztofDusko/JustyBaseLite-netezza",
+  "bugs": {
+    "url": "https://github.com/KrzysztofDusko/JustyBaseLite-netezza/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KrzysztofDusko/JustyBaseLite-netezza"
+  },
+  "activationEvents": [
+    "onLanguage:sql"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "netezza-explorer",
+          "title": "Netezza",
+          "icon": "$(database)"
+        }
+      ],
+      "panel": [
+        {
+          "id": "netezza-results-container",
+          "title": "Netezza Results",
+          "icon": "$(database)"
+        }
+      ]
+    },
+    "views": {
+      "netezza-explorer": [
+        {
+          "id": "netezza.schema",
+          "name": "Schema",
+          "icon": "$(list-tree)"
+        },
+        {
+          "type": "webview",
+          "id": "netezza.search",
+          "name": "Object Search",
+          "icon": "$(search)"
+        },
+        {
+          "type": "webview",
+          "id": "netezza.queryHistory",
+          "name": "Query History",
+          "icon": "$(history)"
+        }
+      ],
+      "netezza-results-container": [
+        {
+          "type": "webview",
+          "name": "Query Results",
+          "id": "netezza.results",
+          "icon": "$(output)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "netezza.runQuery",
+        "title": "Run Query (Smart/Sequential)",
+        "icon": "$(play)"
+      },
+      {
+        "command": "netezza.runQueryBatch",
+        "title": "Run Query Batch (Legacy)",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "netezza.exportToXlsb",
+        "title": "Export Query to Excel",
+        "icon": "$(export)"
+      },
+      {
+        "command": "netezza.exportToCsv",
+        "title": "Export Query to CSV",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "netezza.exportToXlsbAndOpen",
+        "title": "Export Query to Excel and Open",
+        "icon": "$(file-binary)"
+      },
+      {
+        "command": "netezza.copyXlsbToClipboard",
+        "title": "Copy Query Results as Excel to Clipboard",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "netezza.openLogin",
+        "title": "Netezza: Connect...",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "netezza.copySelectAll",
+        "title": "Copy Select *"
+      },
+      {
+        "command": "netezza.copyDrop",
+        "title": "Drop Table/View"
+      },
+      {
+        "command": "netezza.copyName",
+        "title": "Copy Name"
+      },
+      {
+        "command": "netezza.grantPermissions",
+        "title": "Grant Permissions"
+      },
+      {
+        "command": "netezza.groomTable",
+        "title": "Groom Table"
+      },
+      {
+        "command": "netezza.addTableComment",
+        "title": "Add/Edit Comment"
+      },
+      {
+        "command": "netezza.generateStatistics",
+        "title": "Generate Statistics"
+      },
+      {
+        "command": "netezza.truncateTable",
+        "title": "Truncate Table"
+      },
+      {
+        "command": "netezza.addPrimaryKey",
+        "title": "Add Primary Key"
+      },
+      {
+        "command": "netezza.importClipboard",
+        "title": "Import Clipboard Data to Table",
+        "icon": "$(clippy)"
+      },
+      {
+        "command": "netezza.smartPaste",
+        "title": "Smart Paste (Auto-detect Excel XML)",
+        "icon": "$(clippy)"
+      },
+      {
+        "command": "netezza.importData",
+        "title": "Import Data to Table",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "netezza.createDDL",
+        "title": "Create DDL Code",
+        "icon": "$(code)"
+      },
+      {
+        "command": "netezza.jumpToSchema",
+        "title": "Jump to Schema Object",
+        "icon": "$(search)"
+      },
+      {
+        "command": "netezza.refreshSchema",
+        "title": "Refresh Schema",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "netezza.toggleKeepConnectionOpen",
+        "title": "Netezza: Toggle Keep Connection Open",
+        "icon": "$(plug)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "netezza.runQuery",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.runQueryBatch",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.exportToXlsb",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.exportToCsv",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.exportToXlsbAndOpen",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.copyXlsbToClipboard",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.importClipboard",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.importData",
+          "when": "resourceLangId == sql",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "netezza.exportToXlsb",
+          "when": "editorHasSelection && resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.exportToCsv",
+          "when": "editorHasSelection && resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.exportToXlsbAndOpen",
+          "when": "editorHasSelection && resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.copyXlsbToClipboard",
+          "when": "editorHasSelection && resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.smartPaste",
+          "when": "resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.importClipboard",
+          "when": "resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.importData",
+          "when": "resourceLangId == sql",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "netezza.jumpToSchema",
+          "when": "editorTextFocus && resourceLangId == sql",
+          "group": "navigation"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "netezza.openLogin",
+          "when": "view == netezza.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.refreshSchema",
+          "when": "view == netezza.schema",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "netezza.copySelectAll",
+          "when": "view == netezza.schema && viewItem =~ /netezza:(TABLE|VIEW)/",
+          "group": "1_copy"
+        },
+        {
+          "command": "netezza.copyDrop",
+          "when": "view == netezza.schema && viewItem =~ /netezza:(TABLE|VIEW)/",
+          "group": "1_copy"
+        },
+        {
+          "command": "netezza.copyName",
+          "when": "view == netezza.schema && viewItem =~ /netezza:.*/",
+          "group": "1_copy"
+        },
+        {
+          "command": "netezza.grantPermissions",
+          "when": "view == netezza.schema && viewItem =~ /netezza:(TABLE|VIEW)/",
+          "group": "2_permissions"
+        },
+        {
+          "command": "netezza.groomTable",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.addTableComment",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.generateStatistics",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.truncateTable",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "4_danger"
+        },
+        {
+          "command": "netezza.addPrimaryKey",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "5_schema"
+        },
+        {
+          "command": "netezza.createDDL",
+          "when": "view == netezza.schema && viewItem =~ /netezza:(TABLE|VIEW|PROCEDURE|FUNCTION|AGGREGATE|EXTERNAL TABLE|SYNONYM)/",
+          "group": "1_copy"
+        }
+      ]
+    },
+    "configuration": {
+      "type": "object",
+      "title": "Netezza Configuration"
+    },
+    "keybindings": [
+      {
+        "command": "netezza.runQuery",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorLangId == sql || editorLangId == mssql"
+      },
+      {
+        "command": "netezza.runQuery",
+        "key": "f5",
+        "when": "editorLangId == sql || editorLangId == mssql"
+      },
+      {
+        "command": "netezza.runQueryBatch",
+        "key": "ctrl+f5",
+        "when": "editorLangId == sql || editorLangId == mssql"
+      },
+      {
+        "command": "netezza.runQueryBatch",
+        "key": "ctrl+shift+enter",
+        "when": "editorLangId == sql || editorLangId == mssql"
+      },
+      {
+        "command": "netezza.smartPaste",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
+        "when": "editorTextFocus && (editorLangId == sql || editorLangId == mssql)"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "node esbuild.js",
+    "package": "node esbuild.js --production",
+    "package-vsix": "npm install && npm run package && npm prune --production && vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^16.0.0",
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.27.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "odbc": "^2.4.9",
+    "xlsx": "^0.18.5"
+  },
+  "preview": true
+}

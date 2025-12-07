@@ -1,0 +1,272 @@
+:root {
+    --border-color: var(--vscode-panel-border);
+    --header-bg: var(--vscode-editorGroupHeader-tabsBackground);
+    --header-fg: var(--vscode-tab-activeForeground);
+    --row-hover: var(--vscode-list-hoverBackground);
+    --row-even: var(--vscode-list-evenBackground, rgba(255, 255, 255, 0.04));
+    --row-odd: var(--vscode-list-oddRowBackground, transparent);
+    --cell-fg: var(--vscode-editor-foreground);
+    --selection-bg: rgba(0, 120, 215, 0.3);
+    --filter-active-color: var(--vscode-charts-blue, #007acc);
+}
+
+html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; font-family: var(--vscode-font-family); font-size: 13px; }
+
+.controls { 
+    padding: 8px; 
+    background-color: var(--vscode-editor-background); 
+    border-bottom: 1px solid var(--border-color); 
+    display: flex; 
+    gap: 10px; 
+    align-items: center; 
+}
+
+button { 
+    background-color: var(--vscode-button-background); 
+    color: var(--vscode-button-foreground); 
+    border: 1px solid var(--vscode-button-border, transparent);
+    padding: 6px 14px; 
+    cursor: pointer; 
+    border-radius: 2px;
+    font-size: 13px;
+}
+button:hover { 
+    background-color: var(--vscode-button-hoverBackground); 
+}
+
+.filter-input:focus {
+    border-color: var(--vscode-focusBorder);
+}
+
+#tableContainer {
+    height: calc(100% - 80px);
+    width: 100%;
+    overflow: auto;
+    position: relative;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    table-layout: fixed;
+}
+
+th {
+    background-color: var(--header-bg);
+    color: var(--header-fg);
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    padding: 4px 8px;
+    text-align: left;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+td {
+    color: var(--cell-fg);
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    padding: 2px 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    height: 24px;
+    cursor: default;
+}
+
+tr:nth-child(even) { background-color: var(--row-even); }
+tr:nth-child(odd) { background-color: var(--row-odd); }
+tr:hover { background-color: var(--row-hover); }
+
+.null-value {
+    color: var(--vscode-disabledForeground);
+    font-style: italic;
+}
+
+.selected-cell {
+    background-color: var(--selection-bg) !important;
+}
+
+.row-count-info {
+    position: absolute;
+    bottom: 8px;
+    right: 12px;
+    background-color: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    padding: 4px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    z-index: 1000;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+/* Excel-like column filter styles */
+th .filter-btn {
+    cursor: pointer;
+    font-size: 12px;
+    margin-left: 4px;
+    opacity: 0.6;
+    user-select: none;
+    padding: 2px 4px;
+    border-radius: 2px;
+    transition: all 0.2s;
+}
+
+th .filter-btn:hover {
+    opacity: 1;
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+th .filter-btn.active {
+    color: var(--filter-active-color);
+    opacity: 1;
+    background-color: var(--vscode-button-secondaryBackground);
+}
+
+/* Column filter dropdown */
+.column-filter-dropdown {
+    position: absolute;
+    z-index: 1000;
+    background-color: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 3px;
+    min-width: 200px;
+    max-width: 350px;
+    max-height: 400px;
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+    animation: dropdownFadeIn 0.2s ease-out;
+}
+
+.column-filter-dropdown .search-box {
+    width: 100%;
+    padding: 4px 6px;
+    border: 1px solid var(--vscode-input-border);
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border-radius: 2px;
+    font-size: 12px;
+    box-sizing: border-box;
+}
+
+.column-filter-dropdown .search-box:focus {
+    border-color: var(--vscode-focusBorder);
+    outline: none;
+}
+
+.column-filter-dropdown .value-item {
+    padding: 4px 8px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+}
+
+.column-filter-dropdown .value-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.column-filter-dropdown .value-item input[type="checkbox"] {
+    margin-right: 8px;
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.column-filter-dropdown .value-item .label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Drag and drop styling */
+th.dragging {
+    opacity: 0.5;
+}
+
+th.drag-over {
+    background-color: var(--vscode-list-dropBackground);
+}
+
+/* Grouping panel styles */
+.grouping-panel {
+    min-height: 40px;
+    padding: 8px;
+    background-color: var(--vscode-editorGroup-background, var(--vscode-editor-background));
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    position: relative;
+}
+
+.grouping-panel[ondragover] {
+    border: 2px dashed var(--vscode-list-dropBackground);
+    background-color: var(--vscode-list-dropBackground);
+}
+
+.group-chip {
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    border: 1px solid var(--vscode-button-border);
+    border-radius: 12px;
+    padding: 4px 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    cursor: move;
+    user-select: none;
+}
+
+.group-chip .remove-group {
+    cursor: pointer;
+    opacity: 0.7;
+    font-weight: bold;
+    margin-left: 4px;
+    padding: 0 4px;
+    border-radius: 50%;
+}
+
+.group-chip .remove-group:hover {
+    opacity: 1;
+    color: var(--vscode-errorForeground);
+    background-color: var(--vscode-inputValidation-errorBackground);
+}
+
+.group-chip.dragging {
+    opacity: 0.5;
+    transform: rotate(5deg);
+}
+
+.group-chip.drag-over {
+    background-color: var(--vscode-list-dropBackground);
+    border-color: var(--vscode-charts-blue);
+    transform: scale(1.05);
+}
+
+.grouping-panel.drag-active {
+    border: 2px dashed var(--vscode-charts-blue);
+    background-color: var(--vscode-list-dropBackground);
+}
+
+/* Animation for dropdown appearance */
+@keyframes dropdownFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
