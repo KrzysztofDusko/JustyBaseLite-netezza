@@ -1,12 +1,13 @@
 import * as vscode from 'vscode';
 import { runQuery } from './queryRunner';
 import { ConnectionManager } from './connectionManager';
+import { MetadataCache } from './metadataCache';
 
 export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<SchemaItem | undefined | null | void> = new vscode.EventEmitter<SchemaItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<SchemaItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
-    constructor(private context: vscode.ExtensionContext, private connectionManager: ConnectionManager) { }
+    constructor(private context: vscode.ExtensionContext, private connectionManager: ConnectionManager, private metadataCache: MetadataCache) { }
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -52,6 +53,26 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
 
         if (!element) {
             // Root: Databases
+            // Try cache first
+            const cachedDbs = this.metadataCache.getDatabases();
+            if (cachedDbs) {
+                // Return cached items
+                // Notes: cached items are simple objects or CompletionItems.
+                // MetadataCache.getDatabases returns what was stored. 
+                // SqlCompletionItemProvider stores CompletionItems.
+                // We need to map them to SchemaItems.
+
+                // Oops, the cached data structure might be tailored for CompletionItems.
+                // getDatabases in CompletionProvider:
+                // Stores: items (CompletionItem[])
+                // We need to extract the label/database name.
+
+                return cachedDbs.map((item: any) => {
+                    const dbName = typeof item.label === 'string' ? item.label : item.label.label;
+                    return new SchemaItem(dbName, vscode.TreeItemCollapsibleState.Collapsed, 'database', dbName);
+                });
+            }
+
             try {
                 const results = await runQuery(this.context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true);
                 if (!results) {
@@ -59,7 +80,27 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     return [];
                 }
                 const databases = JSON.parse(results);
-                return databases.map((db: any) => new SchemaItem(db.DATABASE, vscode.TreeItemCollapsibleState.Collapsed, 'database', db.DATABASE));
+
+                // Create items
+                const items = databases.map((db: any) => new SchemaItem(db.DATABASE, vscode.TreeItemCollapsibleState.Collapsed, 'database', db.DATABASE));
+
+                // Update Cache? 
+                // The cache expects CompletionItems (as per current SqlCompletionItemProvider design). 
+                // We shouldn't break that contract or mixed types will exist.
+                // Ideally MetadataCache should store raw data and providers map it. 
+                // But MetadataCache was extracted from CompletionProvider.
+                // For now, let's just READ from cache if available. 
+                // (Populating it would require creating CompletionItems here which adds 'vscode.CompletionItem' overhead/dependency if not needed, but we are in VS Code extension so it is fine).
+
+                // Let's populate the cache too for consistency!
+                const completionItems = databases.map((db: any) => {
+                    const item = new vscode.CompletionItem(db.DATABASE, vscode.CompletionItemKind.Module);
+                    item.detail = 'Database';
+                    return item;
+                });
+                this.metadataCache.setDatabases(completionItems);
+
+                return items;
             } catch (e) {
                 vscode.window.showErrorMessage("Failed to load databases: " + e);
                 console.error(e);
@@ -149,7 +190,7 @@ export class SchemaItem extends vscode.TreeItem {
         public readonly objectDescription?: string
     ) {
         super(label, collapsibleState);
-        
+
         // Build tooltip with description if available
         let tooltipText = this.label;
         if (objectDescription && objectDescription.trim()) {
@@ -159,7 +200,7 @@ export class SchemaItem extends vscode.TreeItem {
             tooltipText += `\n\nSchema: ${schema}`;
         }
         this.tooltip = tooltipText;
-        
+
         this.description = schema ? `(${schema})` : '';
 
         if (contextValue === 'database') {

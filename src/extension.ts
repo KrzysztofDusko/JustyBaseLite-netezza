@@ -10,6 +10,7 @@ import { SqlParser } from './sqlParser';
 import { NetezzaDocumentLinkProvider } from './documentLinkProvider';
 import { NetezzaFoldingRangeProvider } from './foldingProvider';
 import { QueryHistoryView } from './queryHistoryView';
+import { MetadataCache } from './metadataCache';
 import * as path from 'path';
 
 
@@ -17,7 +18,7 @@ import * as path from 'path';
 function updateKeepConnectionStatusBar(statusBarItem: vscode.StatusBarItem, connectionManager: ConnectionManager) {
     const isEnabled = connectionManager.getKeepConnectionOpen();
     statusBarItem.text = isEnabled ? '🔗 Keep Connection ON' : '⛓️‍💥 Keep Connection OFF';
-    statusBarItem.tooltip = isEnabled 
+    statusBarItem.tooltip = isEnabled
         ? 'Keep Connection Open: ENABLED - Click to disable'
         : 'Keep Connection Open: DISABLED - Click to enable';
     statusBarItem.backgroundColor = isEnabled ? new vscode.ThemeColor('statusBarItem.prominentBackground') : undefined;
@@ -34,7 +35,8 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     const connectionManager = new ConnectionManager(context);
-    const schemaProvider = new SchemaProvider(context, connectionManager);
+    const metadataCache = new MetadataCache(context);
+    const schemaProvider = new SchemaProvider(context, connectionManager, metadataCache);
     const resultPanelProvider = new ResultPanelView(context.extensionUri);
 
     // Create status bar item for "Keep Connection Open"
@@ -45,7 +47,8 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(keepConnectionStatusBarItem);
 
     console.log('Netezza extension: Registering SchemaSearchProvider...');
-    const schemaSearchProvider = new SchemaSearchProvider(context.extensionUri, context);
+    // metadataCache already instantiated above
+    const schemaSearchProvider = new SchemaSearchProvider(context.extensionUri, context, metadataCache);
 
     console.log('Netezza extension: Registering QueryHistoryView...');
     const queryHistoryProvider = new QueryHistoryView(context.extensionUri, context);
@@ -210,10 +213,10 @@ export function activate(context: vscode.ExtensionContext) {
             const currentState = connectionManager.getKeepConnectionOpen();
             connectionManager.setKeepConnectionOpen(!currentState);
             updateKeepConnectionStatusBar(keepConnectionStatusBarItem, connectionManager);
-            
+
             const newState = !currentState;
             vscode.window.showInformationMessage(
-                newState 
+                newState
                     ? 'Keep connection open: ENABLED - connection will remain open after queries'
                     : 'Keep connection open: DISABLED - connection will be closed after each query'
             );
@@ -688,9 +691,11 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }),
         vscode.commands.registerCommand('netezza.revealInSchema', async (data: any) => {
+            const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Revealing ${data.name} in schema...`);
             try {
                 const connectionString = await connectionManager.getConnectionString();
                 if (!connectionString) {
+                    statusBarDisposable.dispose();
                     vscode.window.showWarningMessage('Not connected to database');
                     return;
                 }
@@ -702,7 +707,11 @@ export function activate(context: vscode.ExtensionContext) {
                 const searchTypes = searchType ? [searchType] : ['TABLE', 'VIEW', 'EXTERNAL TABLE', 'PROCEDURE', 'FUNCTION', 'SEQUENCE', 'SYNONYM'];
 
                 if (searchType === 'COLUMN') {
-                    if (!data.parent) { vscode.window.showWarningMessage('Cannot find column without parent table'); return; }
+                    if (!data.parent) {
+                        statusBarDisposable.dispose();
+                        vscode.window.showWarningMessage('Cannot find column without parent table');
+                        return;
+                    }
                     searchName = data.parent;
                     // When looking for the parent table of a column, we look for tables/views
                     // We don't change searchTypes here because we want to find the parent object
@@ -711,12 +720,24 @@ export function activate(context: vscode.ExtensionContext) {
                 // Determine which databases to search
                 let databasesToSearch: string[] = [];
                 if (data.database) {
+                    // Use the specific database from the data
                     databasesToSearch = [data.database];
                 } else {
-                    const dbResults = await runQuery(context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true);
-                    if (!dbResults) { return; }
-                    const databases = JSON.parse(dbResults);
-                    databasesToSearch = databases.map((db: any) => db.DATABASE);
+                    // If no database specified, try to get current database from schema or fetch all
+                    // First, check if there's a schema-based hint
+                    const currentDb = await connectionManager.getCurrentDatabase();
+                    if (currentDb) {
+                        databasesToSearch = [currentDb];
+                    } else {
+                        // Fall back to searching all databases (slower)
+                        const dbResults = await runQuery(context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true);
+                        if (!dbResults) {
+                            statusBarDisposable.dispose();
+                            return;
+                        }
+                        const databases = JSON.parse(dbResults);
+                        databasesToSearch = databases.map((db: any) => db.DATABASE);
+                    }
                 }
 
                 for (const dbName of databasesToSearch) {
@@ -742,14 +763,20 @@ export function activate(context: vscode.ExtensionContext) {
                                     // The original code just revealed the table.
 
                                     await schemaTreeView.reveal(targetItem, { select: true, focus: true, expand: true });
+                                    statusBarDisposable.dispose();
+                                    vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${dbName}.${obj.SCHEMA}`, 3000);
                                     return;
                                 }
                             }
                         }
                     } catch (e) { console.log(`Error searching in ${dbName}:`, e); }
                 }
+                statusBarDisposable.dispose();
                 vscode.window.showWarningMessage(`Could not find ${searchType || 'object'} ${searchName}`);
-            } catch (err: any) { vscode.window.showErrorMessage(`Error revealing item: ${err.message}`); }
+            } catch (err: any) {
+                statusBarDisposable.dispose();
+                vscode.window.showErrorMessage(`Error revealing item: ${err.message}`);
+            }
         }),
         vscode.commands.registerCommand('netezza.showQueryHistory', () => {
             vscode.commands.executeCommand('netezza.queryHistory.focus');
@@ -1736,8 +1763,27 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(disposablePasteOverride);
     context.subscriptions.push(disposableSqlShortcuts);
+
+    // Register SQL Completion Provider
+    const completionProvider = new SqlCompletionItemProvider(context, metadataCache);
     context.subscriptions.push(
-        vscode.languages.registerCompletionItemProvider(['sql', 'mssql'], new SqlCompletionItemProvider(context), '.', ' ')
+        vscode.languages.registerCompletionItemProvider(['sql', 'mssql'], completionProvider, '.', ' ')
+    );
+
+    // Register command to clear autocomplete cache
+    context.subscriptions.push(
+        vscode.commands.registerCommand('netezza.clearAutocompleteCache', async () => {
+            const confirm = await vscode.window.showWarningMessage(
+                'Are you sure you want to clear the autocomplete cache? This will remove all cached databases, schemas, tables, and columns.',
+                { modal: true },
+                'Clear Cache'
+            );
+
+            if (confirm === 'Clear Cache') {
+                await metadataCache.clearCache();
+                vscode.window.showInformationMessage('Autocomplete cache cleared successfully. Cache will be rebuilt on next use.');
+            }
+        })
     );
 }
 

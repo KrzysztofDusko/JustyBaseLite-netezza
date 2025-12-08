@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { runQuery } from './queryRunner';
+import { MetadataCache } from './metadataCache';
 
 export class SchemaSearchProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.search';
     private _view?: vscode.WebviewView;
 
-    constructor(private readonly _extensionUri: vscode.Uri, private context: vscode.ExtensionContext) { }
+    constructor(private readonly _extensionUri: vscode.Uri, private context: vscode.ExtensionContext, private metadataCache: MetadataCache) { }
 
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
@@ -39,46 +40,96 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        // Escape single quotes
-        const safeTerm = term.replace(/'/g, "''");
+        const statusBarDisposable = vscode.window.setStatusBarMessage(`$(search) Searching for "${term}"...`);
+
+        let sentIds = new Set<string>();
+
+        // 1. Search in Cache first (Immediate results)
+        if (this._view) {
+            const cachedResults = this.metadataCache.search(term);
+            if (cachedResults.length > 0) {
+                const mappedResults = cachedResults.map(item => {
+                    // Generate ID to deduplicate later
+                    sentIds.add(`${item.name}|${item.type}|${item.parent || ''}`);
+
+                    return {
+                        NAME: item.name,
+                        SCHEMA: item.schema,
+                        DATABASE: item.database,
+                        TYPE: item.type,
+                        PARENT: item.parent || '',
+                        DESCRIPTION: 'Result from Cache',
+                        MATCH_TYPE: 'NAME' // Cache mostly matches by name
+                    };
+                });
+
+                // Send cached results immediately
+                this._view.webview.postMessage({ type: 'results', data: mappedResults, append: false });
+            } else {
+                // Clear previous results if nothing in cache (and we are starting fresh)
+                // Actually passing 'append: false' clears it.
+                // If cache found nothing, we should send empty list with append:false to clear view?
+                this._view.webview.postMessage({ type: 'results', data: [], append: false });
+            }
+        }
+
+        // 2. Search in Database (Comprehensive results)
+        const safeTerm = term.replace(/'/g, "''").toUpperCase();
         const likeTerm = `%${safeTerm}%`;
 
-        // Query to search for objects, columns, view definitions, and procedure source
-        // We search _V_OBJECT_DATA for tables, views, synonyms, etc.
-        // And _V_RELATION_COLUMN for columns.
-        // And _V_VIEW for view definitions.
-        // And _V_PROCEDURE for procedure source code.
         const query = `
-            SELECT OBJNAME AS NAME, SCHEMA, OBJTYPE AS TYPE, '' AS PARENT, 
+            SELECT OBJNAME AS NAME, SCHEMA, DBNAME AS DATABASE, OBJTYPE AS TYPE, '' AS PARENT, 
                    COALESCE(DESCRIPTION, '') AS DESCRIPTION, 'NAME' AS MATCH_TYPE
             FROM _V_OBJECT_DATA 
-            WHERE OBJNAME LIKE '${likeTerm}'
+            WHERE UPPER(OBJNAME) LIKE '${likeTerm}'
             UNION ALL
-            SELECT C.ATTNAME AS NAME, O.SCHEMA, 'COLUMN' AS TYPE, O.OBJNAME AS PARENT,
+            SELECT C.ATTNAME AS NAME, O.SCHEMA, O.DBNAME AS DATABASE, 'COLUMN' AS TYPE, O.OBJNAME AS PARENT,
                    COALESCE(C.DESCRIPTION, '') AS DESCRIPTION, 'NAME' AS MATCH_TYPE
             FROM _V_RELATION_COLUMN C
             JOIN _V_OBJECT_DATA O ON C.OBJID = O.OBJID
-            WHERE C.ATTNAME LIKE '${likeTerm}'
+            WHERE UPPER(C.ATTNAME) LIKE '${likeTerm}'
             UNION ALL
-            SELECT V.VIEWNAME AS NAME, V.SCHEMA, 'VIEW' AS TYPE, '' AS PARENT,
+            SELECT V.VIEWNAME AS NAME, V.SCHEMA, V.DATABASE, 'VIEW' AS TYPE, '' AS PARENT,
                    'Found in view definition' AS DESCRIPTION, 'DEFINITION' AS MATCH_TYPE
             FROM _V_VIEW V
-            WHERE V.DEFINITION LIKE '${likeTerm}'
+            WHERE UPPER(V.DEFINITION) LIKE '${likeTerm}'
             UNION ALL
-            SELECT P.PROCEDURE AS NAME, P.SCHEMA, 'PROCEDURE' AS TYPE, '' AS PARENT,
+            SELECT P.PROCEDURE AS NAME, P.SCHEMA, P.DATABASE, 'PROCEDURE' AS TYPE, '' AS PARENT,
                    'Found in procedure source' AS DESCRIPTION, 'SOURCE' AS MATCH_TYPE
             FROM _V_PROCEDURE P
-            WHERE P.PROCEDURESOURCE LIKE '${likeTerm}'
+            WHERE UPPER(P.PROCEDURESOURCE) LIKE '${likeTerm}'
             ORDER BY TYPE, NAME
-            LIMIT 100
         `;
 
         try {
             const resultJson = await runQuery(this.context, query, true);
-            if (this._view) {
-                this._view.webview.postMessage({ type: 'results', data: resultJson ? JSON.parse(resultJson) : [] });
+            statusBarDisposable.dispose();
+
+            if (this._view && resultJson) {
+                let dbResults = JSON.parse(resultJson);
+
+                // Deduplicate against what we already sent from cache
+                if (sentIds.size > 0) {
+                    dbResults = dbResults.filter((item: any) => {
+                        const key = `${item.NAME}|${item.TYPE}|${item.PARENT || ''}`;
+                        if (sentIds.has(key)) return false;
+                        return true;
+                    });
+                }
+
+                // Append non-duplicated DB results
+                if (dbResults.length > 0) {
+                    this._view.webview.postMessage({ type: 'results', data: dbResults, append: true });
+                } else if (sentIds.size === 0) {
+                    // Only if NOTHING found in cache AND NOTHING in DB, show no results
+                    // The webview logic might need update to handle 'append' flag and showing 'No results' message correctly
+                    // If we sent cache results, user sees them. 
+                    // If we didn't, we sent empty list (cleared). matches would be 0.
+                    // If DB returns empty, and cache was empty, user sees 0.
+                }
             }
         } catch (e: any) {
+            statusBarDisposable.dispose();
             if (this._view) {
                 this._view.webview.postMessage({ type: 'error', message: e.message });
             }
@@ -124,6 +175,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 .result-item:hover .tooltip { opacity: 1; visibility: visible; }
                 .tooltip.top { bottom: 100%; left: 0; margin-bottom: 5px; }
                 .tooltip.bottom { top: 100%; left: 0; margin-top: 5px; }
+                .cache-badge { background-color: var(--vscode-charts-green); color: white; padding: 1px 4px; border-radius: 2px; font-size: 0.7em; margin-left: 5px; }
             </style>
         </head>
         <body>
@@ -145,7 +197,8 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     const term = searchInput.value;
                     if (term) {
                         status.textContent = 'Searching...';
-                        resultsList.innerHTML = '';
+                        // Keep results until new ones come (or clear? we clear inside search handler if necessary or by postMessage)
+                        // resultsList.innerHTML = ''; // Don't clear immediately, let the backend drive it
                         vscode.postMessage({ type: 'search', value: term });
                     }
                 });
@@ -161,7 +214,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     switch (message.type) {
                         case 'results':
                             status.textContent = '';
-                            renderResults(message.data);
+                            renderResults(message.data, message.append);
                             break;
                         case 'error':
                             status.textContent = 'Error: ' + message.message;
@@ -169,9 +222,15 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     }
                 });
 
-                function renderResults(data) {
+                function renderResults(data, append) {
+                    if (!append) {
+                        resultsList.innerHTML = '';
+                    }
+
                     if (!data || data.length === 0) {
-                        status.textContent = 'No results found.';
+                        if (!append && resultsList.children.length === 0) {
+                            status.textContent = 'No results found.';
+                        }
                         return;
                     }
                     
@@ -181,6 +240,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                         
                         const parentInfo = item.PARENT ? \`Parent: \${item.PARENT}\` : '';
                         const schemaInfo = item.SCHEMA ? \`Schema: \${item.SCHEMA}\` : '';
+                        const databaseInfo = item.DATABASE ? \`Database: \${item.DATABASE}\` : '';
                         const description = item.DESCRIPTION && item.DESCRIPTION.trim() ? item.DESCRIPTION : '';
                         
                         // Add match type indicator
@@ -194,6 +254,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                                 <span class="type-badge">\${item.TYPE}</span>
                             </div>
                             <div class="item-details">
+                                <span>\${databaseInfo}</span>
                                 <span>\${schemaInfo}</span>
                                 <span>\${parentInfo}</span>
                                 \${matchTypeInfo ? \`<span style="font-style: italic; color: var(--vscode-descriptionForeground);">\${matchTypeInfo}</span>\` : ''}
@@ -207,6 +268,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                                 type: 'navigate', 
                                 name: item.NAME,
                                 schema: item.SCHEMA,
+                                database: item.DATABASE,
                                 objType: item.TYPE,
                                 parent: item.PARENT
                             });

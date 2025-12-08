@@ -318,6 +318,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 <button onclick="selectAll()" title="Select all rows">☑️ Select All</button>
                 <button onclick="copySelection(false)" title="Copy selected cells to clipboard">📋 Copy</button>
                 <button onclick="copySelection(true)" title="Copy selected cells with headers">📋 Copy w/ Headers</button>
+                <button onclick="clearAllFilters()" title="Clear all column filters">🚫 Clear Filters</button>
                 <input type="text" id="globalFilter" placeholder="Filter..." onkeyup="onFilterChanged()" style="background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px;">
                 <span id="rowCountInfo" style="margin-left: auto; font-size: 12px; opacity: 0.8;"></span>
             </div>

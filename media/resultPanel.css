@@ -598,6 +598,7 @@ tfoot {
     opacity: 1;
     color: var(--vscode-button-foreground);
 }
+
 /* Result Set Tabs */
 .result-set-tabs {
     display: flex;
@@ -628,4 +629,349 @@ tfoot {
     background-color: var(--vscode-tab-activeBackground);
     color: var(--vscode-tab-activeForeground);
     font-weight: 600;
+}
+
+/* ========================================
+   Advanced Column Filter Dropdown Styles
+   ======================================== */
+
+.column-filter-dropdown {
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+}
+
+/* Filter Tabs */
+.filter-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    background-color: var(--vscode-editorGroupHeader-tabsBackground);
+}
+
+.filter-tab {
+    padding: 8px 16px;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: var(--vscode-tab-inactiveForeground);
+    font-size: 12px;
+    font-family: var(--vscode-font-family);
+    transition: color 0.1s, background-color 0.1s;
+    user-select: none;
+}
+
+.filter-tab:hover {
+    background-color: var(--vscode-tab-hoverBackground);
+    color: var(--vscode-tab-activeForeground);
+}
+
+.filter-tab.active {
+    color: var(--vscode-tab-activeForeground);
+    background-color: var(--vscode-tab-activeBackground);
+    border-bottom: 2px solid var(--vscode-focusBorder);
+    font-weight: 600;
+}
+
+/* Tab Content */
+.filter-tab-content {
+    display: none;
+    padding: 12px;
+    overflow-y: auto;
+    max-height: calc(100% - 100px);
+    /* Leave room for tabs and action buttons */
+    flex: 1;
+}
+
+.filter-tab-content.active {
+    display: block;
+}
+
+/* Condition Builder */
+.filter-condition {
+    margin-bottom: 12px;
+    padding: 10px;
+    background-color: var(--vscode-editor-background);
+    border-radius: 4px;
+    border: 1px solid var(--vscode-panel-border);
+}
+
+.filter-condition-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.filter-condition-row:last-child {
+    margin-bottom: 0;
+}
+
+.filter-operator-select,
+.filter-type-dropdown {
+    padding: 5px 8px;
+    font-size: 12px;
+    background-color: var(--vscode-dropdown-background);
+    color: var(--vscode-dropdown-foreground);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 3px;
+    cursor: pointer;
+    min-width: 140px;
+}
+
+.filter-operator-select:focus,
+.filter-type-dropdown:focus {
+    outline: none;
+    border-color: var(--vscode-focusBorder);
+}
+
+.filter-value-input {
+    flex: 1;
+    padding: 5px 8px;
+    font-size: 12px;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 3px;
+    min-width: 80px;
+}
+
+.filter-value-input:focus {
+    outline: none;
+    border-color: var(--vscode-focusBorder);
+}
+
+.filter-value-input::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+}
+
+.filter-value-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* AND/OR Toggle */
+.filter-logic-toggle {
+    display: flex;
+    gap: 4px;
+    margin: 8px 0;
+    justify-content: center;
+}
+
+.filter-logic-btn {
+    padding: 4px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--vscode-button-border, transparent);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.1s;
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+}
+
+.filter-logic-btn:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.filter-logic-btn.active {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+}
+
+/* Values List with Counts */
+.filter-values-container {
+    max-height: 250px;
+    overflow-y: auto;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 3px;
+    background-color: var(--vscode-editor-background);
+}
+
+.filter-value-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: background-color 0.1s;
+    border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.filter-value-item:last-child {
+    border-bottom: none;
+}
+
+.filter-value-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.filter-value-item input[type="checkbox"] {
+    margin-right: 10px;
+    accent-color: var(--vscode-focusBorder);
+}
+
+.filter-value-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.filter-value-count {
+    font-size: 11px;
+    margin-left: 8px;
+    padding: 2px 6px;
+    background-color: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    border-radius: 10px;
+}
+
+/* Quick Filters */
+.quick-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.quick-filter-btn {
+    padding: 4px 10px;
+    font-size: 11px;
+    border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+    border-radius: 12px;
+    cursor: pointer;
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    transition: all 0.1s;
+}
+
+.quick-filter-btn:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.quick-filter-btn.active {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+}
+
+/* Filter Search Box */
+.filter-search-wrapper {
+    position: relative;
+    margin-bottom: 10px;
+}
+
+.filter-search-input {
+    width: 100%;
+    padding: 8px 10px 8px 30px;
+    font-size: 12px;
+    background-color: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    border-radius: 3px;
+    box-sizing: border-box;
+}
+
+.filter-search-input:focus {
+    outline: none;
+    border-color: var(--vscode-focusBorder);
+}
+
+.filter-search-icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--vscode-input-placeholderForeground);
+    font-size: 12px;
+}
+
+/* Filter Actions - Sticky at bottom */
+.filter-actions {
+    display: flex;
+    gap: 8px;
+    padding: 12px;
+    border-top: 1px solid var(--vscode-panel-border);
+    background-color: var(--vscode-dropdown-background);
+    flex-shrink: 0;
+}
+
+.filter-actions button {
+    flex: 1;
+}
+
+/* Select All / Clear Buttons */
+.filter-selection-buttons {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.filter-selection-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+    border: 1px solid var(--vscode-panel-border);
+    border-radius: 3px;
+    cursor: pointer;
+    background-color: transparent;
+    color: var(--vscode-foreground);
+    transition: all 0.1s;
+}
+
+.filter-selection-btn:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+/* Between inputs container */
+.filter-between-inputs {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex: 1;
+}
+
+.filter-between-inputs .filter-value-input {
+    flex: 1;
+}
+
+.filter-between-separator {
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+}
+
+/* Add condition button */
+.add-condition-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 10px;
+    font-size: 11px;
+    border: 1px dashed var(--vscode-panel-border);
+    border-radius: 3px;
+    cursor: pointer;
+    background-color: transparent;
+    color: var(--vscode-descriptionForeground);
+    transition: all 0.1s;
+    width: 100%;
+    justify-content: center;
+}
+
+.add-condition-btn:hover {
+    background-color: var(--vscode-list-hoverBackground);
+    border-color: var(--vscode-focusBorder);
+    color: var(--vscode-foreground);
+}
+
+/* Remove condition button */
+.remove-condition-btn {
+    padding: 2px 6px;
+    font-size: 14px;
+    border: none;
+    background: transparent;
+    color: var(--vscode-descriptionForeground);
+    cursor: pointer;
+    border-radius: 3px;
+    line-height: 1;
+}
+
+.remove-condition-btn:hover {
+    background-color: var(--vscode-errorBackground, rgba(255, 0, 0, 0.1));
+    color: var(--vscode-errorForeground);
 }

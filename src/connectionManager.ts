@@ -36,6 +36,11 @@ export class ConnectionManager {
         return `DRIVER={NetezzaSQL};SERVER=${details.host};PORT=${details.port};DATABASE=${details.database};UID=${details.user};PWD=${details.password};`;
     }
 
+    async getCurrentDatabase(): Promise<string | null> {
+        const details = await this.getConnection();
+        return details?.database || null;
+    }
+
     setKeepConnectionOpen(keepOpen: boolean) {
         this._keepConnectionOpen = keepOpen;
         if (!keepOpen) {

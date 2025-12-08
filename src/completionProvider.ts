@@ -1,15 +1,11 @@
 import * as vscode from 'vscode';
 import { runQuery } from './queryRunner';
+import { MetadataCache } from './metadataCache';
 
 export class SqlCompletionItemProvider implements vscode.CompletionItemProvider {
 
-    private dbCache: vscode.CompletionItem[] | undefined;
-    private schemaCache: Map<string, vscode.CompletionItem[]> = new Map();
-    private tableCache: Map<string, vscode.CompletionItem[]> = new Map(); // Key: "DB.SCHEMA" or "DB"
-    private columnCache: Map<string, vscode.CompletionItem[]> = new Map(); // Key: "DB.SCHEMA.TABLE" or "DB..TABLE"
-    private tableIdMap: Map<string, number> = new Map(); // Key: "DB.SCHEMA.TABLE" -> OBJID
-
-    constructor(private context: vscode.ExtensionContext) { }
+    constructor(private context: vscode.ExtensionContext, private metadataCache: MetadataCache) {
+    }
 
     public async provideCompletionItems(
         document: vscode.TextDocument,
@@ -27,9 +23,12 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const linePrefix = document.lineAt(position).text.substr(0, position.character);
         const upperPrefix = linePrefix.toUpperCase();
 
+        // Get previous line for multi-line pattern support
+        const prevLine = position.line > 0 ? document.lineAt(position.line - 1).text : '';
+        const prevLineUpper = prevLine.toUpperCase();
 
         // 1. Database Suggestion
-        // Trigger: "FROM " or "JOIN " (with optional whitespace)
+        // Trigger: "FROM " or "JOIN " (with optional whitespace/newlines)
         if (/(FROM|JOIN)\s+$/.test(upperPrefix)) {
             const dbs = await this.getDatabases();
             // Also suggest local definitions (Temp Tables / CTEs) here as they can be used in FROM/JOIN
@@ -40,14 +39,32 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             });
             return [...localItems, ...dbs];
         }
+        // Check if FROM/JOIN is on previous line and current line is at start or typing identifier (not a dot pattern)
+        if (/(?:FROM|JOIN)\s*$/i.test(prevLine)) {
+            // Current line should be: empty, whitespace only, or partial identifier without dots
+            if (/^\s*[a-zA-Z0-9_]*$/.test(linePrefix)) {
+                const dbs = await this.getDatabases();
+                const localItems = localDefs.map(def => {
+                    const item = new vscode.CompletionItem(def.name, vscode.CompletionItemKind.Class);
+                    item.detail = def.type;
+                    return item;
+                });
+                return [...localItems, ...dbs];
+            }
+        }
 
         // 2. Schema Suggestion
-        // Trigger: "FROM DB." or "FROM DB. " (with possible trailing space)
+        // Trigger: "FROM DB." or "FROM DB. " (with possible trailing space or newline)
         const dbMatch = linePrefix.match(/(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)\.\s*$/i);
         if (dbMatch) {
             const dbName = dbMatch[1];
-            // Check if dbName is actually a local definition (unlikely for schema trigger, but possible if user types CTE.)
-            // But CTEs don't have schemas. So we proceed with DB lookup.
+            const items = await this.getSchemas(dbName);
+            return new vscode.CompletionList(items, false);
+        }
+        // Check for DB. on current line with FROM/JOIN on previous line
+        const dbMatchCurrent = linePrefix.match(/^\s*([a-zA-Z0-9_]+)\.\s*$/i);
+        if (dbMatchCurrent && /(?:FROM|JOIN)\s*$/i.test(prevLine)) {
+            const dbName = dbMatchCurrent[1];
             const items = await this.getSchemas(dbName);
             return new vscode.CompletionList(items, false);
         }
@@ -60,12 +77,25 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             const schemaName = schemaMatch[2];
             return this.getTables(dbName, schemaName);
         }
+        // Check for DB.SCHEMA. on current line with FROM/JOIN on previous line
+        const schemaMatchCurrent = linePrefix.match(/^\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\.\s*$/i);
+        if (schemaMatchCurrent && /(?:FROM|JOIN)\s*$/i.test(prevLine)) {
+            const dbName = schemaMatchCurrent[1];
+            const schemaName = schemaMatchCurrent[2];
+            return this.getTables(dbName, schemaName);
+        }
 
         // 4. Table Suggestion (Double dot / No Schema)
         // Trigger: "FROM DB.."
         const doubleDotMatch = linePrefix.match(/(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)\.\.$/i);
         if (doubleDotMatch) {
             const dbName = doubleDotMatch[1];
+            return this.getTables(dbName, undefined);
+        }
+        // Check for DB.. on current line with FROM/JOIN on previous line
+        const doubleDotMatchCurrent = linePrefix.match(/^\s*([a-zA-Z0-9_]+)\.\.\s*$/i);
+        if (doubleDotMatchCurrent && /(?:FROM|JOIN)\s*$/i.test(prevLine)) {
+            const dbName = doubleDotMatchCurrent[1];
             return this.getTables(dbName, undefined);
         }
 
@@ -347,7 +377,15 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
     }
 
     private async getDatabases(): Promise<vscode.CompletionItem[]> {
-        if (this.dbCache) return this.dbCache;
+        const cached = this.metadataCache.getDatabases();
+        if (cached) {
+            return cached.map((item: any) => {
+                if (item instanceof vscode.CompletionItem) return item;
+                const ci = new vscode.CompletionItem(item.label, item.kind);
+                ci.detail = item.detail;
+                return ci;
+            });
+        }
 
         try {
             const query = "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE";
@@ -355,12 +393,15 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             if (!resultJson) return [];
 
             const results = JSON.parse(resultJson);
-            this.dbCache = results.map((row: any) => {
+            const items = results.map((row: any) => {
                 const item = new vscode.CompletionItem(row.DATABASE, vscode.CompletionItemKind.Module);
                 item.detail = 'Database';
                 return item;
             });
-            return this.dbCache!;
+
+            this.metadataCache.setDatabases(items);
+
+            return items;
         } catch (e) {
             console.error(e);
             return [];
@@ -368,14 +409,22 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
     }
 
     private async getSchemas(dbName: string): Promise<vscode.CompletionItem[]> {
-        if (this.schemaCache.has(dbName)) {
-            return this.schemaCache.get(dbName)!;
+        const cached = this.metadataCache.getSchemas(dbName);
+        if (cached) {
+            return cached.map((item: any) => {
+                if (item instanceof vscode.CompletionItem) return item;
+                const ci = new vscode.CompletionItem(item.label, item.kind);
+                ci.detail = item.detail;
+                ci.insertText = item.insertText;
+                ci.sortText = item.sortText;
+                ci.filterText = item.filterText;
+                return ci;
+            });
         }
 
+        const statusBarDisposable = vscode.window.setStatusBarMessage(`Fetching schemas for ${dbName}...`);
         try {
-            // Netezza schemas are often just owners or specific schema objects. 
-            // Querying _V_OBJECT_DATA for distinct schemas in the DB.
-            const query = `SELECT DISTINCT SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE SCHEMA IS NOT NULL ORDER BY SCHEMA LIMIT 500`;
+            const query = `SELECT SCHEMA FROM ${dbName}.._V_SCHEMA ORDER BY SCHEMA`;
             const resultJson = await runQuery(this.context, query, true);
             if (!resultJson) {
                 return [];
@@ -383,7 +432,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
 
             const results = JSON.parse(resultJson);
             const items = results
-                .filter((row: any) => row.SCHEMA != null && row.SCHEMA !== '') // Filter out null/empty
+                .filter((row: any) => row.SCHEMA != null && row.SCHEMA !== '')
                 .map((row: any) => {
                     const schemaName = row.SCHEMA;
                     const item = new vscode.CompletionItem(schemaName, vscode.CompletionItemKind.Folder);
@@ -393,90 +442,110 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                     item.filterText = schemaName;
                     return item;
                 });
-            this.schemaCache.set(dbName, items);
+
+            this.metadataCache.setSchemas(dbName, items);
+
             return items;
         } catch (e) {
             console.error('[SqlCompletion] Error in getSchemas:', e);
             return [];
+        } finally {
+            statusBarDisposable.dispose();
         }
     }
 
     private async getTables(dbName: string, schemaName?: string): Promise<vscode.CompletionItem[]> {
         const cacheKey = schemaName ? `${dbName}.${schemaName}` : `${dbName}..`;
-        if (this.tableCache.has(cacheKey)) return this.tableCache.get(cacheKey)!;
+        const cached = this.metadataCache.getTables(cacheKey);
+        if (cached) {
+            return cached.map((item: any) => {
+                if (item instanceof vscode.CompletionItem) return item;
+                const ci = new vscode.CompletionItem(item.label, item.kind);
+                ci.detail = item.detail;
+                ci.sortText = item.sortText;
+                return ci;
+            });
+        }
+
+        const statusBarMessage = schemaName
+            ? `Fetching tables for ${dbName}.${schemaName}...`
+            : `Fetching tables for ${dbName}...`;
+        const statusBarDisposable = vscode.window.setStatusBarMessage(statusBarMessage);
 
         try {
             let query = "";
             if (schemaName) {
-                query = `SELECT OBJNAME, OBJID FROM ${dbName}.._V_OBJECT_DATA WHERE SCHEMA='${schemaName}' AND OBJTYPE='TABLE' ORDER BY OBJNAME LIMIT 1000`;
+                query = `SELECT OBJNAME, OBJID FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND UPPER(SCHEMA) = UPPER('${schemaName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
             } else {
-                // No schema specified (double dot), fetch all tables in DB or default schema?
-                // User said "DATABASE..TABLE", usually means skipping schema (default) or searching all.
-                // Let's fetch all for now, or maybe limit to 'ADMIN' if it's too many.
-                query = `SELECT OBJNAME, OBJID, SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE OBJTYPE='TABLE' ORDER BY OBJNAME LIMIT 1000`;
+                query = `SELECT OBJNAME, OBJID, SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
             }
 
             const resultJson = await runQuery(this.context, query, true);
             if (!resultJson) return [];
 
             const results = JSON.parse(resultJson);
+
+            const idMapForKey = new Map<string, number>();
+
             const items = results.map((row: any) => {
                 const item = new vscode.CompletionItem(row.OBJNAME, vscode.CompletionItemKind.Class);
                 item.detail = schemaName ? 'Table' : `Table (${row.SCHEMA})`;
-                // Store ID for column lookup
+                item.sortText = row.OBJNAME;
                 const fullKey = schemaName ? `${dbName}.${schemaName}.${row.OBJNAME}` : `${dbName}..${row.OBJNAME}`;
-                // Also store with explicit schema if we got it from the "all" query
+                idMapForKey.set(fullKey, row.OBJID);
                 if (!schemaName && row.SCHEMA) {
-                    this.tableIdMap.set(`${dbName}.${row.SCHEMA}.${row.OBJNAME}`, row.OBJID);
+                    idMapForKey.set(`${dbName}.${row.SCHEMA}.${row.OBJNAME}`, row.OBJID);
                 }
-                this.tableIdMap.set(fullKey, row.OBJID);
 
                 return item;
             });
 
-            this.tableCache.set(cacheKey, items);
+            this.metadataCache.setTables(cacheKey, items, idMapForKey);
+
             return items;
         } catch (e) {
             console.error(e);
             return [];
+        } finally {
+            statusBarDisposable.dispose();
         }
     }
 
     private async getColumns(dbName: string | undefined, schemaName: string | undefined, tableName: string): Promise<vscode.CompletionItem[]> {
-        // Try to find the OBJID
-        // We might need to resolve schema if it's undefined (double dot case)
-
         let objId: number | undefined;
         const dbPrefix = dbName ? `${dbName}..` : '';
 
-        // Try exact match first
-        if (schemaName && dbName) {
-            objId = this.tableIdMap.get(`${dbName}.${schemaName}.${tableName}`);
-        } else if (dbName) {
-            objId = this.tableIdMap.get(`${dbName}..${tableName}`);
-        }
-        // If dbName is undefined, we can't easily look up in tableIdMap unless we stored it without DB prefix (which we didn't)
+        const lookupKey = schemaName && dbName ? `${dbName}.${schemaName}.${tableName}` : (dbName ? `${dbName}..${tableName}` : undefined);
 
-        // If we don't have ID cached, we might need to fetch it (or fetch columns by name if possible)
-        // Fetching by name is safer if we missed the ID cache population
+        if (lookupKey) {
+            objId = this.metadataCache.findTableId(lookupKey);
+        }
 
         const cacheKey = `${dbName || 'CURRENT'}.${schemaName || ''}.${tableName}`;
-        if (this.columnCache.has(cacheKey)) return this.columnCache.get(cacheKey)!;
+        const cached = this.metadataCache.getColumns(cacheKey);
+        if (cached) {
+            return cached.map((item: any) => {
+                if (item instanceof vscode.CompletionItem) return item;
+                const ci = new vscode.CompletionItem(item.label, item.kind);
+                ci.detail = item.detail;
+                return ci;
+            });
+        }
+
+        const statusMsg = vscode.window.setStatusBarMessage(`Fetching columns for ${tableName}...`);
 
         try {
             let query = "";
             if (objId) {
                 query = `SELECT ATTNAME, FORMAT_TYPE FROM ${dbPrefix}_V_RELATION_COLUMN WHERE OBJID = ${objId} ORDER BY ATTNUM`;
             } else {
-                // Fallback: Query by name. This is tricky with double dot if table names are not unique across schemas.
-                // Assuming unique or picking first for now.
-                const schemaClause = schemaName ? `AND SCHEMA='${schemaName}'` : '';
-                // We need to join with _V_OBJECT_DATA to filter by table name
+                const schemaClause = schemaName ? `AND UPPER(SCHEMA) = UPPER('${schemaName}')` : '';
+                const dbClause = dbName ? `AND UPPER(DBNAME) = UPPER('${dbName}')` : '';
                 query = `
                     SELECT C.ATTNAME, C.FORMAT_TYPE 
                     FROM ${dbPrefix}_V_RELATION_COLUMN C
                     JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                    WHERE O.OBJNAME = '${tableName}' ${schemaClause}
+                    WHERE UPPER(O.OBJNAME) = UPPER('${tableName}') ${schemaClause} ${dbClause}
                     ORDER BY C.ATTNUM
                 `;
             }
@@ -491,41 +560,52 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 return item;
             });
 
-            this.columnCache.set(cacheKey, items);
+            this.metadataCache.setColumns(cacheKey, items);
+
             return items;
         } catch (e) {
             console.error(e);
             return [];
+        } finally {
+            statusMsg.dispose();
         }
     }
 
-    private findAlias(text: string, alias: string): { db: string | undefined, schema: string | undefined, table: string } | undefined {
-        // Simple regex to find "DB.SCHEMA.TABLE AS ALIAS" or "DB..TABLE AS ALIAS"
-        // We scan the whole text. In a real parser we would respect scope, but for SQL script this is often enough.
+    private findAlias(text: string, alias: string): { db?: string, schema?: string, table: string } | null {
+        // "FROM db.schema.table alias"
+        // "JOIN table alias"
 
-        // Regex for: DB.SCHEMA.TABLE AS ALIAS
-        const regexFull = new RegExp(`([a-zA-Z0-9_]+)\\.([a-zA-Z0-9_]+)\\.([a-zA-Z0-9_]+)\\s+(?:AS\\s+)?${alias}\\b`, 'i');
-        const matchFull = text.match(regexFull);
-        if (matchFull) {
-            return { db: matchFull[1], schema: matchFull[2], table: matchFull[3] };
+        // Use global search to find all occurrences, then filter out keywords.
+        // We iterate to find a valid table reference that is NOT a keyword.
+        const aliasPattern = new RegExp(`([a-zA-Z0-9_\\.]+) (?:AS\\s+)?${alias}\\b`, 'gi');
+
+        const keywords = new Set([
+            'SELECT', 'WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT',
+            'ON', 'AND', 'OR', 'NOT', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+            'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'CROSS', 'FULL',
+            'UNION', 'EXCEPT', 'INTERSECT',
+            'FROM', 'UPDATE', 'DELETE', 'INSERT', 'INTO', 'VALUES', 'SET'
+        ]);
+
+        let match;
+        while ((match = aliasPattern.exec(text)) !== null) {
+            const tableRef = match[1];
+
+            // Check if tableRef is a keyword (false positive)
+            if (keywords.has(tableRef.toUpperCase())) {
+                continue;
+            }
+
+            // Valid candidate found
+            const parts = tableRef.split('.');
+            if (parts.length === 3) {
+                return { db: parts[0], schema: parts[1], table: parts[2] };
+            } else if (parts.length === 2) {
+                return { table: parts[1], schema: parts[0] };
+            } else {
+                return { table: parts[0] };
+            }
         }
-
-        // Regex for: DB..TABLE AS ALIAS
-        const regexDouble = new RegExp(`([a-zA-Z0-9_]+)\\.\\.([a-zA-Z0-9_]+)\\s+(?:AS\\s+)?${alias}\\b`, 'i');
-        const matchDouble = text.match(regexDouble);
-        if (matchDouble) {
-            return { db: matchDouble[1], schema: undefined, table: matchDouble[2] };
-        }
-
-        // Regex for: TABLE AS ALIAS (Simple name, likely CTE or Temp Table)
-        // We look for FROM/JOIN/COMMA before it to avoid matching column aliases in SELECT list.
-        const regexSimple = new RegExp(`(?:FROM|JOIN|,)\\s+([a-zA-Z0-9_]+)\\s+(?:AS\\s+)?${alias}\\b`, 'i');
-        const matchSimple = text.match(regexSimple);
-        if (matchSimple) {
-            return { db: undefined, schema: undefined, table: matchSimple[1] };
-        }
-
-        return undefined;
+        return null;
     }
-
 }

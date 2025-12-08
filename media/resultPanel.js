@@ -23,7 +23,7 @@ function initializeResultView(data, columns) {
         // Adapt to resultSets format
         window.resultSets = [{
             data: data,
-            columns: columns.map((c, i) => ({ name: c.header, index: i }))
+            columns: columns.map((c, i) => ({ name: c.header, index: i, accessorKey: c.accessorKey }))
         }];
         window.sources = ['Result'];
         window.activeSource = 'Result';
@@ -60,18 +60,54 @@ function renderResultSetTabs() {
     if (!container) return;
 
     container.innerHTML = '';
-    
-    if (!window.resultSets || window.resultSets.length <= 1) {
+
+    if (!window.resultSets || window.resultSets.length === 0) {
         container.style.display = 'none';
         return;
     }
 
     container.style.display = 'flex';
-    
+
     window.resultSets.forEach((rs, index) => {
         const tab = document.createElement('div');
         tab.className = 'result-set-tab' + (index === activeGridIndex ? ' active' : '');
-        tab.textContent = `Result ${index + 1}`;
+
+        // Tab Text
+        const textSpan = document.createElement('span');
+        textSpan.textContent = `Result ${index + 1}`;
+        tab.appendChild(textSpan);
+
+        // Pin Button
+        const pinSpan = document.createElement('span');
+        pinSpan.className = 'pin-icon codicon codicon-pin';
+        pinSpan.title = 'Pin this result';
+
+        // Check if this specific result (source + index) is pinned
+        const isPinned = window.pinnedResults && window.pinnedResults.some(p =>
+            p.sourceUri === window.activeSource && p.resultSetIndex === index
+        );
+
+        if (isPinned) {
+            pinSpan.classList.add('pinned');
+            pinSpan.title = 'Unpin this result';
+        } else {
+            pinSpan.innerHTML = '📌'; // Fallback if codicon font not loaded, will rely on CSS opacity for "unpinned" look
+            // But usually we want just the icon class. Let's use text content as backup
+        }
+        // Use text content for now as CSS handles the icon content or use an emoji if no font
+        pinSpan.textContent = '📌';
+
+        pinSpan.onclick = (e) => {
+            e.stopPropagation();
+            // Send toggle pin message
+            vscode.postMessage({
+                command: 'toggleResultPin',
+                sourceUri: window.activeSource,
+                resultSetIndex: index
+            });
+        };
+        tab.appendChild(pinSpan);
+
         tab.onclick = () => switchToResultSet(index);
         container.appendChild(tab);
     });
@@ -79,9 +115,9 @@ function renderResultSetTabs() {
 
 function switchToResultSet(index) {
     if (index < 0 || index >= grids.length) return;
-    
+
     activeGridIndex = index;
-    
+
     // Update tab styling
     const tabs = document.querySelectorAll('.result-set-tab');
     tabs.forEach((tab, i) => {
@@ -91,7 +127,7 @@ function switchToResultSet(index) {
             tab.classList.remove('active');
         }
     });
-    
+
     // Show/hide grids
     const gridWrappers = document.querySelectorAll('.grid-wrapper');
     gridWrappers.forEach((wrapper, i) => {
@@ -101,7 +137,7 @@ function switchToResultSet(index) {
             wrapper.style.display = 'none';
         }
     });
-    
+
     // Update row count for active grid
     if (grids[index] && grids[index].updateRowCount) {
         grids[index].updateRowCount();
@@ -258,36 +294,130 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
 
     // Prepare columns with unique values for filtering
     const columns = rs.columns.map((col, index) => {
+        // Determine the correct accessor key (for resultView.ts which uses column names as keys)
+        const accessorKey = col.accessorKey || String(index);
+
         // Get unique values for this column
         const uniqueValues = [...new Set(rs.data.map(row => {
-            const value = Array.isArray(row) ? row[index] : row[String(index)];
+            const value = Array.isArray(row) ? row[index] : (col.accessorKey ? row[col.accessorKey] : row[String(index)]);
             return value === null || value === undefined ? 'NULL' : String(value);
         }))].sort();
 
+        // Define accessor function variable to be used in both accessorFn and filterFn
+        // CRITICAL: Return empty string for null/undefined so TanStack Table infers string type
+        // This fixes global filtering when first row has NULL values
+        const accessorFn = (row) => {
+            if (!row) return '';
+            let value;
+            // Support both array-based data and object-based data with column names as keys
+            if (Array.isArray(row)) {
+                value = row[index];
+            } else if (col.accessorKey) {
+                value = row[col.accessorKey];
+            } else {
+                value = row[String(index)];
+            }
+            // Return empty string for null/undefined to ensure string type inference
+            return value === null || value === undefined ? '' : value;
+        };
+
         return {
             id: String(index),
-            accessorFn: (row) => {
-                if (!row) return null;
-                return Array.isArray(row) ? row[index] : row[String(index)];
-            },
+            accessorFn: accessorFn,
             header: col.name || `Col ${index}`,
             uniqueValues: uniqueValues,
             filterFn: (row, columnId, filterValue) => {
-                if (!filterValue || filterValue.length === 0) return true;
-                const cellValue = row.getValue(columnId);
-                const stringValue = cellValue === null || cellValue === undefined ? 'NULL' : String(cellValue);
-                return filterValue.includes(stringValue);
+                if (!filterValue) return true;
+
+                // Use accessorFn directly on original data
+                const cellValue = accessorFn(row.original);
+                const stringValue = cellValue === null || cellValue === undefined || cellValue === '' ? 'NULL' : String(cellValue);
+                const numericValue = parseFloat(String(cellValue).replace(/,/g, ''));
+
+                // Handle condition-based filters
+                if (filterValue._isConditionFilter) {
+                    const { conditions, logic } = filterValue;
+
+                    const evaluateCondition = (cond) => {
+                        const condValue = cond.value;
+                        const condValue2 = cond.value2;
+                        const isNull = stringValue === 'NULL';
+
+                        switch (cond.type) {
+                            case 'contains':
+                                return !isNull && stringValue.toLowerCase().includes(condValue.toLowerCase());
+                            case 'notContains':
+                                return isNull || !stringValue.toLowerCase().includes(condValue.toLowerCase());
+                            case 'equals':
+                                if (!isNaN(numericValue) && !isNaN(parseFloat(condValue))) {
+                                    return numericValue === parseFloat(condValue);
+                                }
+                                return stringValue.toLowerCase() === condValue.toLowerCase();
+                            case 'notEquals':
+                                if (!isNaN(numericValue) && !isNaN(parseFloat(condValue))) {
+                                    return numericValue !== parseFloat(condValue);
+                                }
+                                return stringValue.toLowerCase() !== condValue.toLowerCase();
+                            case 'startsWith':
+                                return !isNull && stringValue.toLowerCase().startsWith(condValue.toLowerCase());
+                            case 'endsWith':
+                                return !isNull && stringValue.toLowerCase().endsWith(condValue.toLowerCase());
+                            case 'isEmpty':
+                                return isNull;
+                            case 'isNotEmpty':
+                                return !isNull;
+                            case 'greaterThan':
+                                return !isNull && !isNaN(numericValue) && numericValue > parseFloat(condValue);
+                            case 'greaterThanOrEqual':
+                                return !isNull && !isNaN(numericValue) && numericValue >= parseFloat(condValue);
+                            case 'lessThan':
+                                return !isNull && !isNaN(numericValue) && numericValue < parseFloat(condValue);
+                            case 'lessThanOrEqual':
+                                return !isNull && !isNaN(numericValue) && numericValue <= parseFloat(condValue);
+                            case 'between':
+                                const min = parseFloat(condValue);
+                                const max = parseFloat(condValue2);
+                                return !isNull && !isNaN(numericValue) && numericValue >= min && numericValue <= max;
+                            default:
+                                return true;
+                        }
+                    };
+
+                    if (logic === 'and') {
+                        return conditions.every(evaluateCondition);
+                    } else {
+                        return conditions.some(evaluateCondition);
+                    }
+                }
+
+                // Handle value array filters (checkbox list)
+                if (Array.isArray(filterValue)) {
+                    if (filterValue.length === 0) return true;
+                    return filterValue.includes(stringValue);
+                }
+
+                return true;
             }
         };
     });
 
-    // State
-    let sorting = [];
-    let globalFilter = '';
-    let grouping = [];
-    let expanded = {};
-    let columnOrder = columns.map(c => c.id);
-    let columnFilters = [];
+    // State - Try to restore from saved state
+    const savedState = getSavedStateFor(rsIndex);
+
+    // Restore custom states
+    if (savedState) {
+        if (savedState.customColumnFilters) columnFilterStates[rsIndex] = savedState.customColumnFilters;
+        if (savedState.aggregations) aggregationStates[rsIndex] = savedState.aggregations;
+    }
+
+    let sorting = savedState?.sorting || [];
+    let globalFilter = savedState?.globalFilter || '';
+    let grouping = savedState?.grouping || [];
+    let expanded = savedState?.expanded || {};
+    let columnOrder = savedState?.columnOrder || columns.map(c => c.id);
+    let columnFilters = savedState?.columnFilters || [];
+    let columnPinning = savedState?.columnPinning || { left: [], right: [] };
+    let columnVisibility = savedState?.columnVisibility || {};
 
     // Create TanStack Table
     const tanTable = createTable({
@@ -300,32 +430,61 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             get expanded() { return expanded; },
             get columnOrder() { return columnOrder; },
             get columnFilters() { return columnFilters; },
-            columnPinning: { left: [], right: [] }
+            get columnPinning() { return columnPinning; },
+            get columnVisibility() { return columnVisibility; }
         },
         onSortingChange: (updater) => {
             sorting = typeof updater === 'function' ? updater(sorting) : updater;
             scheduleRender();
+            savePinnedState();
         },
         onGlobalFilterChange: (updater) => {
             globalFilter = typeof updater === 'function' ? updater(globalFilter) : updater;
             scheduleRender();
+            savePinnedState();
         },
         onColumnFiltersChange: (updater) => {
             columnFilters = typeof updater === 'function' ? updater(columnFilters) : updater;
             scheduleRender();
+            savePinnedState();
         },
         onGroupingChange: (updater) => {
             grouping = typeof updater === 'function' ? updater(grouping) : updater;
             scheduleRender();
             renderGrouping();
+            savePinnedState();
         },
         onExpandedChange: (updater) => {
             expanded = typeof updater === 'function' ? updater(expanded) : updater;
             scheduleRender();
+            savePinnedState();
         },
         onColumnOrderChange: (updater) => {
             columnOrder = typeof updater === 'function' ? updater(columnOrder) : updater;
             scheduleRender();
+            savePinnedState();
+        },
+        // We need to implement connection for these handlers too if we want them persisted
+        onColumnPinningChange: (updater) => {
+            columnPinning = typeof updater === 'function' ? updater(columnPinning) : updater;
+            scheduleRender();
+            savePinnedState();
+        },
+        onColumnVisibilityChange: (updater) => {
+            columnVisibility = typeof updater === 'function' ? updater(columnVisibility) : updater;
+            scheduleRender();
+            savePinnedState();
+        },
+        globalFilterFn: (row, columnId, filterValue) => {
+            if (!filterValue || filterValue === '') return true;
+
+            const needle = String(filterValue).toLowerCase();
+
+            return columns.some(col => {
+                const cellValue = col.accessorFn(row.original);
+                const haystack = cellValue === '' ? 'NULL' : String(cellValue);
+                return haystack.toLowerCase().includes(needle);
+            });
         },
         getCoreRowModel: getCoreRowModel(),
         getSortedRowModel: getSortedRowModel(),
@@ -402,7 +561,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
 
             // Add drag & drop event handlers for reordering
             chip.ondragstart = (e) => {
-                console.log('Starting drag of chip:', colId);
+
                 e.dataTransfer.setData('text/plain', colId);
                 e.dataTransfer.setData('type', 'groupChip');
                 e.dataTransfer.effectAllowed = 'move';
@@ -417,8 +576,6 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             chip.ondragover = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-
-                console.log('Drag over chip:', colId, 'Global state:', globalDragState);
 
                 // Only allow drop if we're dragging a group chip and it's not this chip
                 if (globalDragState.dragType === 'groupChip' && globalDragState.draggedItem !== colId) {
@@ -442,7 +599,6 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             chip.ondrop = (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                console.log('Drop on chip:', colId, 'Dragged item:', globalDragState.draggedItem);
                 chip.classList.remove('drag-over');
 
                 // Handle the drop specifically for this chip
@@ -454,14 +610,11 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
                         const fromIndex = newGrouping.indexOf(draggedColId);
                         const toIndex = newGrouping.indexOf(colId);
 
-                        console.log('Reordering from', fromIndex, 'to', toIndex, 'Current:', currentGrouping);
-
                         if (fromIndex !== -1 && toIndex !== -1 && fromIndex !== toIndex) {
                             // Remove from old position
                             newGrouping.splice(fromIndex, 1);
                             // Insert at target position
                             newGrouping.splice(toIndex, 0, draggedColId);
-                            console.log('New grouping order:', newGrouping);
                             grids[activeGridIndex].tanTable.setGrouping(newGrouping);
                         }
                     }
@@ -470,7 +623,6 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
 
             chip.ondragend = () => {
                 chip.classList.remove('dragging');
-                console.log('Drag ended for chip:', colId);
 
                 // Clear global drag state
                 globalDragState.isDragging = false;
@@ -651,7 +803,8 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
                 td.appendChild(indent);
             }
 
-            if (value === null || value === undefined) {
+            // Check for null, undefined, or empty string (accessorFn returns '' for nulls)
+            if (value === null || value === undefined || value === '') {
                 const nullSpan = document.createElement('span');
                 nullSpan.className = 'null-value';
                 nullSpan.textContent = 'NULL';
@@ -693,7 +846,57 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     render();
 
     // Setup cell selection events for rectangular selection with mouse
-    setupCellSelectionEvents(wrapper, tanTable, columns.length);
+    const selectionHandlers = setupCellSelectionEvents(wrapper, tanTable, columns.length);
+    Object.assign(gridObj, selectionHandlers);
+}
+
+// State Management
+function savePinnedState() {
+    if (!window.pinnedResults || window.pinnedResults.length === 0) {
+        vscode.setState({}); // Clear state if no pins
+        return;
+    }
+
+    const stateToSave = {};
+    window.pinnedResults.forEach(pin => {
+        if (pin.sourceUri !== window.activeSource) return;
+
+        const rsIndex = pin.resultSetIndex;
+        if (rsIndex >= 0 && rsIndex < grids.length && grids[rsIndex]) {
+            const grid = grids[rsIndex];
+            const tableState = grid.tanTable.getState();
+            stateToSave[pin.id] = {
+                sorting: tableState.sorting,
+                grouping: tableState.grouping,
+                expanded: tableState.expanded,
+                columnOrder: tableState.columnOrder,
+                columnFilters: tableState.columnFilters,
+                columnPinning: tableState.columnPinning,
+                columnVisibility: tableState.columnVisibility,
+                globalFilter: tableState.globalFilter,
+                // Custom states
+                customColumnFilters: columnFilterStates[rsIndex],
+                aggregations: aggregationStates[rsIndex]
+            };
+        }
+    });
+
+    vscode.setState(stateToSave);
+}
+
+// Helper to get saved state for a result set
+function getSavedStateFor(rsIndex) {
+    if (!window.pinnedResults) return null;
+
+    // Find if this rsIndex corresponds to a pinned result
+    const pin = window.pinnedResults.find(p =>
+        p.sourceUri === window.activeSource && p.resultSetIndex === rsIndex
+    );
+
+    if (!pin) return null;
+
+    const savedState = vscode.getState();
+    return savedState ? savedState[pin.id] : null;
 }
 
 // Function to create header cell with Excel-like filter dropdown
@@ -737,12 +940,20 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
     filterBtn.style.opacity = '0.6';
     filterBtn.style.userSelect = 'none';
 
-    // Check if column has active filter
+    // Check if column has active filter (array or condition-based)
     const currentFilter = table.getColumn(header.column.id).getFilterValue();
-    if (currentFilter && currentFilter.length > 0) {
+    const hasActiveFilter = currentFilter && (
+        (Array.isArray(currentFilter) && currentFilter.length > 0) ||
+        (currentFilter._isConditionFilter && currentFilter.conditions && currentFilter.conditions.length > 0)
+    );
+
+    if (hasActiveFilter) {
         filterBtn.style.color = 'var(--vscode-charts-blue)';
         filterBtn.style.opacity = '1';
         filterBtn.innerHTML = '🔽';
+        // Also style the header cell to indicate active filter
+        th.style.backgroundColor = 'var(--vscode-list-activeSelectionBackground)';
+        th.style.borderBottom = '2px solid var(--vscode-charts-blue)';
     }
 
     filterBtn.onclick = (e) => {
@@ -777,8 +988,10 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
 
     // Drag and drop for column reordering and grouping
     th.ondragstart = (e) => {
-        e.dataTransfer.setData('text/plain', header.column.id);
+        // Set column name as text for external drops (e.g., to editor)
+        e.dataTransfer.setData('text/plain', header.column.columnDef.header);
         e.dataTransfer.setData('type', 'column');
+        e.dataTransfer.setData('columnId', header.column.id);
         e.dataTransfer.setData('columnName', header.column.columnDef.header);
         e.dataTransfer.effectAllowed = 'copyMove';
         th.classList.add('dragging');
@@ -805,10 +1018,11 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
 
         const type = e.dataTransfer.getData('type');
         if (type === 'column') {
-            const draggedColId = e.dataTransfer.getData('text/plain');
+            // Use columnId for internal reordering (text/plain now has column name for external drops)
+            const draggedColId = e.dataTransfer.getData('columnId');
             const targetColId = header.column.id;
 
-            if (draggedColId !== targetColId) {
+            if (draggedColId && draggedColId !== targetColId) {
                 const currentOrder = table.getState().columnOrder;
                 const newOrder = [...currentOrder];
                 const fromIndex = newOrder.indexOf(draggedColId);
@@ -836,7 +1050,7 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
     return th;
 }
 
-// Function to show column filter dropdown
+// Function to show advanced Excel-like column filter dropdown
 function showColumnFilterDropdown(column, table, anchorElement, rsIndex) {
     // Remove any existing dropdown
     const existingDropdown = document.querySelector('.column-filter-dropdown');
@@ -844,117 +1058,267 @@ function showColumnFilterDropdown(column, table, anchorElement, rsIndex) {
         existingDropdown.remove();
     }
 
-    // Get unique values for this column
+    // Get unique values for this column with counts
     const uniqueValues = column.columnDef.uniqueValues || [];
-    const currentFilter = column.getFilterValue() || [];
+    const currentFilter = column.getFilterValue();
+
+    // Calculate value counts from the original data
+    const valueCounts = new Map();
+    const allRows = table.getCoreRowModel().rows;
+    allRows.forEach(row => {
+        const cellValue = column.columnDef.accessorFn(row.original);
+        const stringValue = cellValue === null || cellValue === undefined || cellValue === '' ? 'NULL' : String(cellValue);
+        valueCounts.set(stringValue, (valueCounts.get(stringValue) || 0) + 1);
+    });
+
+    // Detect if column is numeric
+    const isNumericColumn = uniqueValues.some(v => {
+        if (v === 'NULL') return false;
+        const num = parseFloat(String(v).replace(/,/g, ''));
+        return !isNaN(num);
+    });
 
     // Create dropdown container
     const dropdown = document.createElement('div');
     dropdown.className = 'column-filter-dropdown';
-    dropdown.style.position = 'absolute';
-    dropdown.style.zIndex = '1000';
+    dropdown.style.position = 'fixed';
+    dropdown.style.zIndex = '10000';
     dropdown.style.backgroundColor = 'var(--vscode-dropdown-background)';
     dropdown.style.border = '1px solid var(--vscode-dropdown-border)';
-    dropdown.style.borderRadius = '3px';
-    dropdown.style.minWidth = '200px';
-    dropdown.style.maxHeight = '300px';
-    dropdown.style.overflow = 'auto';
-    dropdown.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)';
-    dropdown.style.fontFamily = 'var(--vscode-font-family)';
-    dropdown.style.fontSize = '13px';
+    dropdown.style.borderRadius = '4px';
+    dropdown.style.width = '320px';
+    dropdown.style.boxShadow = '0 8px 16px rgba(0,0,0,0.4)';
+    dropdown.style.display = 'flex';
+    dropdown.style.flexDirection = 'column';
 
     // Position dropdown below the filter button
     const rect = anchorElement.getBoundingClientRect();
-    dropdown.style.top = (rect.bottom + 5) + 'px';
-    dropdown.style.left = rect.left + 'px';
+    let top = rect.bottom + 5;
+    let left = rect.left;
 
-    // Header with search box and buttons
-    const header = document.createElement('div');
-    header.style.padding = '8px';
-    header.style.borderBottom = '1px solid var(--vscode-panel-border)';
-    header.style.display = 'flex';
-    header.style.flexDirection = 'column';
-    header.style.gap = '8px';
+    // Calculate available height
+    const availableHeightBelow = window.innerHeight - rect.bottom - 20;
+    const availableHeightAbove = rect.top - 20;
+    const desiredHeight = 400;
 
-    // Search box
+    let dropdownHeight;
+
+    // Ensure dropdown doesn't go off-screen horizontally
+    if (left + 320 > window.innerWidth) {
+        left = window.innerWidth - 330;
+    }
+    if (left < 10) left = 10;
+
+    // Decide whether to show above or below
+    if (availableHeightBelow >= desiredHeight) {
+        // Enough space below
+        dropdownHeight = Math.min(desiredHeight, availableHeightBelow);
+    } else if (availableHeightAbove > availableHeightBelow) {
+        // More space above, show above
+        dropdownHeight = Math.min(desiredHeight, availableHeightAbove);
+        top = rect.top - dropdownHeight - 5;
+    } else {
+        // Show below but constrained
+        dropdownHeight = Math.max(200, availableHeightBelow); // Minimum 200px
+    }
+
+    dropdown.style.top = Math.max(10, top) + 'px';
+    dropdown.style.left = left + 'px';
+    dropdown.style.maxHeight = dropdownHeight + 'px';
+
+    // ========== CREATE TABS ==========
+    const tabsContainer = document.createElement('div');
+    tabsContainer.className = 'filter-tabs';
+
+    const valuesTab = document.createElement('button');
+    valuesTab.className = 'filter-tab active';
+    valuesTab.textContent = '📋 Values';
+    valuesTab.dataset.tab = 'values';
+
+    const conditionsTab = document.createElement('button');
+    conditionsTab.className = 'filter-tab';
+    conditionsTab.textContent = '🔧 Conditions';
+    conditionsTab.dataset.tab = 'conditions';
+
+    tabsContainer.appendChild(valuesTab);
+    tabsContainer.appendChild(conditionsTab);
+    dropdown.appendChild(tabsContainer);
+
+    // ========== TAB CONTENT CONTAINERS ==========
+    const valuesContent = document.createElement('div');
+    valuesContent.className = 'filter-tab-content active';
+    valuesContent.dataset.tabContent = 'values';
+
+    const conditionsContent = document.createElement('div');
+    conditionsContent.className = 'filter-tab-content';
+    conditionsContent.dataset.tabContent = 'conditions';
+
+    // Tab switching logic
+    const switchTab = (tabName) => {
+        [valuesTab, conditionsTab].forEach(t => t.classList.remove('active'));
+        [valuesContent, conditionsContent].forEach(c => c.classList.remove('active'));
+
+        if (tabName === 'values') {
+            valuesTab.classList.add('active');
+            valuesContent.classList.add('active');
+        } else {
+            conditionsTab.classList.add('active');
+            conditionsContent.classList.add('active');
+        }
+    };
+
+    valuesTab.onclick = () => switchTab('values');
+    conditionsTab.onclick = () => switchTab('conditions');
+
+    // ========== VALUES TAB CONTENT ==========
+
+    // Quick filter buttons
+    const quickFilters = document.createElement('div');
+    quickFilters.className = 'quick-filters';
+
+    const blanksBtn = document.createElement('button');
+    blanksBtn.className = 'quick-filter-btn';
+    blanksBtn.textContent = 'Blanks';
+    blanksBtn.onclick = () => {
+        checkboxes.forEach((cb, val) => cb.checked = (val === 'NULL'));
+    };
+
+    const nonBlanksBtn = document.createElement('button');
+    nonBlanksBtn.className = 'quick-filter-btn';
+    nonBlanksBtn.textContent = 'Non-blanks';
+    nonBlanksBtn.onclick = () => {
+        checkboxes.forEach((cb, val) => cb.checked = (val !== 'NULL'));
+    };
+
+    quickFilters.appendChild(blanksBtn);
+    quickFilters.appendChild(nonBlanksBtn);
+
+    if (isNumericColumn) {
+        const top10Btn = document.createElement('button');
+        top10Btn.className = 'quick-filter-btn';
+        top10Btn.textContent = 'Top 10';
+        top10Btn.onclick = () => {
+            const numericValues = uniqueValues
+                .filter(v => v !== 'NULL')
+                .map(v => ({ val: v, num: parseFloat(String(v).replace(/,/g, '')) }))
+                .filter(x => !isNaN(x.num))
+                .sort((a, b) => b.num - a.num)
+                .slice(0, 10)
+                .map(x => x.val);
+            checkboxes.forEach((cb, val) => cb.checked = numericValues.includes(val));
+        };
+
+        const bottom10Btn = document.createElement('button');
+        bottom10Btn.className = 'quick-filter-btn';
+        bottom10Btn.textContent = 'Bottom 10';
+        bottom10Btn.onclick = () => {
+            const numericValues = uniqueValues
+                .filter(v => v !== 'NULL')
+                .map(v => ({ val: v, num: parseFloat(String(v).replace(/,/g, '')) }))
+                .filter(x => !isNaN(x.num))
+                .sort((a, b) => a.num - b.num)
+                .slice(0, 10)
+                .map(x => x.val);
+            checkboxes.forEach((cb, val) => cb.checked = numericValues.includes(val));
+        };
+
+        quickFilters.appendChild(top10Btn);
+        quickFilters.appendChild(bottom10Btn);
+    }
+
+    valuesContent.appendChild(quickFilters);
+
+    // Search box with icon
+    const searchWrapper = document.createElement('div');
+    searchWrapper.className = 'filter-search-wrapper';
+
+    const searchIcon = document.createElement('span');
+    searchIcon.className = 'filter-search-icon';
+    searchIcon.textContent = '🔍';
+
     const searchBox = document.createElement('input');
     searchBox.type = 'text';
-    searchBox.placeholder = 'Search...';
-    searchBox.style.width = '100%';
-    searchBox.style.padding = '4px';
-    searchBox.style.border = '1px solid var(--vscode-input-border)';
-    searchBox.style.backgroundColor = 'var(--vscode-input-background)';
-    searchBox.style.color = 'var(--vscode-input-foreground)';
+    searchBox.placeholder = 'Search values...';
+    searchBox.className = 'filter-search-input';
 
-    // Button row
-    const buttonRow = document.createElement('div');
-    buttonRow.style.display = 'flex';
-    buttonRow.style.gap = '4px';
+    searchWrapper.appendChild(searchIcon);
+    searchWrapper.appendChild(searchBox);
+    valuesContent.appendChild(searchWrapper);
+
+    // Selection buttons
+    const selectionButtons = document.createElement('div');
+    selectionButtons.className = 'filter-selection-buttons';
 
     const selectAllBtn = document.createElement('button');
-    selectAllBtn.textContent = 'Select All';
-    selectAllBtn.className = 'filter-btn';
-    selectAllBtn.style.flex = '1';
+    selectAllBtn.className = 'filter-selection-btn';
+    selectAllBtn.textContent = '✓ Select All';
 
-    const clearBtn = document.createElement('button');
-    clearBtn.textContent = 'Clear';
-    clearBtn.className = 'filter-btn clear';
-    clearBtn.style.flex = '1';
+    const clearAllBtn = document.createElement('button');
+    clearAllBtn.className = 'filter-selection-btn';
+    clearAllBtn.textContent = '✗ Clear All';
 
-    const applyBtn = document.createElement('button');
-    applyBtn.textContent = 'Apply';
-    applyBtn.className = 'filter-btn primary';
-    applyBtn.style.flex = '1';
+    const invertBtn = document.createElement('button');
+    invertBtn.className = 'filter-selection-btn';
+    invertBtn.textContent = '⇄ Invert';
 
-    buttonRow.appendChild(selectAllBtn);
-    buttonRow.appendChild(clearBtn);
-    buttonRow.appendChild(applyBtn);
-
-    header.appendChild(searchBox);
-    header.appendChild(buttonRow);
-    dropdown.appendChild(header);
+    selectionButtons.appendChild(selectAllBtn);
+    selectionButtons.appendChild(clearAllBtn);
+    selectionButtons.appendChild(invertBtn);
+    valuesContent.appendChild(selectionButtons);
 
     // Values list container
-    const valuesList = document.createElement('div');
-    valuesList.style.maxHeight = '200px';
-    valuesList.style.overflow = 'auto';
+    const valuesContainer = document.createElement('div');
+    valuesContainer.className = 'filter-values-container';
 
-    // Create checkboxes for each unique value
+    // Parse current filter to determine checked values
+    let checkedValues = new Set();
+    if (currentFilter && Array.isArray(currentFilter) && currentFilter.length > 0) {
+        currentFilter.forEach(v => checkedValues.add(v));
+    } else {
+        // No filter = all selected
+        uniqueValues.forEach(v => checkedValues.add(v));
+    }
+
     let filteredValues = [...uniqueValues];
     const checkboxes = new Map();
 
     function renderValuesList() {
-        valuesList.innerHTML = '';
+        valuesContainer.innerHTML = '';
         filteredValues.forEach(value => {
             const item = document.createElement('div');
-            item.style.padding = '4px 8px';
-            item.style.display = 'flex';
-            item.style.alignItems = 'center';
-            item.style.cursor = 'pointer';
-
-            item.onmouseover = () => {
-                item.style.backgroundColor = 'var(--vscode-list-hoverBackground)';
-            };
-            item.onmouseout = () => {
-                item.style.backgroundColor = '';
-            };
+            item.className = 'filter-value-item';
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.style.marginRight = '8px';
-            checkbox.checked = currentFilter.length === 0 || currentFilter.includes(value);
+            checkbox.checked = checkedValues.has(value);
+            checkbox.onchange = () => {
+                if (checkbox.checked) {
+                    checkedValues.add(value);
+                } else {
+                    checkedValues.delete(value);
+                }
+            };
 
             const label = document.createElement('span');
+            label.className = 'filter-value-label';
             label.textContent = value;
-            label.style.flex = '1';
+            label.title = value;
 
-            item.onclick = () => {
-                checkbox.checked = !checkbox.checked;
+            const count = document.createElement('span');
+            count.className = 'filter-value-count';
+            count.textContent = valueCounts.get(value) || 0;
+
+            item.onclick = (e) => {
+                if (e.target !== checkbox) {
+                    checkbox.checked = !checkbox.checked;
+                    checkbox.dispatchEvent(new Event('change'));
+                }
             };
 
             item.appendChild(checkbox);
             item.appendChild(label);
-            valuesList.appendChild(item);
+            item.appendChild(count);
+            valuesContainer.appendChild(item);
 
             checkboxes.set(value, checkbox);
         });
@@ -962,50 +1326,302 @@ function showColumnFilterDropdown(column, table, anchorElement, rsIndex) {
 
     // Search functionality
     searchBox.oninput = () => {
-        const searchTerm = searchBox.value.toLowerCase();
-        filteredValues = uniqueValues.filter(value =>
-            String(value).toLowerCase().includes(searchTerm)
-        );
+        const needle = searchBox.value.toLowerCase();
+        filteredValues = uniqueValues.filter(value => {
+            return String(value).toLowerCase().includes(needle);
+        });
         renderValuesList();
     };
 
-    // Button handlers
+    // Selection button handlers
     selectAllBtn.onclick = () => {
-        checkboxes.forEach(checkbox => {
-            checkbox.checked = true;
-        });
+        filteredValues.forEach(v => checkedValues.add(v));
+        renderValuesList();
     };
 
-    clearBtn.onclick = () => {
-        checkboxes.forEach(checkbox => {
-            checkbox.checked = false;
-        });
+    clearAllBtn.onclick = () => {
+        filteredValues.forEach(v => checkedValues.delete(v));
+        renderValuesList();
     };
 
-    applyBtn.onclick = () => {
-        const selectedValues = [];
-        checkboxes.forEach((checkbox, value) => {
-            if (checkbox.checked) {
-                selectedValues.push(value);
+    invertBtn.onclick = () => {
+        filteredValues.forEach(v => {
+            if (checkedValues.has(v)) {
+                checkedValues.delete(v);
+            } else {
+                checkedValues.add(v);
             }
         });
-
-        // Apply filter
-        if (selectedValues.length === uniqueValues.length || selectedValues.length === 0) {
-            // All selected or none selected = no filter
-            column.setFilterValue(undefined);
-        } else {
-            column.setFilterValue(selectedValues);
-        }
-
-        dropdown.remove();
+        renderValuesList();
     };
 
     renderValuesList();
-    dropdown.appendChild(valuesList);
+    valuesContent.appendChild(valuesContainer);
 
-    // Add to document
+    // ========== CONDITIONS TAB CONTENT ==========
+
+    // Filter type options
+    const textFilterTypes = [
+        { value: 'contains', label: 'Contains' },
+        { value: 'notContains', label: 'Does not contain' },
+        { value: 'equals', label: 'Equals' },
+        { value: 'notEquals', label: 'Does not equal' },
+        { value: 'startsWith', label: 'Starts with' },
+        { value: 'endsWith', label: 'Ends with' },
+        { value: 'isEmpty', label: 'Is empty' },
+        { value: 'isNotEmpty', label: 'Is not empty' }
+    ];
+
+    const numericFilterTypes = [
+        { value: 'equals', label: 'Equals' },
+        { value: 'notEquals', label: 'Does not equal' },
+        { value: 'greaterThan', label: 'Greater than' },
+        { value: 'greaterThanOrEqual', label: 'Greater than or equal' },
+        { value: 'lessThan', label: 'Less than' },
+        { value: 'lessThanOrEqual', label: 'Less than or equal' },
+        { value: 'between', label: 'Between' },
+        { value: 'isEmpty', label: 'Is empty' },
+        { value: 'isNotEmpty', label: 'Is not empty' }
+    ];
+
+    const filterTypes = isNumericColumn ? numericFilterTypes : textFilterTypes;
+
+    // State for conditions - restore from current filter if it's a condition filter
+    let conditions;
+    let logicOperator;
+
+    if (currentFilter && currentFilter._isConditionFilter) {
+        // Restore saved conditions
+        conditions = currentFilter.conditions.map(c => ({
+            type: c.type,
+            value: c.value || '',
+            value2: c.value2 || ''
+        }));
+        logicOperator = currentFilter.logic || 'and';
+    } else {
+        // Default state
+        conditions = [{ type: filterTypes[0].value, value: '', value2: '' }];
+        logicOperator = 'and';
+    }
+
+    function createConditionRow(condition, index) {
+        const row = document.createElement('div');
+        row.className = 'filter-condition';
+
+        const conditionRow = document.createElement('div');
+        conditionRow.className = 'filter-condition-row';
+
+        // Filter type select
+        const typeSelect = document.createElement('select');
+        typeSelect.className = 'filter-type-dropdown';
+        filterTypes.forEach(ft => {
+            const opt = document.createElement('option');
+            opt.value = ft.value;
+            opt.textContent = ft.label;
+            if (ft.value === condition.type) opt.selected = true;
+            typeSelect.appendChild(opt);
+        });
+
+        typeSelect.onchange = () => {
+            condition.type = typeSelect.value;
+            renderConditions();
+        };
+
+        conditionRow.appendChild(typeSelect);
+
+        // Value input(s) based on filter type
+        const needsNoInput = ['isEmpty', 'isNotEmpty'].includes(condition.type);
+        const needsTwoInputs = condition.type === 'between';
+
+        if (!needsNoInput) {
+            if (needsTwoInputs) {
+                const betweenContainer = document.createElement('div');
+                betweenContainer.className = 'filter-between-inputs';
+
+                const input1 = document.createElement('input');
+                input1.type = isNumericColumn ? 'number' : 'text';
+                input1.className = 'filter-value-input';
+                input1.placeholder = 'From';
+                input1.value = condition.value || '';
+                input1.oninput = () => { condition.value = input1.value; };
+
+                const sep = document.createElement('span');
+                sep.className = 'filter-between-separator';
+                sep.textContent = 'and';
+
+                const input2 = document.createElement('input');
+                input2.type = isNumericColumn ? 'number' : 'text';
+                input2.className = 'filter-value-input';
+                input2.placeholder = 'To';
+                input2.value = condition.value2 || '';
+                input2.oninput = () => { condition.value2 = input2.value; };
+
+                betweenContainer.appendChild(input1);
+                betweenContainer.appendChild(sep);
+                betweenContainer.appendChild(input2);
+                conditionRow.appendChild(betweenContainer);
+            } else {
+                const input = document.createElement('input');
+                input.type = isNumericColumn && !['contains', 'notContains', 'startsWith', 'endsWith'].includes(condition.type) ? 'number' : 'text';
+                input.className = 'filter-value-input';
+                input.placeholder = 'Enter value...';
+                input.value = condition.value || '';
+                input.oninput = () => { condition.value = input.value; };
+                conditionRow.appendChild(input);
+            }
+        }
+
+        // Remove condition button (only if more than one condition)
+        if (conditions.length > 1) {
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'remove-condition-btn';
+            removeBtn.textContent = '×';
+            removeBtn.title = 'Remove condition';
+            removeBtn.onclick = (e) => {
+                e.stopPropagation();
+                conditions.splice(index, 1);
+                renderConditions();
+            };
+            conditionRow.appendChild(removeBtn);
+        }
+
+        row.appendChild(conditionRow);
+        return row;
+    }
+
+    function renderConditions() {
+        conditionsContent.innerHTML = '';
+
+        conditions.forEach((cond, idx) => {
+            // Add logic operator between conditions
+            if (idx > 0) {
+                const logicToggle = document.createElement('div');
+                logicToggle.className = 'filter-logic-toggle';
+                logicToggle.style.margin = '8px 0';
+                logicToggle.style.padding = '6px';
+                logicToggle.style.backgroundColor = 'var(--vscode-editor-background)';
+                logicToggle.style.borderRadius = '4px';
+                logicToggle.style.display = 'flex';
+                logicToggle.style.justifyContent = 'center';
+                logicToggle.style.gap = '8px';
+
+                const andBtn = document.createElement('button');
+                andBtn.className = 'filter-logic-btn' + (logicOperator === 'and' ? ' active' : '');
+                andBtn.textContent = '⋀ AND';
+                andBtn.title = 'All conditions must match';
+                andBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    logicOperator = 'and';
+                    renderConditions();
+                };
+
+                const orBtn = document.createElement('button');
+                orBtn.className = 'filter-logic-btn' + (logicOperator === 'or' ? ' active' : '');
+                orBtn.textContent = '⋁ OR';
+                orBtn.title = 'Any condition must match';
+                orBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    logicOperator = 'or';
+                    renderConditions();
+                };
+
+                logicToggle.appendChild(andBtn);
+                logicToggle.appendChild(orBtn);
+                conditionsContent.appendChild(logicToggle);
+            }
+
+            const condRow = createConditionRow(cond, idx);
+            conditionsContent.appendChild(condRow);
+        });
+
+        // Add condition button
+        if (conditions.length < 3) {
+            const addBtn = document.createElement('button');
+            addBtn.className = 'add-condition-btn';
+            addBtn.textContent = conditions.length === 1 ? '+ Add another condition (for AND/OR)' : '+ Add condition';
+            addBtn.onclick = (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                conditions.push({ type: filterTypes[0].value, value: '', value2: '' });
+                renderConditions();
+            };
+            conditionsContent.appendChild(addBtn);
+        }
+    }
+
+    renderConditions();
+
+    // ========== ACTION BUTTONS ==========
+    const actionsContainer = document.createElement('div');
+    actionsContainer.className = 'filter-actions';
+
+    const clearFilterBtn = document.createElement('button');
+    clearFilterBtn.className = 'filter-btn';
+    clearFilterBtn.textContent = 'Clear Filter';
+    clearFilterBtn.onclick = () => {
+        column.setFilterValue(undefined);
+        dropdown.remove();
+    };
+
+    const applyBtn = document.createElement('button');
+    applyBtn.className = 'filter-btn primary';
+    applyBtn.textContent = 'Apply';
+    applyBtn.onclick = () => {
+        const activeTab = valuesTab.classList.contains('active') ? 'values' : 'conditions';
+
+        if (activeTab === 'values') {
+            // Apply values filter
+            const selectedValues = Array.from(checkedValues);
+            if (selectedValues.length === uniqueValues.length || selectedValues.length === 0) {
+                column.setFilterValue(undefined);
+            } else {
+                column.setFilterValue(selectedValues);
+            }
+        } else {
+            // Apply conditions filter
+            // Create a custom filter object that our filterFn can interpret
+            const validConditions = conditions.filter(c => {
+                if (['isEmpty', 'isNotEmpty'].includes(c.type)) return true;
+                if (c.type === 'between') return c.value !== '' && c.value2 !== '';
+                return c.value !== '';
+            });
+
+            if (validConditions.length === 0) {
+                column.setFilterValue(undefined);
+            } else {
+                // Store conditions as a special object
+                column.setFilterValue({
+                    _isConditionFilter: true,
+                    conditions: validConditions,
+                    logic: logicOperator
+                });
+            }
+        }
+        savePinnedState();
+        dropdown.remove();
+    };
+
+    actionsContainer.appendChild(clearFilterBtn);
+    actionsContainer.appendChild(applyBtn);
+
+    // ========== ASSEMBLE DROPDOWN ==========
+    dropdown.appendChild(valuesContent);
+    dropdown.appendChild(conditionsContent);
+    dropdown.appendChild(actionsContainer);
+
     document.body.appendChild(dropdown);
+
+    // Auto-switch to Conditions tab if there's an existing condition filter
+    if (currentFilter && currentFilter._isConditionFilter) {
+        switchTab('conditions');
+    }
+
+    // Focus search box (only if on Values tab)
+    setTimeout(() => {
+        if (valuesTab.classList.contains('active')) {
+            searchBox.focus();
+        }
+    }, 50);
 
     // Close on outside click
     setTimeout(() => {
@@ -1081,6 +1697,7 @@ function showAggregationDropdown(column, table, anchorElement, rsIndex) {
         const val = select.value;
         if (!aggregationStates[rsIndex]) aggregationStates[rsIndex] = {};
         if (val === 'none') delete aggregationStates[rsIndex][column.id]; else aggregationStates[rsIndex][column.id] = val;
+        savePinnedState();
         dropdown.remove();
         if (grids[rsIndex] && grids[rsIndex].render) grids[rsIndex].render();
     };
@@ -1112,6 +1729,8 @@ function onFilterChanged() {
     const filterInput = document.getElementById('globalFilter');
     if (grids[activeGridIndex]) {
         grids[activeGridIndex].tanTable.setGlobalFilter(filterInput.value);
+    } else {
+        console.error('No grid at activeGridIndex:', activeGridIndex);
     }
 }
 
@@ -1225,11 +1844,11 @@ function onDropGroup(event) {
     }
 
     const type = event.dataTransfer.getData('type');
-    console.log('Drop event - type:', type, 'target:', event.target);
 
     if (type === 'column') {
-        const colId = event.dataTransfer.getData('text/plain');
-        if (grids[activeGridIndex] && grids[activeGridIndex].tanTable) {
+        // Use columnId for internal operations (text/plain now has column name for external drops)
+        const colId = event.dataTransfer.getData('columnId');
+        if (colId && grids[activeGridIndex] && grids[activeGridIndex].tanTable) {
             const currentGrouping = grids[activeGridIndex].tanTable.getState().grouping;
             if (!currentGrouping.includes(colId)) {
                 grids[activeGridIndex].tanTable.setGrouping([...currentGrouping, colId]);
@@ -1238,7 +1857,6 @@ function onDropGroup(event) {
     } else if (type === 'groupChip') {
         // Handle reordering of group chips
         const draggedColId = event.dataTransfer.getData('text/plain');
-        console.log('Reordering group chip:', draggedColId);
 
         // Find the target chip element
         let targetElement = event.target.closest('.group-chip');
@@ -1255,15 +1873,11 @@ function onDropGroup(event) {
         if (targetElement && grids[activeGridIndex] && grids[activeGridIndex].tanTable) {
             const targetColId = targetElement.dataset.colId;
             const currentGrouping = grids[activeGridIndex].tanTable.getState().grouping;
-            console.log('Current grouping:', currentGrouping);
-            console.log('Dragged:', draggedColId, 'Target:', targetColId);
 
             if (draggedColId !== targetColId) {
                 const newGrouping = [...currentGrouping];
                 const fromIndex = newGrouping.indexOf(draggedColId);
                 const toIndex = newGrouping.indexOf(targetColId);
-
-                console.log('Moving from index', fromIndex, 'to', toIndex);
 
                 if (fromIndex !== -1 && toIndex !== -1) {
                     // Remove from old position
@@ -1272,7 +1886,6 @@ function onDropGroup(event) {
                     const insertIndex = fromIndex < toIndex ? toIndex : toIndex + 1;
                     newGrouping.splice(insertIndex, 0, draggedColId);
 
-                    console.log('New grouping:', newGrouping);
                     grids[activeGridIndex].tanTable.setGrouping(newGrouping);
                 }
             }
@@ -1350,12 +1963,19 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
         });
     }
 
+    // Make wrapper focusable to receive keyboard events
+    wrapper.tabIndex = 0;
+    wrapper.style.outline = 'none';  // Remove focus outline
+
     wrapper.addEventListener('mousedown', (e) => {
         if (e.target.closest('td')) {
             isSelecting = true;
             startCell = getCellId(e.target);
             endCell = startCell;
             e.preventDefault();
+
+            // Focus wrapper so keyboard events work (Ctrl+C)
+            wrapper.focus();
 
             if (!e.ctrlKey && !e.metaKey) {
                 clearSelection();
@@ -1401,81 +2021,90 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
     addCellIds();
 
     // Copy selection functionality
-    window.copySelection = function (withHeaders = false) {
-        if (selectedCells.size === 0) return;
+    // Return handlers to be attached to the grid object
+    return {
+        copySelection: function (withHeaders = false) {
+            if (selectedCells.size === 0) return;
 
-        const cellArray = Array.from(selectedCells).map(cellId => {
-            const [row, col] = cellId.split('-').map(Number);
-            return { row, col, cellId };
-        }).sort((a, b) => a.row - b.row || a.col - b.col);
+            const cellArray = Array.from(selectedCells).map(cellId => {
+                const [row, col] = cellId.split('-').map(Number);
+                return { row, col, cellId };
+            }).sort((a, b) => a.row - b.row || a.col - b.col);
 
-        if (cellArray.length === 0) return;
+            if (cellArray.length === 0) return;
 
-        const minRow = Math.min(...cellArray.map(c => c.row));
-        const maxRow = Math.max(...cellArray.map(c => c.row));
-        const minCol = Math.min(...cellArray.map(c => c.col));
-        const maxCol = Math.max(...cellArray.map(c => c.col));
+            const minRow = Math.min(...cellArray.map(c => c.row));
+            const maxRow = Math.max(...cellArray.map(c => c.row));
+            const minCol = Math.min(...cellArray.map(c => c.col));
+            const maxCol = Math.max(...cellArray.map(c => c.col));
 
-        let clipboardText = '';
+            let clipboardText = '';
 
-        // Add headers if requested
-        if (withHeaders) {
-            const headers = table.getAllColumns().filter(col => col.getIsVisible());
-            const headerRow = [];
-            for (let col = minCol; col <= maxCol; col++) {
-                if (headers[col]) {
-                    headerRow.push(headers[col].columnDef.header);
+            // Add headers if requested
+            if (withHeaders) {
+                const headers = table.getAllColumns().filter(col => col.getIsVisible());
+                const headerRow = [];
+                for (let col = minCol; col <= maxCol; col++) {
+                    if (headers[col]) {
+                        headerRow.push(headers[col].columnDef.header);
+                    }
                 }
+                clipboardText += headerRow.join('\t') + '\n';
             }
-            clipboardText += headerRow.join('\t') + '\n';
-        }
 
-        // Add data rows
-        for (let row = minRow; row <= maxRow; row++) {
-            const rowData = [];
-            for (let col = minCol; col <= maxCol; col++) {
-                const cell = document.querySelector(`[data-cell-id="${row}-${col}"]`);
-                const value = cell ? cell.textContent.trim() : '';
-                rowData.push(value);
-            }
-            clipboardText += rowData.join('\t') + '\n';
-        }
-
-        navigator.clipboard.writeText(clipboardText).then(() => {
-            vscode.postMessage({
-                command: 'info',
-                text: `Copied ${selectedCells.size} cells to clipboard`
-            });
-        }).catch(() => {
-            // Fallback for older browsers
-            const textArea = document.createElement('textarea');
-            textArea.value = clipboardText;
-            document.body.appendChild(textArea);
-            textArea.select();
-            document.execCommand('copy');
-            document.body.removeChild(textArea);
-
-            vscode.postMessage({
-                command: 'info',
-                text: `Copied ${selectedCells.size} cells to clipboard`
-            });
-        });
-    };
-
-    window.selectAll = function () {
-        const rows = wrapper.querySelectorAll('tbody tr[data-index]');
-        clearSelection();
-
-        rows.forEach(tr => {
-            const cells = tr.querySelectorAll('td[data-cell-id]');
-            cells.forEach(td => {
-                const cellId = td.dataset.cellId;
-                if (cellId) {
-                    selectedCells.add(cellId);
-                    td.classList.add('selected-cell');
+            // Add data rows
+            for (let row = minRow; row <= maxRow; row++) {
+                const rowData = [];
+                for (let col = minCol; col <= maxCol; col++) {
+                    const cell = wrapper.querySelector(`[data-cell-id="${row}-${col}"]`);
+                    const value = cell ? cell.textContent.trim() : '';
+                    rowData.push(value);
                 }
+                clipboardText += rowData.join('\t') + '\n';
+            }
+
+            navigator.clipboard.writeText(clipboardText).then(() => {
+                vscode.postMessage({
+                    command: 'info',
+                    text: `Copied ${selectedCells.size} cells to clipboard`
+                });
+            }).catch(() => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = clipboardText;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+
+                vscode.postMessage({
+                    command: 'info',
+                    text: `Copied ${selectedCells.size} cells to clipboard`
+                });
             });
-        });
+        },
+
+        selectAll: function () {
+            const rows = wrapper.querySelectorAll('tbody tr[data-index]');
+            clearSelection();
+
+            rows.forEach(tr => {
+                const cells = tr.querySelectorAll('td[data-cell-id]');
+                cells.forEach(td => {
+                    const cellId = td.dataset.cellId;
+                    if (cellId) {
+                        selectedCells.add(cellId);
+                        td.classList.add('selected-cell');
+                    }
+                });
+            });
+        },
+
+        clearSelection: clearSelection,
+
+        hasSelection: function () {
+            return selectedCells.size > 0;
+        }
     };
 }
 
@@ -1576,4 +2205,55 @@ window.onFilterChanged = onFilterChanged;
 window.clearFilter = function () {
     const filter = document.getElementById('globalFilter');
     if (filter) filter.value = '';
+};
+
+// Clear all column filters
+window.clearAllFilters = function () {
+    // Clear global filter input
+    const globalFilter = document.getElementById('globalFilter');
+    if (globalFilter) globalFilter.value = '';
+
+    // Clear column filters for the active grid
+    if (grids && grids.length > 0 && typeof activeGridIndex !== 'undefined' && activeGridIndex >= 0) {
+        const activeGrid = grids[activeGridIndex];
+        if (activeGrid && activeGrid.tanTable) {
+            // Reset all column filters
+            activeGrid.tanTable.resetColumnFilters();
+
+            // Clear global filter too
+            activeGrid.tanTable.setGlobalFilter('');
+
+            // Re-render to update UI
+            if (activeGrid.render) {
+                activeGrid.render();
+            }
+        }
+    }
+};
+
+// Keyboard shortcuts - Ctrl+C to copy rectangular selection
+// Keyboard shortcuts - Ctrl+C to copy rectangular selection
+document.addEventListener('keydown', function (e) {
+    // Ctrl+C (or Cmd+C on Mac) to copy selection
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        // Check if there's a rectangular selection in the active grid
+        if (grids[activeGridIndex] && grids[activeGridIndex].hasSelection && grids[activeGridIndex].hasSelection()) {
+            e.preventDefault();  // Prevent default (Monaco editor) from handling
+            e.stopPropagation();
+            grids[activeGridIndex].copySelection(true);  // Copy with headers by default for Ctrl+C
+        }
+    }
+});
+
+// Global functions acting on active grid
+window.copySelection = function (withHeaders) {
+    if (grids[activeGridIndex] && grids[activeGridIndex].copySelection) {
+        grids[activeGridIndex].copySelection(withHeaders);
+    }
+};
+
+window.selectAll = function () {
+    if (grids[activeGridIndex] && grids[activeGridIndex].selectAll) {
+        grids[activeGridIndex].selectAll();
+    }
 };

@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries via ODBC",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -194,6 +194,11 @@
         "command": "netezza.toggleKeepConnectionOpen",
         "title": "Netezza: Toggle Keep Connection Open",
         "icon": "$(plug)"
+      },
+      {
+        "command": "netezza.clearAutocompleteCache",
+        "title": "Netezza: Clear Autocomplete Cache",
+        "icon": "$(trash)"
       }
     ],
     "menus": {
@@ -383,6 +388,7 @@
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
     "package": "node esbuild.js --production",
     "package-vsix": "npm install && npm run package && npm prune --production && vsce package"
   },
