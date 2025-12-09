@@ -36,7 +36,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     this.exportCsv(message.data);
                     return;
                 case 'openInExcel':
-                    this.openInExcel(message.data);
+                    this.openInExcel(message.data, message.sql);
                     return;
                 case 'switchSource':
                     this._activeSourceUri = message.sourceUri;
@@ -216,9 +216,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async openInExcel(csvContent: string) {
+    private async openInExcel(csvContent: string, sql?: string) {
         // Use the existing XLSX export functionality to create and open Excel file
-        vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', csvContent);
+        vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', csvContent, sql);
     }
 
     private closeSource(sourceUri: string) {
@@ -247,10 +247,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             return '';
         }
 
-        const { scriptUri, virtualUri, mainScriptUri, styleUri } = this._getScriptUris();
+        const { scriptUri, virtualUri, mainScriptUri, styleUri, workerUri } = this._getScriptUris();
         const viewData = this._prepareViewData();
 
-        return this._buildHtmlDocument(scriptUri, virtualUri, mainScriptUri, styleUri, viewData);
+        return this._buildHtmlDocument(scriptUri, virtualUri, mainScriptUri, styleUri, viewData, workerUri);
     }
 
     private _getScriptUris() {
@@ -258,6 +258,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             scriptUri: this._view!.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tanstack-table-core.js')),
             virtualUri: this._view!.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'tanstack-virtual-core.js')),
             mainScriptUri: this._view!.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'resultPanel.js')),
+            workerUri: this._view!.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'searchWorker.js')),
             styleUri: this._view!.webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'resultPanel.css'))
         };
     }
@@ -292,7 +293,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         };
     }
 
-    private _buildHtmlDocument(scriptUri: vscode.Uri, virtualUri: vscode.Uri, mainScriptUri: vscode.Uri, styleUri: vscode.Uri, viewData: any) {
+    private _buildHtmlDocument(scriptUri: vscode.Uri, virtualUri: vscode.Uri, mainScriptUri: vscode.Uri, styleUri: vscode.Uri, viewData: any, workerUri: vscode.Uri) {
         const cspSource = this._view!.webview.cspSource;
 
         return `<!DOCTYPE html>
@@ -300,7 +301,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'unsafe-inline'; style-src ${cspSource} 'unsafe-inline';">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'unsafe-inline'; worker-src ${cspSource} blob:; connect-src ${cspSource}; style-src ${cspSource} 'unsafe-inline';">
             <title>Query Results</title>
             <script src="${scriptUri}"></script>
             <script src="${virtualUri}"></script>
@@ -349,7 +350,8 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 window.resultSets = ${viewData.resultSetsJson};
                 
                 let grids = [];
-                let activeGridIndex = 0;
+                let activeGridIndex = window.resultSets && window.resultSets.length > 0 ? window.resultSets.length - 1 : 0;
+                const workerUri = "${workerUri}";
             </script>
             <script src="${mainScriptUri}"></script>
             <script>

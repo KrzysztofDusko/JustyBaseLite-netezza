@@ -7,7 +7,10 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<SchemaItem | undefined | null | void> = new vscode.EventEmitter<SchemaItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<SchemaItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
-    constructor(private context: vscode.ExtensionContext, private connectionManager: ConnectionManager, private metadataCache: MetadataCache) { }
+    constructor(private context: vscode.ExtensionContext, private connectionManager: ConnectionManager, private metadataCache: MetadataCache) {
+        // Listen for connection changes to refresh tree
+        this.connectionManager.onDidChangeConnections(() => this.refresh());
+    }
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -19,15 +22,25 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
 
     getParent(element: SchemaItem): SchemaItem | undefined {
         // Return parent based on context value
-        if (element.contextValue === 'database') {
-            return undefined; // Database is root
+        if (element.contextValue === 'serverInstance') {
+            return undefined; // Root
+        } else if (element.contextValue === 'database') {
+            return new SchemaItem(
+                element.connectionName!,
+                vscode.TreeItemCollapsibleState.Collapsed,
+                'serverInstance',
+                undefined, undefined, undefined, undefined, undefined,
+                element.connectionName
+            );
         } else if (element.contextValue === 'typeGroup') {
             // Parent is database
             return new SchemaItem(
                 element.dbName!,
                 vscode.TreeItemCollapsibleState.Collapsed,
                 'database',
-                element.dbName
+                element.dbName,
+                undefined, undefined, undefined, undefined,
+                element.connectionName
             );
         } else if (element.contextValue.startsWith('netezza:')) {
             // Parent is typeGroup
@@ -36,83 +49,63 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 vscode.TreeItemCollapsibleState.Collapsed,
                 'typeGroup',
                 element.dbName,
-                element.objType
+                element.objType,
+                undefined, undefined, undefined,
+                element.connectionName
             );
-        } else if (element.contextValue === 'column') {
-            // Columns don't have a defined parent in this structure
-            return undefined;
         }
         return undefined;
     }
 
     async getChildren(element?: SchemaItem): Promise<SchemaItem[]> {
-        const connectionString = await this.connectionManager.getConnectionString();
-        if (!connectionString) {
-            return [];
-        }
-
         if (!element) {
-            // Root: Databases
-            // Try cache first
-            const cachedDbs = this.metadataCache.getDatabases();
-            if (cachedDbs) {
-                // Return cached items
-                // Notes: cached items are simple objects or CompletionItems.
-                // MetadataCache.getDatabases returns what was stored. 
-                // SqlCompletionItemProvider stores CompletionItems.
-                // We need to map them to SchemaItems.
-
-                // Oops, the cached data structure might be tailored for CompletionItems.
-                // getDatabases in CompletionProvider:
-                // Stores: items (CompletionItem[])
-                // We need to extract the label/database name.
-
-                return cachedDbs.map((item: any) => {
-                    const dbName = typeof item.label === 'string' ? item.label : item.label.label;
-                    return new SchemaItem(dbName, vscode.TreeItemCollapsibleState.Collapsed, 'database', dbName);
-                });
-            }
-
+            // Root: Server Instances
+            const connections = await this.connectionManager.getConnections();
+            return connections.map(conn => new SchemaItem(
+                conn.name,
+                vscode.TreeItemCollapsibleState.Collapsed,
+                'serverInstance',
+                undefined, undefined, undefined, undefined, undefined,
+                conn.name
+            ));
+        } else if (element.contextValue === 'serverInstance') {
+            // Children: Databases for this connection
+            // We ignore cache for now at root level or use specific key if we improved cache
+            // Let's try to query databases using specific connection
             try {
-                const results = await runQuery(this.context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true);
+                if (!element.connectionName) return [];
+                const results = await runQuery(this.context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true, element.connectionName, this.connectionManager);
                 if (!results) {
-                    console.log("No results from database query");
                     return [];
                 }
                 const databases = JSON.parse(results);
-
-                // Create items
-                const items = databases.map((db: any) => new SchemaItem(db.DATABASE, vscode.TreeItemCollapsibleState.Collapsed, 'database', db.DATABASE));
-
-                // Update Cache? 
-                // The cache expects CompletionItems (as per current SqlCompletionItemProvider design). 
-                // We shouldn't break that contract or mixed types will exist.
-                // Ideally MetadataCache should store raw data and providers map it. 
-                // But MetadataCache was extracted from CompletionProvider.
-                // For now, let's just READ from cache if available. 
-                // (Populating it would require creating CompletionItems here which adds 'vscode.CompletionItem' overhead/dependency if not needed, but we are in VS Code extension so it is fine).
-
-                // Let's populate the cache too for consistency!
-                const completionItems = databases.map((db: any) => {
-                    const item = new vscode.CompletionItem(db.DATABASE, vscode.CompletionItemKind.Module);
-                    item.detail = 'Database';
-                    return item;
-                });
-                this.metadataCache.setDatabases(completionItems);
-
-                return items;
+                return databases.map((db: any) => new SchemaItem(
+                    db.DATABASE,
+                    vscode.TreeItemCollapsibleState.Collapsed,
+                    'database',
+                    db.DATABASE,
+                    undefined, undefined, undefined, undefined,
+                    element.connectionName
+                ));
             } catch (e) {
-                vscode.window.showErrorMessage("Failed to load databases: " + e);
-                console.error(e);
+                vscode.window.showErrorMessage(`Failed to load databases for ${element.connectionName}: ${e}`);
                 return [];
             }
         } else if (element.contextValue === 'database') {
             // Children: Object Types (Groups)
             try {
                 const query = `SELECT DISTINCT OBJTYPE FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' ORDER BY OBJTYPE`;
-                const results = await runQuery(this.context, query, true);
+                const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const types = JSON.parse(results || '[]');
-                return types.map((t: any) => new SchemaItem(t.OBJTYPE, vscode.TreeItemCollapsibleState.Collapsed, 'typeGroup', element.dbName, t.OBJTYPE));
+                return types.map((t: any) => new SchemaItem(
+                    t.OBJTYPE,
+                    vscode.TreeItemCollapsibleState.Collapsed,
+                    'typeGroup',
+                    element.dbName,
+                    t.OBJTYPE,
+                    undefined, undefined, undefined,
+                    element.connectionName
+                ));
             } catch (e) {
                 vscode.window.showErrorMessage("Failed to load object types: " + e);
                 return [];
@@ -121,7 +114,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             // Children: Objects of specific type
             try {
                 const query = `SELECT OBJNAME, SCHEMA, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' AND OBJTYPE = '${element.objType}' ORDER BY OBJNAME`;
-                const results = await runQuery(this.context, query, true);
+                const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const objects = JSON.parse(results || '[]');
                 return objects.map((obj: any) => {
                     const expandableTypes = ['TABLE', 'VIEW', 'EXTERNAL TABLE', 'SYSTEM VIEW', 'SYSTEM TABLE'];
@@ -134,7 +127,8 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         element.objType,
                         obj.SCHEMA,
                         obj.OBJID,
-                        obj.DESCRIPTION
+                        obj.DESCRIPTION,
+                        element.connectionName
                     );
                 });
             } catch (e) {
@@ -156,7 +150,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         X.OBJID = ${element.objId}
                     ORDER BY 
                         X.ATTNUM`;
-                const results = await runQuery(this.context, query, true);
+                const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const columns = JSON.parse(results || '[]');
                 return columns.map((col: any) => new SchemaItem(
                     `${col.ATTNAME} (${col.FORMAT_TYPE})`,
@@ -166,7 +160,8 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     undefined,
                     undefined,
                     undefined,
-                    col.DESCRIPTION
+                    col.DESCRIPTION,
+                    element.connectionName
                 ));
             } catch (e) {
                 vscode.window.showErrorMessage("Failed to load columns: " + e);
@@ -187,12 +182,16 @@ export class SchemaItem extends vscode.TreeItem {
         public readonly objType?: string,
         public readonly schema?: string,
         public readonly objId?: number,
-        public readonly objectDescription?: string
+        public readonly objectDescription?: string,
+        public readonly connectionName?: string
     ) {
         super(label, collapsibleState);
 
         // Build tooltip with description if available
         let tooltipText = this.label;
+        if (connectionName) {
+            tooltipText += `\n[Server: ${connectionName}]`;
+        }
         if (objectDescription && objectDescription.trim()) {
             tooltipText += `\n\n${objectDescription.trim()}`;
         }
@@ -203,7 +202,9 @@ export class SchemaItem extends vscode.TreeItem {
 
         this.description = schema ? `(${schema})` : '';
 
-        if (contextValue === 'database') {
+        if (contextValue === 'serverInstance') {
+            this.iconPath = new vscode.ThemeIcon('server');
+        } else if (contextValue === 'database') {
             this.iconPath = new vscode.ThemeIcon('database');
         } else if (contextValue === 'typeGroup') {
             this.iconPath = new vscode.ThemeIcon('folder');

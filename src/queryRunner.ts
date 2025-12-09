@@ -117,9 +117,11 @@ export interface QueryResult {
     data: any[][];
     rowsAffected?: number;
     message?: string;
+    limitReached?: boolean;
+    sql?: string;
 }
 
-export async function runQueryRaw(context: vscode.ExtensionContext, query: string, silent: boolean = false, connectionManager?: ConnectionManager): Promise<QueryResult> {
+export async function runQueryRaw(context: vscode.ExtensionContext, query: string, silent: boolean = false, connectionManager?: ConnectionManager, connectionName?: string, documentUri?: string): Promise<QueryResult> {
     if (!odbc) {
         throw new Error('odbc package not installed. Please run: npm install odbc');
     }
@@ -133,6 +135,9 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
         outputChannel = vscode.window.createOutputChannel('Netezza SQL');
         outputChannel.show(true);
         outputChannel.appendLine('Executing query...');
+        if (connectionName) {
+            outputChannel.appendLine(`Target Connection: ${connectionName}`);
+        }
     }
 
     try {
@@ -147,24 +152,34 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
             const resolved = await promptForVariableValues(vars, silent, setDefaults);
             queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
         }
-        
+
         // Connect to database using native ODBC with fetchArray option
         // This tells the driver to return results as arrays instead of objects
         let connection;
         let shouldCloseConnection = true;
         let connectionString: string;
+        let resolvedConnectionName: string | undefined = connectionName;
+
+        // If no explicit connectionName, try to resolve from document or fall back to active
+        if (!resolvedConnectionName && documentUri) {
+            resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
+        }
+        if (!resolvedConnectionName) {
+            resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
+        }
 
         if (keepConnectionOpen) {
-            connection = await connManager.getPersistentConnection();
+            // Use persistent connection for specific name if provided, or active if not
+            connection = await connManager.getPersistentConnection(resolvedConnectionName);
             shouldCloseConnection = false; // Don't close persistent connection
             // Still need connection string for history logging
-            const connStr = await connManager.getConnectionString();
+            const connStr = await connManager.getConnectionString(resolvedConnectionName);
             if (!connStr) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
             connectionString = connStr;
         } else {
-            const connStr = await connManager.getConnectionString();
+            const connStr = await connManager.getConnectionString(resolvedConnectionName);
             if (!connStr) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -174,14 +189,19 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
 
         try {
             // Execute query - results will be arrays since we set fetchArray: true on connection
-            const result = await connection.query(queryToExecute);
+            // Limit to 200,000 rows to prevent UI lockup
+            const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000);
 
             // Get current schema for history logging
             let currentSchema = 'unknown';
             try {
                 const schemaResult = await connection.query('SELECT CURRENT_SCHEMA');
                 if (schemaResult && schemaResult.length > 0) {
-                    currentSchema = schemaResult[0].CURRENT_SCHEMA || 'unknown';
+                    if (Array.isArray(schemaResult[0])) {
+                        currentSchema = schemaResult[0][0] || 'unknown';
+                    } else {
+                        currentSchema = schemaResult[0].CURRENT_SCHEMA || 'unknown';
+                    }
                 }
             } catch (schemaErr) {
                 // Fallback if schema query fails
@@ -195,7 +215,8 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
                 connectionDetails.host,
                 connectionDetails.database,
                 currentSchema,
-                query
+                query,
+                resolvedConnectionName // Pass the RESOLVED connection name to history
             ).catch(err => {
                 console.error('Failed to log query to history:', err);
             });
@@ -211,7 +232,9 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
                 return {
                     columns: columns,
                     data: result,
-                    rowsAffected: (result as any).count
+                    rowsAffected: (result as any).count,
+                    limitReached: (result as any).limitReached,
+                    sql: queryToExecute
                 };
             } else {
                 // Non-SELECT query (INSERT, UPDATE, DELETE, etc.)
@@ -222,7 +245,8 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
                     columns: [],
                     data: [],
                     rowsAffected: (result as any)?.count,
-                    message: 'Query executed successfully (no results).'
+                    message: 'Query executed successfully (no results).',
+                    sql: queryToExecute
                 };
             }
         } finally {
@@ -240,10 +264,10 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
     }
 }
 
-export async function runQuery(context: vscode.ExtensionContext, query: string, silent: boolean = false): Promise<string | undefined> {
+export async function runQuery(context: vscode.ExtensionContext, query: string, silent: boolean = false, connectionName?: string, connectionManager?: ConnectionManager, documentUri?: string): Promise<string | undefined> {
     // Wrapper for backward compatibility - returns JSON string of objects
     try {
-        const result = await runQueryRaw(context, query, silent);
+        const result = await runQueryRaw(context, query, silent, connectionManager, connectionName, documentUri);
 
         if (result.data && result.data.length > 0) {
             // Convert array of arrays back to array of objects
@@ -276,7 +300,7 @@ export async function runQuery(context: vscode.ExtensionContext, query: string, 
     }
 }
 
-export async function runQueriesSequentially(context: vscode.ExtensionContext, queries: string[], connectionManager?: ConnectionManager): Promise<QueryResult[]> {
+export async function runQueriesSequentially(context: vscode.ExtensionContext, queries: string[], connectionManager?: ConnectionManager, documentUri?: string): Promise<QueryResult[]> {
     if (!odbc) {
         throw new Error('odbc package not installed. Please run: npm install odbc');
     }
@@ -290,6 +314,12 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
 
     const allResults: QueryResult[] = [];
 
+    // Resolve connection name from document or use active
+    let resolvedConnectionName = connectionManager ? connectionManager.getConnectionForExecution(documentUri) : undefined;
+    if (!resolvedConnectionName) {
+        resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
+    }
+
     try {
         // Connect with fetchArray option to get results as arrays
         let connection;
@@ -297,16 +327,16 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
         let connectionString: string;
 
         if (keepConnectionOpen) {
-            connection = await connManager.getPersistentConnection();
+            connection = await connManager.getPersistentConnection(resolvedConnectionName);
             shouldCloseConnection = false; // Don't close persistent connection
             // Still need connection string for history logging
-            const connStr = await connManager.getConnectionString();
+            const connStr = await connManager.getConnectionString(resolvedConnectionName);
             if (!connStr) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
             connectionString = connStr;
         } else {
-            const connStr = await connManager.getConnectionString();
+            const connStr = await connManager.getConnectionString(resolvedConnectionName);
             if (!connStr) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -320,7 +350,11 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
             try {
                 const schemaResult = await connection.query('SELECT CURRENT_SCHEMA');
                 if (schemaResult && schemaResult.length > 0) {
-                    currentSchema = schemaResult[0].CURRENT_SCHEMA || 'unknown';
+                    if (Array.isArray(schemaResult[0])) {
+                        currentSchema = schemaResult[0][0] || 'unknown';
+                    } else {
+                        currentSchema = schemaResult[0].CURRENT_SCHEMA || 'unknown';
+                    }
                 }
             } catch (schemaErr) {
                 console.debug('Could not retrieve current schema:', schemaErr);
@@ -328,6 +362,8 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
 
             const connectionDetails = parseConnectionString(connectionString);
             const historyManager = new QueryHistoryManager(context);
+            // Use resolved connection name for history
+            const activeConnectionName = resolvedConnectionName;
 
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i];
@@ -345,14 +381,16 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
                     }
 
                     // Execute query - results will be arrays since we set fetchArray: true on connection
-                    const result = await connection.query(queryToExecute);
+                    // Limit to 200,000 rows to prevent UI lockup
+                    const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000);
 
                     // Log to history (async, don't wait)
                     historyManager.addEntry(
                         connectionDetails.host,
                         connectionDetails.database,
                         currentSchema,
-                        query
+                        query,
+                        activeConnectionName // Pass the connection name to history
                     ).catch(err => {
                         console.error('Failed to log query to history:', err);
                     });
@@ -362,14 +400,17 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
                         allResults.push({
                             columns: columns,
                             data: result,
-                            rowsAffected: (result as any).count
+                            rowsAffected: (result as any).count,
+                            limitReached: (result as any).limitReached,
+                            sql: queryToExecute
                         });
                     } else {
                         allResults.push({
                             columns: [],
                             data: [],
                             rowsAffected: (result as any)?.count,
-                            message: 'Query executed successfully'
+                            message: 'Query executed successfully',
+                            sql: queryToExecute
                         });
                     }
                 } catch (err: any) {
@@ -401,4 +442,71 @@ function formatOdbcError(error: any): string {
         }).join('\n\n');
     }
     return `Error: ${error.message || error}`;
+}
+
+/**
+ * Execute a query and fetch results up to a limit.
+ * This replaces connection.query() to allow capping the number of rows returned.
+ */
+async function executeAndFetchWithLimit(connection: any, query: string, limit: number): Promise<any> {
+    const statement = await connection.createStatement();
+    try {
+        await statement.prepare(query);
+        // Pass cursor: true to get a cursor instead of full results immediately
+        const cursor = await statement.execute({ cursor: true, fetchSize: 5000 });
+
+        const allRows: any[] = [];
+        let fetchedCount = 0;
+
+        // Fetch first batch
+        let result = await cursor.fetch();
+
+        // If result has columns, preserve them on the final array
+        let columns = result ? (result as any).columns : undefined;
+        // Also capture 'count' (affected rows) if present, though likely only on last or first?
+        let affectedRows = (result as any).count;
+
+        while (result && result.length > 0) {
+            // Update columns if not yet set (should be on first result)
+            if (!columns && (result as any).columns) {
+                columns = (result as any).columns;
+            }
+
+            // Append rows
+            for (const row of result) {
+                allRows.push(row);
+                fetchedCount++;
+                if (fetchedCount >= limit) {
+                    (allRows as any).limitReached = true;
+                    break;
+                }
+            }
+
+            if (fetchedCount >= limit) {
+                (allRows as any).limitReached = true;
+                break;
+            }
+
+            // Fetch next batch
+            result = await cursor.fetch();
+        }
+
+        // Clean up cursor explicitly if needed, though statement.close() handles it usually.
+        await cursor.close();
+
+        // Attach columns metadata to the array to match connection.query behavior
+        if (columns) {
+            (allRows as any).columns = columns;
+        }
+        (allRows as any).count = affectedRows; // Approximate or from first batch
+        return allRows;
+
+    } catch (err: any) {
+        // If it's a non-SELECT query that doesn't return a cursor/result set in a standard way?
+        // But statement.execute({cursor:true}) should still work.
+        // Falls through to finally
+        throw err;
+    } finally {
+        await statement.close();
+    }
 }

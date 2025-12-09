@@ -206,11 +206,17 @@ export async function exportCsvToXlsb(
         const dataWs = XLSX.utils.aoa_to_sheet(data);
         XLSX.utils.book_append_sheet(newWb, dataWs, 'CSV Data');
 
-        // Second sheet: CSV Source
-        const sourcePath = metadata?.source || 'Clipboard';
-        const sourceLines = [['CSV Source:'], [sourcePath]];
-        const sourceWs = XLSX.utils.aoa_to_sheet(sourceLines);
-        XLSX.utils.book_append_sheet(newWb, sourceWs, 'CSV Source');
+        // Second sheet: SQL Content or CSV Source
+        if (metadata?.sql) {
+            const sqlLines = [['SQL Query:'], ...metadata.sql.split('\n').map((line: string) => [line])];
+            const sqlWs = XLSX.utils.aoa_to_sheet(sqlLines);
+            XLSX.utils.book_append_sheet(newWb, sqlWs, 'SQL');
+        } else {
+            const sourcePath = metadata?.source || 'Clipboard';
+            const sourceLines = [['CSV Source:'], [sourcePath]];
+            const sourceWs = XLSX.utils.aoa_to_sheet(sourceLines);
+            XLSX.utils.book_append_sheet(newWb, sourceWs, 'CSV Source');
+        }
 
         // Write to file with XLSX format
         XLSX.writeFile(newWb, outputPath, { bookType: 'xlsx', compression: true });

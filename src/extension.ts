@@ -30,7 +30,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Ensure persistent connection is closed when extension is deactivated
     context.subscriptions.push({
         dispose: () => {
-            connectionManager.closePersistentConnection();
+            connectionManager.closeAllPersistentConnections();
         }
     });
 
@@ -38,6 +38,38 @@ export function activate(context: vscode.ExtensionContext) {
     const metadataCache = new MetadataCache(context);
     const schemaProvider = new SchemaProvider(context, connectionManager, metadataCache);
     const resultPanelProvider = new ResultPanelView(context.extensionUri);
+
+    // Create status bar item for "Active Connection" (per-tab)
+    const activeConnectionStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    activeConnectionStatusBarItem.command = 'netezza.selectConnectionForTab';
+    activeConnectionStatusBarItem.tooltip = 'Click to select connection for this SQL tab';
+    context.subscriptions.push(activeConnectionStatusBarItem);
+
+    // Function to update active connection status bar based on active editor
+    const updateActiveConnectionStatusBar = () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.languageId === 'sql') {
+            const documentUri = editor.document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            if (connectionName) {
+                activeConnectionStatusBarItem.text = `$(database) ${connectionName}`;
+                activeConnectionStatusBarItem.show();
+            } else {
+                activeConnectionStatusBarItem.text = '$(database) Select Connection';
+                activeConnectionStatusBarItem.show();
+            }
+        } else {
+            activeConnectionStatusBarItem.hide();
+        }
+    };
+
+    // Initial update and listen for changes
+    updateActiveConnectionStatusBar();
+    connectionManager.onDidChangeActiveConnection(updateActiveConnectionStatusBar);
+    connectionManager.onDidChangeConnections(updateActiveConnectionStatusBar);
+    connectionManager.onDidChangeDocumentConnection(updateActiveConnectionStatusBar);
+    // Update status bar when switching editors
+    vscode.window.onDidChangeActiveTextEditor(updateActiveConnectionStatusBar);
 
     // Create status bar item for "Keep Connection Open"
     const keepConnectionStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -221,6 +253,54 @@ export function activate(context: vscode.ExtensionContext) {
                     : 'Keep connection open: DISABLED - connection will be closed after each query'
             );
         }),
+        vscode.commands.registerCommand('netezza.selectActiveConnection', async () => {
+            const connections = await connectionManager.getConnections();
+            if (connections.length === 0) {
+                vscode.window.showWarningMessage('No connections configured. Please connect first.');
+                return;
+            }
+
+            const selected = await vscode.window.showQuickPick(connections.map(c => c.name), {
+                placeHolder: 'Select Active Connection'
+            });
+
+            if (selected) {
+                await connectionManager.setActiveConnection(selected);
+                vscode.window.showInformationMessage(`Active connection set to: ${selected}`);
+            }
+        }),
+        vscode.commands.registerCommand('netezza.selectConnectionForTab', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.languageId !== 'sql') {
+                vscode.window.showWarningMessage('This command is only available for SQL files');
+                return;
+            }
+
+            const connections = await connectionManager.getConnections();
+            if (connections.length === 0) {
+                vscode.window.showWarningMessage('No connections configured. Please connect first.');
+                return;
+            }
+
+            const documentUri = editor.document.uri.toString();
+            const currentConnection = connectionManager.getDocumentConnection(documentUri) || connectionManager.getActiveConnectionName();
+
+            const items = connections.map(c => ({
+                label: c.name,
+                description: currentConnection === c.name ? '$(check) Currently selected' : `${c.host}:${c.port}/${c.database}`,
+                detail: currentConnection === c.name ? undefined : undefined,
+                name: c.name
+            }));
+
+            const selected = await vscode.window.showQuickPick(items, {
+                placeHolder: 'Select connection for this SQL tab'
+            });
+
+            if (selected) {
+                connectionManager.setDocumentConnection(documentUri, selected.name);
+                vscode.window.showInformationMessage(`Connection for this tab set to: ${selected.name}`);
+            }
+        }),
         vscode.commands.registerCommand('netezza.openLogin', () => {
             LoginPanel.createOrShow(context.extensionUri, connectionManager);
         }),
@@ -230,6 +310,12 @@ export function activate(context: vscode.ExtensionContext) {
         }),
         vscode.commands.registerCommand('netezza.copySelectAll', (item: any) => {
             if (item && item.label && item.dbName && item.schema) {
+                // If Item has connectionName, ideally we should prefix SQL or use it?
+                // But this command just copies SQL. The user executes it.
+                // The new Query Runner will use the Active Connection by default.
+                // If they want to run it against a specific one, they should select it.
+                // However, if we copy SQL to clipboard, we can't force the connection unless we use a comment or directive ?
+                // For now, simple SQL copy is fine.
                 const sql = `SELECT * FROM ${item.dbName}.${item.schema}.${item.label} LIMIT 100;`;
                 vscode.env.clipboard.writeText(sql);
                 vscode.window.showInformationMessage('Copied to clipboard');
@@ -263,7 +349,8 @@ export function activate(context: vscode.ExtensionContext) {
                             title: `Deleting ${item.objType.toLowerCase()} ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
-                            await runQuery(context, sql, true);
+                            // Use connection from item if available
+                            await runQuery(context, sql, true, item.connectionName, connectionManager);
                         });
 
                         vscode.window.showInformationMessage(`Deleted ${item.objType.toLowerCase()}: ${fullName}`);
@@ -347,7 +434,7 @@ export function activate(context: vscode.ExtensionContext) {
                             title: `Granting ${privilege.label} on ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
-                            await runQuery(context, sql, true);
+                            await runQuery(context, sql, true, item.connectionName, connectionManager);
                         });
 
                         vscode.window.showInformationMessage(`Granted ${privilege.label} on ${fullName} to ${grantee.trim().toUpperCase()}`);
@@ -440,7 +527,7 @@ export function activate(context: vscode.ExtensionContext) {
                             title: `GROOM TABLE ${fullName} (${mode.label})...`,
                             cancellable: false
                         }, async (progress) => {
-                            await runQuery(context, sql, true);
+                            await runQuery(context, sql, true, item.connectionName, connectionManager);
                         });
 
                         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -474,7 +561,7 @@ export function activate(context: vscode.ExtensionContext) {
                         return;
                     }
 
-                    await runQuery(context, sql, true);
+                    await runQuery(context, sql, true, item.connectionName, connectionManager);
                     vscode.window.showInformationMessage(`Comment added to table: ${fullName}`);
                     schemaProvider.refresh();
                 } catch (err: any) {
@@ -508,7 +595,7 @@ export function activate(context: vscode.ExtensionContext) {
                             title: `Generating statistics for ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
-                            await runQuery(context, sql, true);
+                            await runQuery(context, sql, true, item.connectionName, connectionManager);
                         });
 
                         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -544,7 +631,7 @@ export function activate(context: vscode.ExtensionContext) {
                             title: `Clearing table ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
-                            await runQuery(context, sql, true);
+                            await runQuery(context, sql, true, item.connectionName, connectionManager);
                         });
 
                         vscode.window.showInformationMessage(`Table cleared: ${fullName}`);
@@ -615,7 +702,7 @@ export function activate(context: vscode.ExtensionContext) {
                             title: `Adding primary key to ${fullName}...`,
                             cancellable: false
                         }, async (progress) => {
-                            await runQuery(context, sql, true);
+                            await runQuery(context, sql, true, item.connectionName, connectionManager);
                         });
 
                         vscode.window.showInformationMessage(`Primary key added: ${constraintName.trim().toUpperCase()}`);
@@ -693,7 +780,21 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('netezza.revealInSchema', async (data: any) => {
             const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Revealing ${data.name} in schema...`);
             try {
-                const connectionString = await connectionManager.getConnectionString();
+                // Determine which connection to use
+                let targetConnectionName = data.connectionName;
+
+                // If no connection specified, try to use active connection
+                if (!targetConnectionName) {
+                    targetConnectionName = connectionManager.getActiveConnectionName();
+                }
+
+                if (!targetConnectionName) {
+                    statusBarDisposable.dispose();
+                    vscode.window.showWarningMessage('No active connection. Please select a connection first.');
+                    return;
+                }
+
+                const connectionString = await connectionManager.getConnectionString(targetConnectionName);
                 if (!connectionString) {
                     statusBarDisposable.dispose();
                     vscode.window.showWarningMessage('Not connected to database');
@@ -725,12 +826,12 @@ export function activate(context: vscode.ExtensionContext) {
                 } else {
                     // If no database specified, try to get current database from schema or fetch all
                     // First, check if there's a schema-based hint
-                    const currentDb = await connectionManager.getCurrentDatabase();
+                    const currentDb = await connectionManager.getCurrentDatabase(targetConnectionName);
                     if (currentDb) {
                         databasesToSearch = [currentDb];
                     } else {
                         // Fall back to searching all databases (slower)
-                        const dbResults = await runQuery(context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true);
+                        const dbResults = await runQuery(context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true, targetConnectionName, connectionManager);
                         if (!dbResults) {
                             statusBarDisposable.dispose();
                             return;
@@ -751,13 +852,25 @@ export function activate(context: vscode.ExtensionContext) {
                                 query += ` AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''")}')`;
                             }
 
-                            const objResults = await runQuery(context, query, true);
+                            // Pass connection name provided in data or determined above
+                            const objResults = await runQuery(context, query, true, targetConnectionName, connectionManager);
                             if (objResults) {
                                 const objects = JSON.parse(objResults);
                                 if (objects.length > 0) {
                                     const obj = objects[0];
                                     const { SchemaItem } = await import('./schemaProvider');
-                                    const targetItem = new SchemaItem(obj.OBJNAME, vscode.TreeItemCollapsibleState.Collapsed, `netezza:${obj.OBJTYPE}`, dbName, obj.OBJTYPE, obj.SCHEMA, obj.OBJID);
+                                    // IMPORTANT: Pass the connectionName so the SchemaItem can be found in the tree
+                                    const targetItem = new SchemaItem(
+                                        obj.OBJNAME,
+                                        vscode.TreeItemCollapsibleState.Collapsed,
+                                        `netezza:${obj.OBJTYPE}`,
+                                        dbName,
+                                        obj.OBJTYPE,
+                                        obj.SCHEMA,
+                                        obj.OBJID,
+                                        undefined,
+                                        targetConnectionName
+                                    );
 
                                     // If we were looking for a column, we found the parent table. Now we might want to expand it?
                                     // The original code just revealed the table.
@@ -915,7 +1028,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         try {
-            const results = await runQueriesSequentially(context, queries, connectionManager);
+            const results = await runQueriesSequentially(context, queries, connectionManager, sourceUri);
 
             // Transform results to match what ResultPanelView expects
             // We need to pass columns and data separately or as a structured object
@@ -988,7 +1101,7 @@ export function activate(context: vscode.ExtensionContext) {
         try {
             // Use runQueryRaw to get proper structure - sends everything as one batch (no splitting)
             const { runQueryRaw } = await import('./queryRunner');
-            const result = await runQueryRaw(context, text, false, connectionManager);
+            const result = await runQueryRaw(context, text, false, connectionManager, undefined, sourceUri);
 
             if (result) {
                 // Wrap in array to match QueryResult[] (one result set)
@@ -1043,8 +1156,10 @@ export function activate(context: vscode.ExtensionContext) {
         const startTime = Date.now(); // Start timing after user interaction
 
         try {
-            // Get connection string
-            const connectionString = await connectionManager.getConnectionString();
+            // Get connection string for this document
+            const documentUri = editor.document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
             if (!connectionString) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -1112,8 +1227,10 @@ export function activate(context: vscode.ExtensionContext) {
         const startTime = Date.now(); // Start timing after user interaction
 
         try {
-            // Get connection string
-            const connectionString = await connectionManager.getConnectionString();
+            // Get connection string for this document
+            const documentUri = editor.document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
             if (!connectionString) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -1153,8 +1270,10 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         try {
-            // Get connection string
-            const connectionString = await connectionManager.getConnectionString();
+            // Get connection string for this document
+            const documentUri = editor.document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
             if (!connectionString) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -1243,8 +1362,10 @@ export function activate(context: vscode.ExtensionContext) {
         const startTime = Date.now(); // Start timing after user interaction
 
         try {
-            // Get connection string
-            const connectionString = await connectionManager.getConnectionString();
+            // Get connection string for this document
+            const documentUri = editor.document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
             if (!connectionString) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -1287,8 +1408,11 @@ export function activate(context: vscode.ExtensionContext) {
     // Import Data from Clipboard
     let disposableImportClipboard = vscode.commands.registerCommand('netezza.importClipboard', async () => {
         try {
-            // Get connection string first
-            const connectionString = await connectionManager.getConnectionString();
+            // Get connection string for active document
+            const editor = vscode.window.activeTextEditor;
+            const documentUri = editor?.document?.uri?.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
             if (!connectionString) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -1551,7 +1675,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     // Export Current Result to XLSB and Open (for datagrid)
-    let disposableExportCurrentResultToXlsbAndOpen = vscode.commands.registerCommand('netezza.exportCurrentResultToXlsbAndOpen', async (csvContent: string) => {
+    let disposableExportCurrentResultToXlsbAndOpen = vscode.commands.registerCommand('netezza.exportCurrentResultToXlsbAndOpen', async (csvContent: string, sql?: string) => {
         try {
             if (!csvContent) {
                 vscode.window.showErrorMessage('No data to export');
@@ -1578,7 +1702,7 @@ export function activate(context: vscode.ExtensionContext) {
                     csvContent,
                     tempPath,
                     false, // Don't copy to clipboard
-                    { source: 'Query Results Panel' },
+                    { source: 'Query Results Panel', sql: sql },
                     (message: string) => {
                         progress.report({ message: message });
                         outputChannel.appendLine(`[CSV to XLSX] ${message}`);

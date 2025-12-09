@@ -63,6 +63,7 @@ function renderHistory(history) {
                 </div>
             </div>
             <div class="history-item-meta">
+                ${entry.connectionName ? `<span>🔌 ${escapeHtml(entry.connectionName)}</span>` : ''}
                 <span>🖥️ ${escapeHtml(entry.host)}</span>
                 <span>🗃️ ${escapeHtml(entry.database)}</span>
                 <span>📁 ${escapeHtml(entry.schema)}</span>

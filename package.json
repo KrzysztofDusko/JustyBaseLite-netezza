@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries via ODBC",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -39,7 +39,8 @@
     "url": "https://github.com/KrzysztofDusko/JustyBaseLite-netezza"
   },
   "activationEvents": [
-    "onLanguage:sql"
+    "onLanguage:sql",
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -196,6 +197,11 @@
         "icon": "$(plug)"
       },
       {
+        "command": "netezza.selectConnectionForTab",
+        "title": "Select Connection for SQL Tab",
+        "icon": "$(database)"
+      },
+      {
         "command": "netezza.clearAutocompleteCache",
         "title": "Netezza: Clear Autocomplete Cache",
         "icon": "$(trash)"
@@ -203,6 +209,11 @@
     ],
     "menus": {
       "editor/title": [
+        {
+          "command": "netezza.selectConnectionForTab",
+          "when": "resourceLangId == sql",
+          "group": "navigation@1"
+        },
         {
           "command": "netezza.runQuery",
           "when": "resourceLangId == sql",

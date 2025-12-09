@@ -40,7 +40,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             return;
         }
 
-        const statusBarDisposable = vscode.window.setStatusBarMessage(`$(search) Searching for "${term}"...`);
+        const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Searching for "${term}"...`);
 
         let sentIds = new Set<string>();
 
@@ -176,6 +176,21 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 .tooltip.top { bottom: 100%; left: 0; margin-bottom: 5px; }
                 .tooltip.bottom { top: 100%; left: 0; margin-top: 5px; }
                 .cache-badge { background-color: var(--vscode-charts-green); color: white; padding: 1px 4px; border-radius: 2px; font-size: 0.7em; margin-left: 5px; }
+                .spinner {
+                    border: 2px solid transparent;
+                    border-top: 2px solid var(--vscode-progressBar-background); 
+                    border-radius: 50%;
+                    width: 14px;
+                    height: 14px;
+                    animation: spin 1s linear infinite;
+                    display: inline-block;
+                    vertical-align: middle;
+                    margin-right: 8px;
+                }
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
             </style>
         </head>
         <body>
@@ -196,7 +211,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 searchBtn.addEventListener('click', () => {
                     const term = searchInput.value;
                     if (term) {
-                        status.textContent = 'Searching...';
+                        status.innerHTML = '<span class="spinner"></span> Searching...';
                         // Keep results until new ones come (or clear? we clear inside search handler if necessary or by postMessage)
                         // resultsList.innerHTML = ''; // Don't clear immediately, let the backend drive it
                         vscode.postMessage({ type: 'search', value: term });

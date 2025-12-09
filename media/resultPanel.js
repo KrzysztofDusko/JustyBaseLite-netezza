@@ -240,6 +240,82 @@ let columnFilterStates = {};
 // Store for aggregation selection per grid: { rsIndex: { columnId: 'sum'|'count'|'countDistinct'|null } }
 let aggregationStates = {};
 
+// Search Worker
+let searchWorker = null;
+let searchMatches = {}; // { [rsIndex]: Set<matchedIndex> | null } -> null means match all
+let isSearching = false;
+
+// Initialize Worker
+if (typeof workerUri !== 'undefined') {
+    try {
+        fetch(workerUri)
+            .then(response => response.text())
+            .then(code => {
+                const blob = new Blob([code], { type: 'application/javascript' });
+                const blobUrl = URL.createObjectURL(blob);
+                searchWorker = new Worker(blobUrl);
+
+                searchWorker.onmessage = function (e) {
+                    const { command, id, matchedIndices } = e.data;
+                    if (command === 'searchResult') {
+                        isSearching = false;
+
+                        // Store results
+                        if (matchedIndices === null) {
+                            searchMatches[id] = null;
+                        } else {
+                            searchMatches[id] = new Set(matchedIndices);
+                        }
+
+                        // Trigger re-render of the specific grid
+                        if (grids[id] && grids[id].tanTable) {
+                            const currentGlobal = document.getElementById('globalFilter').value;
+                            grids[id].tanTable.setGlobalFilter(currentGlobal);
+                        }
+
+                        // Update UI
+                        const rowCountInfo = document.getElementById('rowCountInfo');
+                        if (rowCountInfo) {
+                            rowCountInfo.style.opacity = '0.8';
+                        }
+                    } else if (command === 'setDataDone') {
+                        // Data loaded in worker
+                    }
+                };
+
+                // Send initial data to worker if it wasn't ready during grid creation
+                if (window.resultSets) {
+                    window.resultSets.forEach((rs, index) => {
+                        searchWorker.postMessage({
+                            command: 'setData',
+                            id: index,
+                            data: rs.data,
+                            columns: rs.columns // simplified columns
+                        });
+                    });
+                }
+            })
+            .catch(err => {
+                console.error('Failed to initialize search worker:', err);
+            });
+    } catch (e) {
+        console.error('Error creating worker:', e);
+    }
+}
+
+// Debounce utility
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
 // Global drag state management
 let globalDragState = {
     isDragging: false,
@@ -249,11 +325,11 @@ let globalDragState = {
 
 function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel, getGroupedRowModel, getExpandedRowModel) {
     const wrapper = document.createElement('div');
-    wrapper.className = 'grid-wrapper' + (rsIndex === 0 ? ' active' : '');
+    wrapper.className = 'grid-wrapper' + (rsIndex === activeGridIndex ? ' active' : '');
     wrapper.style.height = '100%';
     wrapper.style.overflow = 'auto';
     wrapper.style.position = 'relative';
-    wrapper.style.display = rsIndex === 0 ? 'block' : 'none';
+    wrapper.style.display = rsIndex === activeGridIndex ? 'block' : 'none';
     container.appendChild(wrapper);
 
     if (!rs.data || !Array.isArray(rs.data) || rs.data.length === 0) {
@@ -266,6 +342,21 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         wrapper.innerHTML = '<div style="padding: 20px; text-align: center; color: red;">Invalid columns definition</div>';
         grids.push(null);
         return;
+    }
+
+    // Initialize search matches state for this grid (null = match all)
+    searchMatches[rsIndex] = null;
+
+    // Send data to worker, but sanitize to ensure it can be cloned if needed, 
+    // though structured clone handles most things. 
+    // We send just data and simplified column info.
+    if (searchWorker) {
+        searchWorker.postMessage({
+            command: 'setData',
+            id: rsIndex,
+            data: rs.data,
+            columns: rs.columns
+        });
     }
 
     // Initialize column filter state for this grid
@@ -476,15 +567,26 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             savePinnedState();
         },
         globalFilterFn: (row, columnId, filterValue) => {
+            // If unmodified logic needed for immediate small data, we could check size here.
+            // But for consistency we use worker results.
+
+            // If no filter value, show all.
             if (!filterValue || filterValue === '') return true;
 
-            const needle = String(filterValue).toLowerCase();
+            // Check if we have worker results for this grid
+            const matches = searchMatches[rsIndex];
 
-            return columns.some(col => {
-                const cellValue = col.accessorFn(row.original);
-                const haystack = cellValue === '' ? 'NULL' : String(cellValue);
-                return haystack.toLowerCase().includes(needle);
-            });
+            // If matches is null, it means "match all" or "not ready yet" (but usually match all if filterValue is set)
+            // However, since we trigger this via setGlobalFilter AFTER getting results, 
+            // valid states are:
+            // 1. filterValue empty -> returns true at top
+            // 2. filterValue set, matches null -> means worker said "match all" (empty query) -> return true
+            // 3. filterValue set, matches Set -> check index
+
+            if (matches === undefined || matches === null) return true;
+
+            // Check if this row index is in the matched set
+            return matches.has(row.index);
         },
         getCoreRowModel: getCoreRowModel(),
         getSortedRowModel: getSortedRowModel(),
@@ -652,6 +754,16 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         if (!info) return;
         const rows = tanTable.getFilteredRowModel().rows;
         info.textContent = `${rows.length} row${rows.length !== 1 ? 's' : ''}`;
+
+        if (rs.limitReached) {
+            const warning = document.createElement('span');
+            warning.style.color = 'var(--vscode-errorForeground)';
+            warning.style.marginLeft = '10px';
+            warning.style.fontWeight = 'bold';
+            warning.title = 'Result limit of 200,000 rows reached.';
+            warning.textContent = '⚠️ Limit Reached';
+            info.appendChild(warning);
+        }
     }
 
     function render() {
@@ -1725,13 +1837,34 @@ function showAggregationDropdown(column, table, anchorElement, rsIndex) {
 }
 
 // Global filter handler
-function onFilterChanged() {
-    const filterInput = document.getElementById('globalFilter');
+// Global filter handler with debounce
+const debouncedSearch = debounce((value) => {
     if (grids[activeGridIndex]) {
-        grids[activeGridIndex].tanTable.setGlobalFilter(filterInput.value);
+        if (searchWorker) {
+            isSearching = true;
+            const rowCountInfo = document.getElementById('rowCountInfo');
+            if (rowCountInfo) {
+                rowCountInfo.textContent = 'Searching...';
+                rowCountInfo.style.opacity = '1';
+            }
+
+            searchWorker.postMessage({
+                command: 'search',
+                id: activeGridIndex,
+                query: value
+            });
+        } else {
+            // Fallback if no worker (shouldn't happen given setup)
+            grids[activeGridIndex].tanTable.setGlobalFilter(value);
+        }
     } else {
         console.error('No grid at activeGridIndex:', activeGridIndex);
     }
+}, 300);
+
+function onFilterChanged() {
+    const filterInput = document.getElementById('globalFilter');
+    debouncedSearch(filterInput.value);
 }
 
 // Helper functions
@@ -1766,9 +1899,12 @@ function openInExcel() {
         csv += rowData.join(',') + '\n';
     });
 
+    const sql = (window.resultSets && window.resultSets[activeGridIndex]) ? window.resultSets[activeGridIndex].sql : '';
+
     vscode.postMessage({
         command: 'openInExcel',
-        data: csv
+        data: csv,
+        sql: sql
     });
 }
 
@@ -1898,9 +2034,12 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
     let isSelecting = false;
     let startCell = null;
     let endCell = null;
+
     let selectedCells = new Set();
+    let isAllSelected = false;
 
     function clearSelection() {
+        isAllSelected = false;
         selectedCells.forEach(cellId => {
             const cell = document.querySelector(`[data-cell-id="${cellId}"]`);
             if (cell) {
@@ -2020,10 +2159,78 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
     // Initial setup
     addCellIds();
 
+    function performSelectAll() {
+        clearSelection();
+        isAllSelected = true;
+        const rows = wrapper.querySelectorAll('tbody tr[data-index]');
+
+        rows.forEach(tr => {
+            const cells = tr.querySelectorAll('td[data-cell-id]');
+            cells.forEach(td => {
+                const cellId = td.dataset.cellId;
+                if (cellId) {
+                    selectedCells.add(cellId);
+                    td.classList.add('selected-cell');
+                }
+            });
+        });
+    }
+
     // Copy selection functionality
     // Return handlers to be attached to the grid object
     return {
         copySelection: function (withHeaders = false) {
+            // Auto-select all if nothing is selected
+            if (!isAllSelected && selectedCells.size === 0) {
+                performSelectAll();
+            }
+
+            if (isAllSelected) {
+                const rows = table.getFilteredRowModel().rows;
+                const columns = table.getAllColumns().filter(col => col.getIsVisible());
+
+                let clipboardText = '';
+
+                // Add headers
+                if (withHeaders) {
+                    const headerRow = columns.map(col => col.columnDef.header);
+                    clipboardText += headerRow.join('\t') + '\n';
+                }
+
+                // Add rows
+                const rowStrings = rows.map(row => {
+                    return columns.map(col => {
+                        const cellValue = row.getValue(col.id);
+                        if (cellValue === null || cellValue === undefined || cellValue === '') {
+                            return 'NULL';
+                        }
+                        return String(cellValue);
+                    }).join('\t');
+                });
+
+                clipboardText += rowStrings.join('\n');
+
+                navigator.clipboard.writeText(clipboardText).then(() => {
+                    vscode.postMessage({
+                        command: 'info',
+                        text: `Copied ${rows.length} rows to clipboard`
+                    });
+                }).catch(() => {
+                    const textArea = document.createElement('textarea');
+                    textArea.value = clipboardText;
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textArea);
+
+                    vscode.postMessage({
+                        command: 'info',
+                        text: `Copied ${rows.length} rows to clipboard`
+                    });
+                });
+                return;
+            }
+
             if (selectedCells.size === 0) return;
 
             const cellArray = Array.from(selectedCells).map(cellId => {
@@ -2085,19 +2292,7 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
         },
 
         selectAll: function () {
-            const rows = wrapper.querySelectorAll('tbody tr[data-index]');
-            clearSelection();
-
-            rows.forEach(tr => {
-                const cells = tr.querySelectorAll('td[data-cell-id]');
-                cells.forEach(td => {
-                    const cellId = td.dataset.cellId;
-                    if (cellId) {
-                        selectedCells.add(cellId);
-                        td.classList.add('selected-cell');
-                    }
-                });
-            });
+            performSelectAll();
         },
 
         clearSelection: clearSelection,

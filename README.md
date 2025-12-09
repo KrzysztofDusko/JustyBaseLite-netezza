@@ -11,7 +11,7 @@ A powerful VS Code extension for working with IBM Netezza / PureData System for 
 - **Results Panel**: View query results in a full-featured data grid with filtering, grouping, and aggregation
 - **Export**: Export results to Excel (XLSX) or CSV
 - **Data Import**: Import data from CSV/TSV files to tables
-- **DDL Generation**: Generate CREATE statements for tables, views, procedures, and functions
+- **DDL Generation**: Generate CREATE statements for tables, views and procedures
 - **Table Management**: Grant permissions, groom tables, generate statistics, truncate, add primary keys
 
 ## Requirements

@@ -9,6 +9,7 @@ export interface QueryHistoryEntry {
     schema: string;
     query: string;
     timestamp: number;
+    connectionName?: string;
     is_favorite?: boolean;
     tags?: string;
     description?: string;
@@ -36,7 +37,7 @@ export class QueryHistoryManager {
         try {
             // Try to load from VS Code storage
             const stored = this.context.globalState.get<StorageData>(QueryHistoryManager.STORAGE_KEY);
-            
+
             if (stored && stored.entries) {
                 this.cache = stored.entries;
                 console.log(`✅ Loaded ${this.cache.length} entries from VS Code storage`);
@@ -56,7 +57,7 @@ export class QueryHistoryManager {
     private async migrateFromLegacyStorage(): Promise<void> {
         try {
             const globalStoragePath = this.context.globalStorageUri.fsPath;
-            
+
             // Check for SQLite database
             const dbPath = path.join(globalStoragePath, 'query-history.db');
             if (fs.existsSync(dbPath)) {
@@ -104,11 +105,12 @@ export class QueryHistoryManager {
     }
 
     async addEntry(
-        host: string, 
-        database: string, 
-        schema: string, 
-        query: string, 
-        tags?: string, 
+        host: string,
+        database: string,
+        schema: string,
+        query: string,
+        connectionName?: string,
+        tags?: string,
         description?: string
     ): Promise<void> {
         try {
@@ -126,6 +128,7 @@ export class QueryHistoryManager {
                 schema,
                 query: query.trim(),
                 timestamp,
+                connectionName,
                 is_favorite: false,
                 tags: tags || '',
                 description: description || ''
@@ -182,7 +185,7 @@ export class QueryHistoryManager {
     }> {
         try {
             const totalEntries = this.cache.length;
-            
+
             // Estimate storage size (rough calculation)
             const jsonSize = JSON.stringify(this.cache).length;
             const sizeMB = parseFloat((jsonSize / (1024 * 1024)).toFixed(2));
@@ -244,7 +247,7 @@ export class QueryHistoryManager {
         if (!this.initialized) {
             await this.initialize();
         }
-        return this.cache.filter(entry => 
+        return this.cache.filter(entry =>
             entry.tags?.toLowerCase().includes(tag.toLowerCase())
         );
     }
@@ -253,7 +256,7 @@ export class QueryHistoryManager {
         if (!this.initialized) {
             await this.initialize();
         }
-        
+
         const allTags = new Set<string>();
         this.cache.forEach(entry => {
             if (entry.tags) {
@@ -264,7 +267,7 @@ export class QueryHistoryManager {
                 });
             }
         });
-        
+
         return Array.from(allTags).sort();
     }
 
@@ -272,9 +275,9 @@ export class QueryHistoryManager {
         if (!this.initialized) {
             await this.initialize();
         }
-        
+
         const term = searchTerm.toLowerCase();
-        return this.cache.filter(entry => 
+        return this.cache.filter(entry =>
             entry.query.toLowerCase().includes(term) ||
             entry.host.toLowerCase().includes(term) ||
             entry.database.toLowerCase().includes(term) ||
@@ -285,15 +288,15 @@ export class QueryHistoryManager {
     }
 
     async getFilteredHistory(
-        host?: string, 
-        database?: string, 
-        schema?: string, 
+        host?: string,
+        database?: string,
+        schema?: string,
         limit?: number
     ): Promise<QueryHistoryEntry[]> {
         if (!this.initialized) {
             await this.initialize();
         }
-        
+
         let filtered = this.cache.filter(entry => {
             if (host && entry.host !== host) return false;
             if (database && entry.database !== database) return false;
