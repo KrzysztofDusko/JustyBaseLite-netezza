@@ -35,11 +35,14 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         });
     }
 
+    private currentSearchId = 0;
+
     private async search(term: string) {
         if (!term || term.length < 2) {
             return;
         }
 
+        const searchId = ++this.currentSearchId;
         const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Searching for "${term}"...`);
 
         let sentIds = new Set<string>();
@@ -48,28 +51,40 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         if (this._view) {
             const cachedResults = this.metadataCache.search(term);
             if (cachedResults.length > 0) {
-                const mappedResults = cachedResults.map(item => {
-                    // Generate ID to deduplicate later
-                    sentIds.add(`${item.name}|${item.type}|${item.parent || ''}`);
+                const mappedResults: any[] = [];
 
-                    return {
-                        NAME: item.name,
-                        SCHEMA: item.schema,
-                        DATABASE: item.database,
-                        TYPE: item.type,
-                        PARENT: item.parent || '',
-                        DESCRIPTION: 'Result from Cache',
-                        MATCH_TYPE: 'NAME' // Cache mostly matches by name
-                    };
+                cachedResults.forEach(item => {
+                    // Generate ID to deduplicate later - normalized
+                    const key = `${item.name.toUpperCase().trim()}|${item.type.toUpperCase().trim()}|${(item.parent || '').toUpperCase().trim()}`;
+
+                    if (!sentIds.has(key)) {
+                        sentIds.add(key);
+                        mappedResults.push({
+                            NAME: item.name,
+                            SCHEMA: item.schema,
+                            DATABASE: item.database,
+                            TYPE: item.type,
+                            PARENT: item.parent || '',
+                            DESCRIPTION: 'Result from Cache',
+                            MATCH_TYPE: 'NAME' // Cache mostly matches by name
+                        });
+                    }
                 });
 
                 // Send cached results immediately
-                this._view.webview.postMessage({ type: 'results', data: mappedResults, append: false });
+                if (mappedResults.length > 0 && searchId === this.currentSearchId) {
+                    this._view.webview.postMessage({ type: 'results', data: mappedResults, append: false });
+                } else if (mappedResults.length === 0 && searchId === this.currentSearchId) {
+                    // If we had cached results but they were all duplicates of nothing (impossible) 
+                    // or if we have no unique results from cache, maybe wait for DB?
+                    // But we should clear if we are starting a new search.
+                    this._view.webview.postMessage({ type: 'results', data: [], append: false });
+                }
             } else {
-                // Clear previous results if nothing in cache (and we are starting fresh)
-                // Actually passing 'append: false' clears it.
-                // If cache found nothing, we should send empty list with append:false to clear view?
-                this._view.webview.postMessage({ type: 'results', data: [], append: false });
+                // Clear previous results
+                if (searchId === this.currentSearchId) {
+                    this._view.webview.postMessage({ type: 'results', data: [], append: false });
+                }
             }
         }
 
@@ -103,6 +118,13 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
         try {
             const resultJson = await runQuery(this.context, query, true);
+
+            // If another search started, ignore this result
+            if (searchId !== this.currentSearchId) {
+                statusBarDisposable.dispose();
+                return;
+            }
+
             statusBarDisposable.dispose();
 
             if (this._view && resultJson) {
@@ -111,8 +133,11 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 // Deduplicate against what we already sent from cache
                 if (sentIds.size > 0) {
                     dbResults = dbResults.filter((item: any) => {
-                        const key = `${item.NAME}|${item.TYPE}|${item.PARENT || ''}`;
+                        const key = `${item.NAME.toUpperCase().trim()}|${item.TYPE.toUpperCase().trim()}|${(item.PARENT || '').toUpperCase().trim()}`;
                         if (sentIds.has(key)) return false;
+
+                        // Also add to sentIds to prevent internal duplicates in DB results (unlikely with UNION but safe)
+                        sentIds.add(key);
                         return true;
                     });
                 }
@@ -122,15 +147,24 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     this._view.webview.postMessage({ type: 'results', data: dbResults, append: true });
                 } else if (sentIds.size === 0) {
                     // Only if NOTHING found in cache AND NOTHING in DB, show no results
-                    // The webview logic might need update to handle 'append' flag and showing 'No results' message correctly
-                    // If we sent cache results, user sees them. 
-                    // If we didn't, we sent empty list (cleared). matches would be 0.
-                    // If DB returns empty, and cache was empty, user sees 0.
                 }
+            }
+
+            // Trigger background prefetch of all objects after first search (non-blocking)
+            if (!this.metadataCache.hasAllObjectsPrefetchTriggered()) {
+                const context = this.context;
+                const cache = this.metadataCache;
+                setTimeout(async () => {
+                    try {
+                        await cache.prefetchAllObjects((q) => runQuery(context, q, true));
+                    } catch (e) {
+                        console.error('[SchemaSearch] Background prefetch error:', e);
+                    }
+                }, 500); // Delay to let UI settle
             }
         } catch (e: any) {
             statusBarDisposable.dispose();
-            if (this._view) {
+            if (this._view && searchId === this.currentSearchId) {
                 this._view.webview.postMessage({ type: 'error', message: e.message });
             }
         }

@@ -1908,6 +1908,32 @@ function openInExcel() {
     });
 }
 
+function copyAsExcel() {
+    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
+
+    const table = grids[activeGridIndex].tanTable;
+    const rows = table.getFilteredRowModel().rows;
+    const headers = table.getAllColumns().filter(col => col.getIsVisible());
+
+    let csv = headers.map(h => escapeCsvValue(h.columnDef.header)).join(',') + '\n';
+
+    rows.forEach(row => {
+        const rowData = headers.map(header => {
+            const cell = row.getValue(header.id);
+            return escapeCsvValue(cell);
+        });
+        csv += rowData.join(',') + '\n';
+    });
+
+    const sql = (window.resultSets && window.resultSets[activeGridIndex]) ? window.resultSets[activeGridIndex].sql : '';
+
+    vscode.postMessage({
+        command: 'copyAsExcel',
+        data: csv,
+        sql: sql
+    });
+}
+
 function escapeCsvValue(value) {
     if (value === null || value === undefined) return '';
     const str = String(value);
@@ -2395,6 +2421,7 @@ window.removeGroup = removeGroup;
 // Window functions for compatibility
 window.toggleRowView = toggleRowView;
 window.openInExcel = openInExcel;
+window.copyAsExcel = copyAsExcel;
 window.exportToCsv = exportToCsv;
 window.onFilterChanged = onFilterChanged;
 window.clearFilter = function () {

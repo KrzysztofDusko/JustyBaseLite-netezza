@@ -26,6 +26,10 @@ export class MetadataCache {
     private pendingCacheTypes: Set<CacheType> = new Set();
     private saveTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
+    // Background prefetch tracking
+    private columnPrefetchInProgress: Set<string> = new Set(); // Track prefetch by "DB.SCHEMA" or "DB.."
+    private allObjectsPrefetchTriggered: boolean = false; // For schema search
+
     constructor(private context: vscode.ExtensionContext) {
         this.loadCacheFromWorkspaceState();
     }
@@ -278,5 +282,169 @@ export class MetadataCache {
         }
 
         return results;
+    }
+
+    // Background prefetch all columns for tables in a schema/database
+    // runQueryFn should be a function that executes a query and returns JSON result
+    public async prefetchColumnsForSchema(
+        dbName: string,
+        schemaName: string | undefined,
+        runQueryFn: (query: string) => Promise<string | undefined>
+    ): Promise<void> {
+        const prefetchKey = schemaName ? `${dbName}.${schemaName}` : `${dbName}..`;
+
+        // Check if already prefetching
+        if (this.columnPrefetchInProgress.has(prefetchKey)) {
+            return;
+        }
+
+        // Get tables from cache
+        const tables = this.getTables(prefetchKey);
+        if (!tables || tables.length === 0) {
+            return;
+        }
+
+        this.columnPrefetchInProgress.add(prefetchKey);
+        console.log(`[MetadataCache] Starting background column prefetch for ${prefetchKey}`);
+
+        try {
+            // Get list of tables that need columns fetched
+            const tablesToFetch: string[] = [];
+            for (const table of tables) {
+                const tableName = typeof table.label === 'string' ? table.label : table.label?.label;
+                if (!tableName) continue;
+
+                const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
+                if (!this.getColumns(columnKey)) {
+                    tablesToFetch.push(tableName);
+                }
+            }
+
+            if (tablesToFetch.length === 0) {
+                console.log(`[MetadataCache] All columns already cached for ${prefetchKey}`);
+                return;
+            }
+
+            console.log(`[MetadataCache] Fetching columns for ${tablesToFetch.length} tables in ${prefetchKey}`);
+
+            // Fetch columns in batches to avoid overwhelming the database
+            const BATCH_SIZE = 10;
+            for (let i = 0; i < tablesToFetch.length; i += BATCH_SIZE) {
+                const batch = tablesToFetch.slice(i, i + BATCH_SIZE);
+                const tableList = batch.map(t => `'${t}'`).join(',');
+
+                const dbPrefix = `${dbName}..`;
+                const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
+
+                const query = `
+                    SELECT O.OBJNAME AS TABLENAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
+                    FROM ${dbPrefix}_V_RELATION_COLUMN C
+                    JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
+                    WHERE UPPER(O.OBJNAME) IN (${tableList.toUpperCase()}) 
+                    ${schemaClause}
+                    AND UPPER(O.DBNAME) = UPPER('${dbName}')
+                    ORDER BY O.OBJNAME, C.ATTNUM
+                `;
+
+                try {
+                    const resultJson = await runQueryFn(query);
+                    if (resultJson) {
+                        const results = JSON.parse(resultJson);
+
+                        // Group columns by table
+                        const columnsByTable = new Map<string, any[]>();
+                        for (const row of results) {
+                            const tableName = row.TABLENAME;
+                            if (!columnsByTable.has(tableName)) {
+                                columnsByTable.set(tableName, []);
+                            }
+                            columnsByTable.get(tableName)!.push({
+                                label: row.ATTNAME,
+                                kind: 5, // vscode.CompletionItemKind.Field
+                                detail: row.FORMAT_TYPE
+                            });
+                        }
+
+                        // Store in cache
+                        for (const [tableName, columns] of columnsByTable) {
+                            const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
+                            this.setColumns(columnKey, columns);
+                        }
+                    }
+                } catch (e) {
+                    console.error(`[MetadataCache] Error fetching batch columns:`, e);
+                }
+            }
+
+            console.log(`[MetadataCache] Completed background column prefetch for ${prefetchKey}`);
+        } finally {
+            this.columnPrefetchInProgress.delete(prefetchKey);
+        }
+    }
+
+    // Prefetch all objects for schema search (triggered after first search)
+    public async prefetchAllObjects(
+        runQueryFn: (query: string) => Promise<string | undefined>
+    ): Promise<void> {
+        if (this.allObjectsPrefetchTriggered) {
+            return;
+        }
+        this.allObjectsPrefetchTriggered = true;
+
+        console.log(`[MetadataCache] Starting background prefetch of all objects for search`);
+
+        try {
+            // Fetch all tables across all databases (from current connection context)
+            const tablesQuery = `
+                SELECT OBJNAME, OBJID, SCHEMA, DBNAME 
+                FROM _V_OBJECT_DATA 
+                WHERE OBJTYPE = 'TABLE' 
+                ORDER BY DBNAME, SCHEMA, OBJNAME
+            `;
+
+            const resultJson = await runQueryFn(tablesQuery);
+            if (!resultJson) return;
+
+            const results = JSON.parse(resultJson);
+
+            // Group tables by DB.SCHEMA
+            const tablesByKey = new Map<string, { tables: any[], idMap: Map<string, number> }>();
+
+            for (const row of results) {
+                const key = row.SCHEMA ? `${row.DBNAME}.${row.SCHEMA}` : `${row.DBNAME}..`;
+                if (!tablesByKey.has(key)) {
+                    tablesByKey.set(key, { tables: [], idMap: new Map() });
+                }
+                const entry = tablesByKey.get(key)!;
+                entry.tables.push({
+                    label: row.OBJNAME,
+                    kind: 7, // vscode.CompletionItemKind.Class
+                    detail: row.SCHEMA ? 'Table' : `Table (${row.SCHEMA})`,
+                    sortText: row.OBJNAME
+                });
+
+                const fullKey = row.SCHEMA
+                    ? `${row.DBNAME}.${row.SCHEMA}.${row.OBJNAME}`
+                    : `${row.DBNAME}..${row.OBJNAME}`;
+                entry.idMap.set(fullKey, row.OBJID);
+            }
+
+            // Store in cache (only if not already cached)
+            for (const [key, entry] of tablesByKey) {
+                if (!this.getTables(key)) {
+                    this.setTables(key, entry.tables, entry.idMap);
+                }
+            }
+
+            console.log(`[MetadataCache] Prefetched tables for ${tablesByKey.size} schema(s)`);
+
+        } catch (e) {
+            console.error(`[MetadataCache] Error in prefetchAllObjects:`, e);
+        }
+    }
+
+    // Check if prefetch has been triggered for schema search
+    public hasAllObjectsPrefetchTriggered(): boolean {
+        return this.allObjectsPrefetchTriggered;
     }
 }

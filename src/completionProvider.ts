@@ -539,8 +539,8 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             if (objId) {
                 query = `SELECT ATTNAME, FORMAT_TYPE FROM ${dbPrefix}_V_RELATION_COLUMN WHERE OBJID = ${objId} ORDER BY ATTNUM`;
             } else {
-                const schemaClause = schemaName ? `AND UPPER(SCHEMA) = UPPER('${schemaName}')` : '';
-                const dbClause = dbName ? `AND UPPER(DBNAME) = UPPER('${dbName}')` : '';
+                const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
+                const dbClause = dbName ? `AND UPPER(O.DBNAME) = UPPER('${dbName}')` : '';
                 query = `
                     SELECT C.ATTNAME, C.FORMAT_TYPE 
                     FROM ${dbPrefix}_V_RELATION_COLUMN C
@@ -561,6 +561,23 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             });
 
             this.metadataCache.setColumns(cacheKey, items);
+
+            // Trigger background prefetch of all other columns in same schema (non-blocking)
+            if (dbName) {
+                const context = this.context;
+                const cache = this.metadataCache;
+                setTimeout(async () => {
+                    try {
+                        await cache.prefetchColumnsForSchema(
+                            dbName,
+                            schemaName,
+                            (q) => runQuery(context, q, true)
+                        );
+                    } catch (e) {
+                        console.error('[SqlCompletion] Background column prefetch error:', e);
+                    }
+                }, 100); // Small delay to not block UI
+            }
 
             return items;
         } catch (e) {

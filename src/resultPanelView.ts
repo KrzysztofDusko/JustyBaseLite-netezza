@@ -38,6 +38,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'openInExcel':
                     this.openInExcel(message.data, message.sql);
                     return;
+                case 'copyAsExcel':
+                    this.copyAsExcel(message.data, message.sql);
+                    return;
                 case 'switchSource':
                     this._activeSourceUri = message.sourceUri;
                     this._updateWebview();
@@ -217,8 +220,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     }
 
     private async openInExcel(csvContent: string, sql?: string) {
-        // Use the existing XLSX export functionality to create and open Excel file
+        // Use the existing XLSB export functionality to create and open Excel file
         vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', csvContent, sql);
+    }
+
+    private async copyAsExcel(csvContent: string, sql?: string) {
+        vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', csvContent, sql);
     }
 
     private closeSource(sourceUri: string) {
@@ -314,6 +321,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             <div class="controls">
                 <button onclick="toggleRowView()" title="Toggle Row View">👁️ Row View</button>
                 <button onclick="openInExcel()" title="Open results in Excel">📊 Excel</button>
+                <button onclick="copyAsExcel()" title="Copy results as Excel to clipboard">📋 Excel Copy</button>
                 <button onclick="exportToCsv()" title="Export results to CSV">📄 CSV</button>
                 <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 4px;"></div>
                 <button onclick="selectAll()" title="Select all rows">☑️ Select All</button>

@@ -818,6 +818,31 @@ export function activate(context: vscode.ExtensionContext) {
                     // We don't change searchTypes here because we want to find the parent object
                 }
 
+                // OPTIMIZATION: Try to find the object in cache first (instant lookup)
+                if (data.database && data.schema && (searchType === 'TABLE' || !searchType)) {
+                    const cacheKey = `${data.database}.${data.schema}.${searchName}`;
+                    const cachedObjId = metadataCache.findTableId(cacheKey);
+                    if (cachedObjId !== undefined) {
+                        // Found in cache - create SchemaItem directly without DB query
+                        const { SchemaItem } = await import('./schemaProvider');
+                        const targetItem = new SchemaItem(
+                            searchName,
+                            vscode.TreeItemCollapsibleState.Collapsed,
+                            'netezza:TABLE',
+                            data.database,
+                            'TABLE',
+                            data.schema,
+                            cachedObjId,
+                            undefined,
+                            targetConnectionName
+                        );
+                        await schemaTreeView.reveal(targetItem, { select: true, focus: true, expand: true });
+                        statusBarDisposable.dispose();
+                        vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${data.database}.${data.schema} (cached)`, 3000);
+                        return;
+                    }
+                }
+
                 // Determine which databases to search
                 let databasesToSearch: string[] = [];
                 if (data.database) {
@@ -1144,9 +1169,9 @@ export function activate(context: vscode.ExtensionContext) {
         // Show save dialog
         const uri = await vscode.window.showSaveDialog({
             filters: {
-                'Excel Workbook': ['xlsx']
+                'Excel Binary Workbook': ['xlsb']
             },
-            saveLabel: 'Export to XLSX'
+            saveLabel: 'Export to XLSB'
         });
 
         if (!uri) {
@@ -1167,7 +1192,7 @@ export function activate(context: vscode.ExtensionContext) {
             // Show progress
             await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
-                title: 'Exporting to XLSX...',
+                title: 'Exporting to XLSB...',
                 cancellable: false
             }, async (progress) => {
                 const { exportQueryToXlsb } = await import('./xlsbExporter');
@@ -1179,7 +1204,7 @@ export function activate(context: vscode.ExtensionContext) {
                     false, // Don't copy to clipboard
                     (message: string) => {
                         progress.report({ message: message });
-                        outputChannel.appendLine(`[XLSX Export] ${message}`);
+                        outputChannel.appendLine(`[XLSB Export] ${message}`);
                     }
                 );
 
@@ -1188,11 +1213,11 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             });
 
-            logExecutionTime('Export to XLSX', startTime);
+            logExecutionTime('Export to XLSB', startTime);
             vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
 
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Error exporting to XLSX: ${err.message}`);
+            vscode.window.showErrorMessage(`Error exporting to XLSB: ${err.message}`);
         }
     });
 
@@ -1283,7 +1308,7 @@ export function activate(context: vscode.ExtensionContext) {
             // Show progress
             await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
-                title: 'Exporting to XLSX and copying to clipboard...',
+                title: 'Exporting to XLSB and copying to clipboard...',
                 cancellable: false
             }, async (progress) => {
                 const { exportQueryToXlsb, getTempFilePath } = await import('./xlsbExporter');
@@ -1298,7 +1323,7 @@ export function activate(context: vscode.ExtensionContext) {
                     true, // Copy to clipboard
                     (message: string) => {
                         progress.report({ message: message });
-                        outputChannel.appendLine(`[XLSX Clipboard] ${message}`);
+                        outputChannel.appendLine(`[XLSB Clipboard] ${message}`);
                     }
                 );
 
@@ -1311,7 +1336,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             });
 
-            logExecutionTime('Copy XLSX to Clipboard', startTime);
+            logExecutionTime('Copy XLSB to Clipboard', startTime);
 
             // Show success message with details
             const action = await vscode.window.showInformationMessage(
@@ -1327,7 +1352,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Error copying XLSX to clipboard: ${err.message}`);
+            vscode.window.showErrorMessage(`Error copying XLSB to clipboard: ${err.message}`);
         }
     });
 
@@ -1350,9 +1375,9 @@ export function activate(context: vscode.ExtensionContext) {
         // Show save dialog
         const uri = await vscode.window.showSaveDialog({
             filters: {
-                'Excel Workbook': ['xlsx']
+                'Excel Binary Workbook': ['xlsb']
             },
-            saveLabel: 'Export to XLSX and Open'
+            saveLabel: 'Export to XLSB and Open'
         });
 
         if (!uri) {
@@ -1373,7 +1398,7 @@ export function activate(context: vscode.ExtensionContext) {
             // Show progress
             await vscode.window.withProgress({
                 location: vscode.ProgressLocation.Notification,
-                title: 'Exporting to XLSX and opening...',
+                title: 'Exporting to XLSB and opening...',
                 cancellable: false
             }, async (progress) => {
                 const { exportQueryToXlsb } = await import('./xlsbExporter');
@@ -1385,7 +1410,7 @@ export function activate(context: vscode.ExtensionContext) {
                     false, // Don't copy to clipboard
                     (message: string) => {
                         progress.report({ message: message });
-                        outputChannel.appendLine(`[XLSX Export] ${message}`);
+                        outputChannel.appendLine(`[XLSB Export] ${message}`);
                     }
                 );
 
@@ -1394,14 +1419,14 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             });
 
-            logExecutionTime('Export to XLSX and Open', startTime);
+            logExecutionTime('Export to XLSB and Open', startTime);
 
             // Open the file
             await vscode.env.openExternal(uri);
             vscode.window.showInformationMessage(`Results exported and opened: ${uri.fsPath}`);
 
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Error exporting to XLSX: ${err.message}`);
+            vscode.window.showErrorMessage(`Error exporting to XLSB: ${err.message}`);
         }
     });
 
@@ -1686,7 +1711,7 @@ export function activate(context: vscode.ExtensionContext) {
             const os = require('os');
             const path = require('path');
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const tempPath = path.join(os.tmpdir(), `netezza_results_${timestamp}.xlsx`);
+            const tempPath = path.join(os.tmpdir(), `netezza_results_${timestamp}.xlsb`);
 
             const startTime = Date.now();
 
@@ -1705,7 +1730,7 @@ export function activate(context: vscode.ExtensionContext) {
                     { source: 'Query Results Panel', sql: sql },
                     (message: string) => {
                         progress.report({ message: message });
-                        outputChannel.appendLine(`[CSV to XLSX] ${message}`);
+                        outputChannel.appendLine(`[CSV to XLSB] ${message}`);
                     }
                 );
 
@@ -1726,6 +1751,59 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // Copy Current Result to Clipboard as XLSB
+    let disposableCopyCurrentResultToXlsbClipboard = vscode.commands.registerCommand('netezza.copyCurrentResultToXlsbClipboard', async (csvContent: string, sql?: string) => {
+        try {
+            if (!csvContent) {
+                vscode.window.showErrorMessage('No data to copy');
+                return;
+            }
+
+            // Generate temporary file path
+            const { getTempFilePath } = await import('./xlsbExporter');
+            const tempPath = getTempFilePath();
+
+            const startTime = Date.now();
+
+            // Show progress
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Copying to clipboard as Excel...',
+                cancellable: false
+            }, async (progress) => {
+                const { exportCsvToXlsb } = await import('./xlsbExporter');
+
+                const result = await exportCsvToXlsb(
+                    csvContent,
+                    tempPath,
+                    true, // Copy to clipboard IS true
+                    { source: 'Query Results Panel', sql: sql },
+                    (message: string) => {
+                        progress.report({ message: message });
+                        outputChannel.appendLine(`[CSV to Clipboard] ${message}`);
+                    }
+                );
+
+                if (!result.success) {
+                    throw new Error(result.message);
+                }
+
+                if (!result.details?.clipboard_success) {
+                    throw new Error('Failed to copy file to clipboard');
+                }
+            });
+
+            const duration = Date.now() - startTime;
+            outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] Copy Current Result to Clipboard completed in ${duration}ms`);
+
+            // Show success message
+            vscode.window.showInformationMessage('Results copied to clipboard as Excel table! You can paste in Excel or Explorer.');
+
+        } catch (err: any) {
+            vscode.window.showErrorMessage(`Error copying to clipboard: ${err.message}`);
+        }
+    });
+
     context.subscriptions.push(disposable);
     // context.subscriptions.push(disposableSelection); // Removed
     context.subscriptions.push(disposableExportXlsb);
@@ -1733,6 +1811,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposableCopyXlsb);
     context.subscriptions.push(disposableExportXlsbAndOpen);
     context.subscriptions.push(disposableExportCurrentResultToXlsbAndOpen);
+    context.subscriptions.push(disposableCopyCurrentResultToXlsbClipboard);
     context.subscriptions.push(disposableImportClipboard);
     context.subscriptions.push(disposableImportData);
 

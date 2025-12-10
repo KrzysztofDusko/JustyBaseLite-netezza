@@ -73,7 +73,7 @@ async function getColumns(
             X.OBJID::INT AS OBJID
             , X.ATTNAME
             , X.DESCRIPTION
-            , CASE WHEN X.ATTNOTNULL THEN X.FORMAT_TYPE || ' NOT NULL'  ELSE X.FORMAT_TYPE END AS FULL_TYPE
+            , X.FORMAT_TYPE AS FULL_TYPE
             , X.ATTNOTNULL::BOOL AS ATTNOTNULL
             , X.COLDEFAULT
         FROM
@@ -310,7 +310,11 @@ async function generateTableDDL(
         const cleanColumnName = quoteNameIfNeeded(column.name);
         let columnDef = `    ${cleanColumnName} ${column.fullTypeName}`;
 
-        if (column.defaultValue) {
+        if (column.notNull) {
+            columnDef += ' NOT NULL';
+        }
+
+        if (column.defaultValue !== null) {
             columnDef += ` DEFAULT ${column.defaultValue}`;
         }
 
@@ -666,7 +670,13 @@ async function generateExternalTableDDL(
     ddlLines.push('(');
 
     // Add columns
-    const columnDefs = columns.map(col => `    ${quoteNameIfNeeded(col.name)} ${col.fullTypeName}`);
+    const columnDefs = columns.map(col => {
+        let def = `    ${quoteNameIfNeeded(col.name)} ${col.fullTypeName}`;
+        if (col.notNull) {
+            def += ' NOT NULL';
+        }
+        return def;
+    });
     ddlLines.push(columnDefs.join(',\n'));
     ddlLines.push(')');
 
