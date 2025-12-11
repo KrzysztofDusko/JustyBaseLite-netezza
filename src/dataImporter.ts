@@ -9,11 +9,12 @@ import * as path from 'path';
 import * as readline from 'readline';
 
 // XLSX import for Excel file support
-let XLSX: any;
+// Custom Excel Reader from ExcelHelpers
+let ReaderFactory: any;
 try {
-    XLSX = require('xlsx');
+    ReaderFactory = require('../ExcelHelpers/ReaderFactory');
 } catch (e) {
-    console.error('XLSX module not available');
+    console.error('ExcelHelpers/ReaderFactory module not available', e);
 }
 
 // ODBC import
@@ -293,37 +294,69 @@ export class NetezzaImporter {
     /**
      * Read Excel file (xlsx/xlsb) and convert to 2D array
      */
-    private readExcelFile(progressCallback?: ProgressCallback): string[][] {
-        if (!XLSX) {
-            throw new Error('XLSX module not available');
+    /**
+     * Read Excel file (xlsx/xlsb) and convert to 2D array
+     */
+    private async readExcelFile(progressCallback?: ProgressCallback): Promise<string[][]> {
+        if (!ReaderFactory) {
+            throw new Error('ReaderFactory module not available');
         }
 
         progressCallback?.('Reading Excel file...');
-        const workbook = XLSX.readFile(this.filePath, { type: 'file' });
 
-        // Get the first sheet
-        const sheetName = workbook.SheetNames[0];
-        if (!sheetName) {
-            throw new Error('Excel file has no sheets');
+        const reader = ReaderFactory.create(this.filePath);
+        await reader.open(this.filePath);
+
+        const rows: string[][] = [];
+
+        // Helper to format values
+        const valToString = (val: any): string => {
+            if (val === null || val === undefined) return '';
+            if (val instanceof Date) {
+                // Format Date to YYYY-MM-DD HH:mm:ss
+                // We use local parts to avoid timezone shifting if the reader produced local time
+                const pad = (n: number) => n < 10 ? '0' + n : n;
+                return `${val.getFullYear()}-${pad(val.getMonth() + 1)}-${pad(val.getDate())} ${pad(val.getHours())}:${pad(val.getMinutes())}:${pad(val.getSeconds())}`;
+            }
+            return String(val);
+        };
+
+        let rowCount = 0;
+        while (await reader.read()) {
+            const row: string[] = [];
+            // Assuming fieldCount gives the max column index found so far.
+            // But for the current row, we might need to rely on internal array or just loop safe amount?
+            // XlsxReader and XlsbReader update _currentRow.
+            // We can access it directly if we cast reader to any, or use fieldCount.
+            // However, fieldCount is "max field count seen so far".
+            // A safer way is to use the length of the internal row array if accessible, or just getValue loop.
+            // XlsxReader internal: this._currentRow
+
+            // We'll iterate up to fieldCount? No, fieldCount might grow.
+            // _currentRow.length is reliable if we trust the reader implementation.
+            const currentRow = (reader as any)._currentRow;
+            if (currentRow && Array.isArray(currentRow)) {
+                for (let i = 0; i < currentRow.length; i++) {
+                    row.push(valToString(currentRow[i]));
+                }
+            }
+
+            rows.push(row);
+            rowCount++;
+
+            if (rowCount % 10000 === 0) {
+                progressCallback?.(`Processed ${rowCount.toLocaleString()} rows...`);
+            }
         }
 
-        progressCallback?.(`Processing sheet: ${sheetName}`);
-        const sheet = workbook.Sheets[sheetName];
+        // Reader cleanup (close zip if needed)
+        // XlsxReader has close()?
+        if (typeof reader.close === 'function') {
+            await reader.close();
+        }
 
-        // Convert sheet to 2D array (with header row)
-        const data: string[][] = XLSX.utils.sheet_to_json(sheet, {
-            header: 1,
-            raw: false,
-            defval: ''
-        }) as string[][];
-
-        // Convert all values to strings
-        const stringData: string[][] = data.map(row =>
-            row.map(cell => cell !== null && cell !== undefined ? String(cell) : '')
-        );
-
-        progressCallback?.(`Excel file loaded: ${stringData.length} rows, ${stringData[0]?.length || 0} columns`);
-        return stringData;
+        progressCallback?.(`Excel file loaded: ${rows.length} rows`);
+        return rows;
     }
 
     /**
@@ -336,7 +369,7 @@ export class NetezzaImporter {
 
         if (this.isExcelFile) {
             // Read Excel file
-            this.excelData = this.readExcelFile(progressCallback);
+            this.excelData = await this.readExcelFile(progressCallback);
             rows = this.excelData;
         } else {
             // Read CSV/TXT file
@@ -586,14 +619,7 @@ export async function importDataToNetezza(
             };
         }
 
-        // Check if XLSX module is available for Excel files
-        const excelFormats = ['.xlsx', '.xlsb'];
-        if (excelFormats.includes(fileExt) && !XLSX) {
-            return {
-                success: false,
-                message: 'XLSX module not available. Please run: npm install xlsx'
-            };
-        }
+
 
         progressCallback?.('Starting import process...');
         progressCallback?.(`  Source file: ${filePath}`);
@@ -656,7 +682,7 @@ export async function importDataToNetezza(
                 rowsProcessed: importer.getRowsCount(),
                 rowsInserted: importer.getRowsCount(),
                 processingTime: `${processingTime.toFixed(1)}s`,
-                
+
                 columns: importer.getSqlHeaders().length,
                 detectedDelimiter: importer.getCsvDelimiter()
             }

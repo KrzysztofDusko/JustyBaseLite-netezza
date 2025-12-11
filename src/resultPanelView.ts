@@ -303,6 +303,16 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     private _buildHtmlDocument(scriptUri: vscode.Uri, virtualUri: vscode.Uri, mainScriptUri: vscode.Uri, styleUri: vscode.Uri, viewData: any, workerUri: vscode.Uri) {
         const cspSource = this._view!.webview.cspSource;
 
+        // SVG Icons
+        const icons = {
+            eye: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 3c-3 0-6 2.5-6 5s3 5 6 5 6-2.5 6-5-3-5-6-5zm0 9c-2.5 0-4.5-2-4.5-4S5.5 4 8 4s4.5 2 4.5 4-2 4.5-4.5 4.5z"/><circle cx="8" cy="8" r="2"/></svg>`,
+            excel: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6 3h8v10H6V3zm-1 0H3v10h2V3zm-2-1h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M6 6h8v1H6V6zm0 2h8v1H6V8zm0 2h8v1H6v-1z"/></svg>`,
+            copy: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M4 4h7v2H4V4zm0 4h7v2H4V8zm0 4h7v2H4v-2zM2 1h12v14H2V1zm1 1v12h10V2H3z"/></svg>`,
+            csv: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13 2H6L2 6v8a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zm-1 11H4V7h3V4h5v9z"/></svg>`,
+            checkAll: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13.485 1.929l1.414 1.414-9.9 9.9-4.243-4.242 1.415-1.415 2.828 2.829z"/></svg>`,
+            clear: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 7.293l4.146-4.147.708.708L8.707 8l4.147 4.146-.708.708L8 8.707l-4.146 4.147-.708-.708L7.293 8 3.146 3.854l.708-.708L8 7.293z"/></svg>`
+        };
+
         return `<!DOCTYPE html>
         <html lang="en">
         <head>
@@ -319,16 +329,16 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             <div id="resultSetTabs" class="result-set-tabs" style="display: none;"></div>
             
             <div class="controls">
-                <button onclick="toggleRowView()" title="Toggle Row View">👁️ Row View</button>
-                <button onclick="openInExcel()" title="Open results in Excel">📊 Excel</button>
-                <button onclick="copyAsExcel()" title="Copy results as Excel to clipboard">📋 Excel Copy</button>
-                <button onclick="exportToCsv()" title="Export results to CSV">📄 CSV</button>
-                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 4px;"></div>
-                <button onclick="selectAll()" title="Select all rows">☑️ Select All</button>
-                <button onclick="copySelection(false)" title="Copy selected cells to clipboard">📋 Copy</button>
-                <button onclick="copySelection(true)" title="Copy selected cells with headers">📋 Copy w/ Headers</button>
-                <button onclick="clearAllFilters()" title="Clear all column filters">🚫 Clear Filters</button>
                 <input type="text" id="globalFilter" placeholder="Filter..." onkeyup="onFilterChanged()" style="background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px;">
+                <button onclick="toggleRowView()" title="Toggle Row View">${icons.eye} Row View</button>
+                <button onclick="openInExcel()" title="Open results in Excel">${icons.excel} Excel</button>
+                <button onclick="copyAsExcel()" title="Copy results as Excel to clipboard">${icons.excel} Excel Copy</button>
+                <button onclick="exportToCsv()" title="Export results to CSV">${icons.csv} CSV</button>
+                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 4px;"></div>
+                <button onclick="selectAll()" title="Select all rows">${icons.checkAll} Select All</button>
+                <button onclick="copySelection(false)" title="Copy selected cells to clipboard">${icons.copy} Copy</button>
+                <button onclick="copySelection(true)" title="Copy selected cells with headers">${icons.copy} Copy w/ Headers</button>
+                <button onclick="clearAllFilters()" title="Clear all column filters">${icons.clear} Clear Filters</button>
                 <span id="rowCountInfo" style="margin-left: auto; font-size: 12px; opacity: 0.8;"></span>
             </div>
 

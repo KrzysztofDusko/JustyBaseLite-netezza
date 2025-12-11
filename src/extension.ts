@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
-import { runQuery, runQueriesSequentially } from './queryRunner';
+import { runQuery, runQueriesSequentially, getCurrentSessionId, getCurrentSessionConnectionName, clearCurrentSession } from './queryRunner';
 import { ConnectionManager } from './connectionManager';
 import { LoginPanel } from './loginPanel';
-import { SchemaProvider } from './schemaProvider';
+import { SchemaProvider, SchemaItem } from './schemaProvider';
 import { ResultPanelView } from './resultPanelView';
 import { SqlCompletionItemProvider } from './completionProvider';
 import { SchemaSearchProvider } from './schemaSearchProvider';
@@ -24,8 +24,82 @@ function updateKeepConnectionStatusBar(statusBarItem: vscode.StatusBarItem, conn
     statusBarItem.backgroundColor = isEnabled ? new vscode.ThemeColor('statusBarItem.prominentBackground') : undefined;
 }
 
+// Known SQL extensions that may conflict with Netezza
+const KNOWN_SQL_EXTENSIONS = [
+    { id: 'mtxr.sqltools', name: 'SQLTools' },
+    { id: 'ms-mssql.mssql', name: 'Microsoft SQL Server' },
+    { id: 'oracle.oracledevtools', name: 'Oracle Developer Tools' },
+    { id: 'cweijan.vscode-mysql-client2', name: 'MySQL' },
+    { id: 'ckolkman.vscode-postgres', name: 'PostgreSQL' }
+];
+
+// Check for conflicting SQL extensions and warn user
+async function checkForConflictingExtensions(context: vscode.ExtensionContext): Promise<void> {
+    const config = vscode.workspace.getConfiguration('netezza');
+    const showWarnings = config.get<boolean>('showConflictWarnings', true);
+
+    if (!showWarnings) {
+        return;
+    }
+
+    // Check known extensions
+    const foundKnown: string[] = [];
+    for (const ext of KNOWN_SQL_EXTENSIONS) {
+        if (vscode.extensions.getExtension(ext.id)) {
+            foundKnown.push(ext.name);
+        }
+    }
+
+    // Dynamic detection: find other extensions that activate on SQL
+    const otherSqlExtensions = vscode.extensions.all.filter(ext => {
+        const pkg = ext.packageJSON;
+        if (!pkg || ext.id === 'krzysztof-d.justybaselite-netezza') {
+            return false;
+        }
+
+        // Check if already in known list
+        if (KNOWN_SQL_EXTENSIONS.some(k => k.id === ext.id)) {
+            return false;
+        }
+
+        // Check activationEvents for SQL
+        const activatesOnSql = pkg.activationEvents?.some((e: string) =>
+            e.includes('onLanguage:sql') || e.includes('onLanguage:mssql')
+        );
+
+        // Check contributes.languages for SQL
+        const contributesSql = pkg.contributes?.languages?.some((lang: any) =>
+            lang.id === 'sql' || lang.extensions?.includes('.sql')
+        );
+
+        return activatesOnSql || contributesSql;
+    });
+
+    const foundOther = otherSqlExtensions.map(ext => ext.packageJSON.displayName || ext.id);
+    const allConflicts = [...foundKnown, ...foundOther];
+
+    if (allConflicts.length > 0) {
+        const message = allConflicts.length === 1
+            ? `Wykryto rozszerzenie SQL "${allConflicts[0]}" które może powodować konflikty (np. zduplikowane skróty klawiszowe F5, Ctrl+Enter).`
+            : `Wykryto rozszerzenia SQL które mogą powodować konflikty: ${allConflicts.join(', ')}. Niektóre funkcje (np. F5, Ctrl+Enter) mogą być zduplikowane.`;
+
+        const result = await vscode.window.showWarningMessage(
+            message,
+            'OK',
+            'Nie pokazuj ponownie'
+        );
+
+        if (result === 'Nie pokazuj ponownie') {
+            await config.update('showConflictWarnings', false, vscode.ConfigurationTarget.Global);
+        }
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('Netezza extension: Activating...');
+
+    // Check for other SQL extensions that may conflict
+    checkForConflictingExtensions(context);
 
     // Ensure persistent connection is closed when extension is deactivated
     context.subscriptions.push({
@@ -65,9 +139,28 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Initial update and listen for changes
     updateActiveConnectionStatusBar();
-    connectionManager.onDidChangeActiveConnection(updateActiveConnectionStatusBar);
+    connectionManager.onDidChangeActiveConnection((connectionName) => {
+        updateActiveConnectionStatusBar();
+        // Trigger background prefetch when connection is selected
+        if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
+            metadataCache.triggerConnectionPrefetch(
+                connectionName,
+                (q) => runQuery(context, q, true, connectionName!, connectionManager)
+            );
+        }
+    });
     connectionManager.onDidChangeConnections(updateActiveConnectionStatusBar);
-    connectionManager.onDidChangeDocumentConnection(updateActiveConnectionStatusBar);
+    connectionManager.onDidChangeDocumentConnection((documentUri: string) => {
+        updateActiveConnectionStatusBar();
+        // Trigger prefetch when document connection is set
+        const connectionName = connectionManager.getDocumentConnection(documentUri);
+        if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
+            metadataCache.triggerConnectionPrefetch(
+                connectionName,
+                (q) => runQuery(context, q, true, connectionName!, connectionManager)
+            );
+        }
+    });
     // Update status bar when switching editors
     vscode.window.onDidChangeActiveTextEditor(updateActiveConnectionStatusBar);
 
@@ -80,7 +173,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     console.log('Netezza extension: Registering SchemaSearchProvider...');
     // metadataCache already instantiated above
-    const schemaSearchProvider = new SchemaSearchProvider(context.extensionUri, context, metadataCache);
+    const schemaSearchProvider = new SchemaSearchProvider(context.extensionUri, context, metadataCache, connectionManager);
 
     console.log('Netezza extension: Registering QueryHistoryView...');
     const queryHistoryProvider = new QueryHistoryView(context.extensionUri, context);
@@ -89,6 +182,8 @@ export function activate(context: vscode.ExtensionContext) {
         treeDataProvider: schemaProvider,
         showCollapseAll: true
     });
+
+
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(
@@ -230,6 +325,70 @@ export function activate(context: vscode.ExtensionContext) {
     // initialize decorations for the active editor
     updateScriptDecorations(vscode.window.activeTextEditor);
 
+    // --- SQL Statement Highlighting ---
+    const sqlStatementDecoration = vscode.window.createTextEditorDecorationType({
+        // Use a theme-aware color or a reliable semi-transparent blue
+        backgroundColor: 'rgba(5, 115, 201, 0.10)',
+        isWholeLine: false, // Highlights only the statement text
+        rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed
+    });
+
+    function updateSqlHighlight(editor: vscode.TextEditor | undefined) {
+        // Check configuration first
+        const config = vscode.workspace.getConfiguration('netezza');
+        const enabled = config.get<boolean>('highlightActiveStatement', true);
+
+        if (!enabled || !editor || (editor.document.languageId !== 'sql' && editor.document.languageId !== 'mssql')) {
+            if (editor) {
+                editor.setDecorations(sqlStatementDecoration, []);
+            }
+            return;
+        }
+
+        try {
+            const document = editor.document;
+            // Get cursor position (use active, or the primary selection)
+            const position = editor.selection.active;
+            const offset = document.offsetAt(position);
+            const text = document.getText();
+
+            // Use SqlParser to find statement at cursor
+            const stmt = SqlParser.getStatementAtPosition(text, offset);
+
+            if (stmt) {
+                const startPos = document.positionAt(stmt.start);
+                const endPos = document.positionAt(stmt.end);
+                const range = new vscode.Range(startPos, endPos);
+                editor.setDecorations(sqlStatementDecoration, [range]);
+            } else {
+                editor.setDecorations(sqlStatementDecoration, []);
+            }
+        } catch (e) {
+            console.error('Error updating SQL highlight:', e);
+        }
+    }
+
+    // Update highlight on selection change
+    context.subscriptions.push(
+        vscode.window.onDidChangeTextEditorSelection(e => {
+            updateSqlHighlight(e.textEditor);
+        }),
+        // Also update when swtiching editors
+        vscode.window.onDidChangeActiveTextEditor(e => {
+            updateSqlHighlight(e);
+        }),
+        // Update on configuration change
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('netezza.highlightActiveStatement')) {
+                updateSqlHighlight(vscode.window.activeTextEditor);
+            }
+        })
+    );
+
+    // Initial trigger
+    updateSqlHighlight(vscode.window.activeTextEditor);
+
+
     // Sync result view with active editor
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -252,6 +411,51 @@ export function activate(context: vscode.ExtensionContext) {
                     ? 'Keep connection open: ENABLED - connection will remain open after queries'
                     : 'Keep connection open: DISABLED - connection will be closed after each query'
             );
+        }),
+        vscode.commands.registerCommand('netezza.dropCurrentSession', async () => {
+            const sessionId = getCurrentSessionId();
+            const sessionConnectionName = getCurrentSessionConnectionName();
+
+            if (!sessionId) {
+                vscode.window.showWarningMessage('No active session to drop. Run a query first.');
+                return;
+            }
+
+            const confirmation = await vscode.window.showWarningMessage(
+                `Are you sure you want to drop session ${sessionId}? This will kill the current running query.`,
+                { modal: true },
+                'Yes, drop session',
+                'Cancel'
+            );
+
+            if (confirmation !== 'Yes, drop session') {
+                return;
+            }
+
+            try {
+                // Get connection string for the same connection (or active if not specified)
+                const connStr = await connectionManager.getConnectionString(sessionConnectionName);
+                if (!connStr) {
+                    vscode.window.showErrorMessage('No connection available to execute DROP SESSION');
+                    return;
+                }
+
+                // IMPORTANT: Create a NEW connection, ignoring keepConnection setting
+                // This is necessary because the persistent connection is the one we want to kill
+                const odbc = require('odbc');
+                const freshConnection = await odbc.connect({ connectionString: connStr, fetchArray: true });
+
+                try {
+                    await freshConnection.query(`DROP SESSION ${sessionId}`);
+                    vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
+                    // Clear the session tracking
+                    clearCurrentSession();
+                } finally {
+                    await freshConnection.close();
+                }
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Failed to drop session: ${err.message}`);
+            }
         }),
         vscode.commands.registerCommand('netezza.selectActiveConnection', async () => {
             const connections = await connectionManager.getConnections();
@@ -781,11 +985,23 @@ export function activate(context: vscode.ExtensionContext) {
             const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Revealing ${data.name} in schema...`);
             try {
                 // Determine which connection to use
-                let targetConnectionName = data.connectionName;
+                // Priority: Active Tab (if SQL) -> data.connectionName -> Global Active Connection
+                let targetConnectionName: string | undefined;
 
-                // If no connection specified, try to use active connection
+                // First, try to use the active editor's connection (respects per-tab selection)
+                const activeEditor = vscode.window.activeTextEditor;
+                if (activeEditor && activeEditor.document.languageId === 'sql') {
+                    targetConnectionName = connectionManager.getConnectionForExecution(activeEditor.document.uri.toString());
+                }
+
+                // If no tab-specific connection, fall back to data.connectionName (from search result)
                 if (!targetConnectionName) {
-                    targetConnectionName = connectionManager.getActiveConnectionName();
+                    targetConnectionName = data.connectionName;
+                }
+
+                // If still no connection, use global active connection
+                if (!targetConnectionName) {
+                    targetConnectionName = connectionManager.getActiveConnectionName() || undefined;
                 }
 
                 if (!targetConnectionName) {
@@ -821,7 +1037,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // OPTIMIZATION: Try to find the object in cache first (instant lookup)
                 if (data.database && data.schema && (searchType === 'TABLE' || !searchType)) {
                     const cacheKey = `${data.database}.${data.schema}.${searchName}`;
-                    const cachedObjId = metadataCache.findTableId(cacheKey);
+                    const cachedObjId = metadataCache.findTableId(targetConnectionName, cacheKey);
                     if (cachedObjId !== undefined) {
                         // Found in cache - create SchemaItem directly without DB query
                         const { SchemaItem } = await import('./schemaProvider');
@@ -1469,7 +1685,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // First, get current database and schema from connection
                 try {
                     const currentDbQuery = "SELECT CURRENT_CATALOG, CURRENT_SCHEMA";
-                    const currentDbResult = await runQuery(context, currentDbQuery, true);
+                    const currentDbResult = await runQuery(context, currentDbQuery, true, connectionName, connectionManager);
 
                     if (currentDbResult) {
                         const dbInfo = JSON.parse(currentDbResult);
@@ -1556,8 +1772,11 @@ export function activate(context: vscode.ExtensionContext) {
     // Import Data
     let disposableImportData = vscode.commands.registerCommand('netezza.importData', async () => {
         try {
-            // Get connection string first
-            const connectionString = await connectionManager.getConnectionString();
+            // Get connection string for active document
+            const editor = vscode.window.activeTextEditor;
+            const documentUri = editor?.document?.uri?.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
             if (!connectionString) {
                 throw new Error('Connection not configured. Please connect via Netezza: Connect...');
             }
@@ -1611,7 +1830,7 @@ export function activate(context: vscode.ExtensionContext) {
                 // First, get current database and schema from connection
                 try {
                     const currentDbQuery = "SELECT CURRENT_CATALOG, CURRENT_SCHEMA";
-                    const currentDbResult = await runQuery(context, currentDbQuery, true);
+                    const currentDbResult = await runQuery(context, currentDbQuery, true, connectionName, connectionManager);
 
                     if (currentDbResult) {
                         const dbInfo = JSON.parse(currentDbResult);
@@ -1968,7 +2187,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(disposableSqlShortcuts);
 
     // Register SQL Completion Provider
-    const completionProvider = new SqlCompletionItemProvider(context, metadataCache);
+    const completionProvider = new SqlCompletionItemProvider(context, metadataCache, connectionManager);
     context.subscriptions.push(
         vscode.languages.registerCompletionItemProvider(['sql', 'mssql'], completionProvider, '.', ' ')
     );

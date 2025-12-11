@@ -7,6 +7,10 @@ body {
     font-size: var(--vscode-font-size);
     color: var(--vscode-foreground);
     background-color: var(--vscode-editor-background);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
 .toolbar {
@@ -84,7 +88,8 @@ button.primary:hover {
 
 .history-container {
     overflow-y: auto;
-    height: calc(100vh - 50px);
+    flex-grow: 1;
+    /* height: calc(100vh - 50px); Remove fixed height calc */
 }
 
 .history-item {

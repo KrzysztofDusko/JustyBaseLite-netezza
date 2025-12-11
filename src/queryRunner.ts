@@ -10,6 +10,23 @@ try {
     console.error('odbc package not installed. Run: npm install odbc');
 }
 
+// Session tracking for DROP SESSION functionality
+let currentExecutingSessionId: number | null = null;
+let currentExecutingConnectionName: string | undefined = undefined;
+
+export function getCurrentSessionId(): number | null {
+    return currentExecutingSessionId;
+}
+
+export function getCurrentSessionConnectionName(): string | undefined {
+    return currentExecutingConnectionName;
+}
+
+export function clearCurrentSession(): void {
+    currentExecutingSessionId = null;
+    currentExecutingConnectionName = undefined;
+}
+
 /**
  * Helper to extract connection details from connection string
  */
@@ -188,9 +205,13 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
         }
 
         try {
+            // Get timeout configuration
+            const config = vscode.workspace.getConfiguration('netezza');
+            const queryTimeout = config.get<number>('queryTimeout', 1800);
+
             // Execute query - results will be arrays since we set fetchArray: true on connection
             // Limit to 200,000 rows to prevent UI lockup
-            const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000);
+            const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000, queryTimeout);
 
             // Get current schema for history logging
             let currentSchema = 'unknown';
@@ -360,6 +381,20 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
                 console.debug('Could not retrieve current schema:', schemaErr);
             }
 
+            // Capture current session ID for DROP SESSION functionality
+            try {
+                const sidResult = await connection.query('SELECT CURRENT_SID');
+                if (sidResult && sidResult.length > 0) {
+                    currentExecutingSessionId = Array.isArray(sidResult[0])
+                        ? sidResult[0][0]
+                        : sidResult[0].CURRENT_SID;
+                    currentExecutingConnectionName = resolvedConnectionName;
+                    outputChannel.appendLine(`Session ID: ${currentExecutingSessionId}`);
+                }
+            } catch (sidErr) {
+                console.debug('Could not retrieve session ID:', sidErr);
+            }
+
             const connectionDetails = parseConnectionString(connectionString);
             const historyManager = new QueryHistoryManager(context);
             // Use resolved connection name for history
@@ -382,7 +417,9 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
 
                     // Execute query - results will be arrays since we set fetchArray: true on connection
                     // Limit to 200,000 rows to prevent UI lockup
-                    const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000);
+                    const config = vscode.workspace.getConfiguration('netezza');
+                    const queryTimeout = config.get<number>('queryTimeout', 1800);
+                    const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000, queryTimeout);
 
                     // Log to history (async, don't wait)
                     historyManager.addEntry(
@@ -421,6 +458,8 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
             }
             outputChannel.appendLine('All queries completed.');
         } finally {
+            // Clear session tracking
+            clearCurrentSession();
             // Close connection only if not using persistent connection
             if (shouldCloseConnection) {
                 await connection.close();
@@ -448,12 +487,16 @@ function formatOdbcError(error: any): string {
  * Execute a query and fetch results up to a limit.
  * This replaces connection.query() to allow capping the number of rows returned.
  */
-async function executeAndFetchWithLimit(connection: any, query: string, limit: number): Promise<any> {
+async function executeAndFetchWithLimit(connection: any, query: string, limit: number, timeoutSeconds?: number): Promise<any> {
     const statement = await connection.createStatement();
     try {
         await statement.prepare(query);
         // Pass cursor: true to get a cursor instead of full results immediately
-        const cursor = await statement.execute({ cursor: true, fetchSize: 5000 });
+        const options: any = { cursor: true, fetchSize: 5000 };
+        if (timeoutSeconds && timeoutSeconds > 0) {
+            options.timeout = timeoutSeconds;
+        }
+        const cursor = await statement.execute(options);
 
         const allRows: any[] = [];
         let fetchedCount = 0;

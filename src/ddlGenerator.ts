@@ -93,11 +93,23 @@ async function getColumns(
     const columns: ColumnInfo[] = [];
 
     for (const row of result as any[]) {
+        // Safe boolean parsing for ODBC result
+        let isNotNull = false;
+        const val = row.ATTNOTNULL;
+        if (typeof val === 'boolean') {
+            isNotNull = val;
+        } else if (typeof val === 'number') {
+            isNotNull = val !== 0;
+        } else if (typeof val === 'string') {
+            const lower = val.trim().toLowerCase();
+            isNotNull = lower === 't' || lower === 'true' || lower === '1' || lower === 'yes';
+        }
+
         columns.push({
             name: row.ATTNAME,
             description: row.DESCRIPTION || null,
             fullTypeName: row.FULL_TYPE,
-            notNull: Boolean(row.ATTNOTNULL),
+            notNull: isNotNull,
             defaultValue: row.COLDEFAULT || null
         });
     }

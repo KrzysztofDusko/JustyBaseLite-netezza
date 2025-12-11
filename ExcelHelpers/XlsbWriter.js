@@ -23,7 +23,7 @@ class XlsbWriter {
         this._autofilterIsOn = false;
 
         // Cache OA date epoch for performance
-        this._oaEpoch = new Date(1899, 11, 30).getTime();
+        this._oaEpoch = Date.UTC(1899, 11, 30);
 
         // Constants similar to C# implementation
         this._sheet1Bytes = Buffer.from([

@@ -333,7 +333,15 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     container.appendChild(wrapper);
 
     if (!rs.data || !Array.isArray(rs.data) || rs.data.length === 0) {
-        wrapper.innerHTML = '<div style="padding: 20px; text-align: center; opacity: 0.6;">Empty result set</div>';
+        if (rs.rowsAffected !== undefined || rs.message) {
+            const rowsAffectedText = rs.rowsAffected !== undefined ? `${rs.rowsAffected} rows affected` : '';
+            const messageText = rs.message || '';
+            const displayText = [messageText, rowsAffectedText].filter(Boolean).join(' - ');
+
+            wrapper.innerHTML = `<div style="padding: 20px; text-align: center; opacity: 0.8; font-size: 14px;">${displayText}</div>`;
+        } else {
+            wrapper.innerHTML = '<div style="padding: 20px; text-align: center; opacity: 0.6;">Empty result set</div>';
+        }
         grids.push(null);
         return;
     }

@@ -1,10 +1,15 @@
 import * as vscode from 'vscode';
 import { runQuery } from './queryRunner';
 import { MetadataCache } from './metadataCache';
+import { ConnectionManager } from './connectionManager';
 
 export class SqlCompletionItemProvider implements vscode.CompletionItemProvider {
 
-    constructor(private context: vscode.ExtensionContext, private metadataCache: MetadataCache) {
+    constructor(
+        private context: vscode.ExtensionContext,
+        private metadataCache: MetadataCache,
+        private connectionManager: ConnectionManager
+    ) {
     }
 
     public async provideCompletionItems(
@@ -27,10 +32,24 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const prevLine = position.line > 0 ? document.lineAt(position.line - 1).text : '';
         const prevLineUpper = prevLine.toUpperCase();
 
+        // Determine active connection
+        let connectionName: string | undefined = this.connectionManager.getConnectionForExecution(document.uri.toString());
+        if (!connectionName) {
+            connectionName = this.connectionManager.getActiveConnectionName() || undefined;
+        }
+
+        // Trigger background prefetch for this connection if not already done
+        if (connectionName && !this.metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
+            this.metadataCache.triggerConnectionPrefetch(
+                connectionName,
+                (q) => runQuery(this.context, q, true, connectionName!, this.connectionManager)
+            );
+        }
+
         // 1. Database Suggestion
         // Trigger: "FROM " or "JOIN " (with optional whitespace/newlines)
         if (/(FROM|JOIN)\s+$/.test(upperPrefix)) {
-            const dbs = await this.getDatabases();
+            const dbs = await this.getDatabases(connectionName);
             // Also suggest local definitions (Temp Tables / CTEs) here as they can be used in FROM/JOIN
             const localItems = localDefs.map(def => {
                 const item = new vscode.CompletionItem(def.name, vscode.CompletionItemKind.Class);
@@ -43,7 +62,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         if (/(?:FROM|JOIN)\s*$/i.test(prevLine)) {
             // Current line should be: empty, whitespace only, or partial identifier without dots
             if (/^\s*[a-zA-Z0-9_]*$/.test(linePrefix)) {
-                const dbs = await this.getDatabases();
+                const dbs = await this.getDatabases(connectionName);
                 const localItems = localDefs.map(def => {
                     const item = new vscode.CompletionItem(def.name, vscode.CompletionItemKind.Class);
                     item.detail = def.type;
@@ -58,14 +77,14 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const dbMatch = linePrefix.match(/(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)\.\s*$/i);
         if (dbMatch) {
             const dbName = dbMatch[1];
-            const items = await this.getSchemas(dbName);
+            const items = await this.getSchemas(connectionName, dbName);
             return new vscode.CompletionList(items, false);
         }
         // Check for DB. on current line with FROM/JOIN on previous line
         const dbMatchCurrent = linePrefix.match(/^\s*([a-zA-Z0-9_]+)\.\s*$/i);
         if (dbMatchCurrent && /(?:FROM|JOIN)\s*$/i.test(prevLine)) {
             const dbName = dbMatchCurrent[1];
-            const items = await this.getSchemas(dbName);
+            const items = await this.getSchemas(connectionName, dbName);
             return new vscode.CompletionList(items, false);
         }
 
@@ -75,14 +94,14 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         if (schemaMatch) {
             const dbName = schemaMatch[1];
             const schemaName = schemaMatch[2];
-            return this.getTables(dbName, schemaName);
+            return this.getTables(connectionName, dbName, schemaName);
         }
         // Check for DB.SCHEMA. on current line with FROM/JOIN on previous line
         const schemaMatchCurrent = linePrefix.match(/^\s*([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\.\s*$/i);
         if (schemaMatchCurrent && /(?:FROM|JOIN)\s*$/i.test(prevLine)) {
             const dbName = schemaMatchCurrent[1];
             const schemaName = schemaMatchCurrent[2];
-            return this.getTables(dbName, schemaName);
+            return this.getTables(connectionName, dbName, schemaName);
         }
 
         // 4. Table Suggestion (Double dot / No Schema)
@@ -90,13 +109,13 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const doubleDotMatch = linePrefix.match(/(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)\.\.$/i);
         if (doubleDotMatch) {
             const dbName = doubleDotMatch[1];
-            return this.getTables(dbName, undefined);
+            return this.getTables(connectionName, dbName, undefined);
         }
         // Check for DB.. on current line with FROM/JOIN on previous line
         const doubleDotMatchCurrent = linePrefix.match(/^\s*([a-zA-Z0-9_]+)\.\.\s*$/i);
         if (doubleDotMatchCurrent && /(?:FROM|JOIN)\s*$/i.test(prevLine)) {
             const dbName = doubleDotMatchCurrent[1];
-            return this.getTables(dbName, undefined);
+            return this.getTables(connectionName, dbName, undefined);
         }
 
         // 5. Column Suggestion (via Alias or Table name)
@@ -123,7 +142,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                     }
 
                     // Otherwise, regular DB lookup
-                    return this.getColumns(aliasInfo.db, aliasInfo.schema, aliasInfo.table);
+                    return this.getColumns(connectionName, aliasInfo.db, aliasInfo.schema, aliasInfo.table);
                 }
 
                 // Check if the identifier itself is a local definition (e.g. "CTE.")
@@ -194,11 +213,6 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 // We need to find the content inside the parenthesis.
                 // cteMatch[0] is like "ABC AS ("
 
-                const queryContent = this.extractBalancedParenthesisContent(text, currentIndex + cteMatch[0].length - 1); // -1 because extractBalanced expects index of '('? No, let's make helper robust.
-
-                // My helper extractBalancedParenthesisContent assumes we start searching *after* the opening paren? 
-                // Let's make it start searching from the opening paren.
-
                 // Let's adjust: find the first '(' after AS
                 const relativeOpenParen = remainingText.indexOf('(', cteMatch.index! + cteMatch[1].length); // simplistic
                 const absoluteOpenParen = currentIndex + relativeOpenParen;
@@ -234,15 +248,6 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         while ((match = joinRegex.exec(text)) !== null) {
             const startIndex = match.index + match[0].length;
             // match[0] is "JOIN (", so startIndex is after '('.
-            // We need to find the content inside the parenthesis.
-            // extractBalancedParenthesisContent expects startIndex to be *after* the opening paren?
-            // Let's check the implementation of extractBalancedParenthesisContent.
-            // It starts loop at startIndex.
-            // If we pass startIndex, it will start checking from there.
-            // But wait, my helper logic:
-            // let balance = 1; let i = startIndex;
-            // So it assumes we are already inside one level of parenthesis.
-            // Yes, that matches "JOIN (".
 
             const query = this.extractBalancedParenthesisContent(text, startIndex);
 
@@ -376,8 +381,9 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         });
     }
 
-    private async getDatabases(): Promise<vscode.CompletionItem[]> {
-        const cached = this.metadataCache.getDatabases();
+    private async getDatabases(connectionName?: string): Promise<vscode.CompletionItem[]> {
+        if (!connectionName) return [];
+        const cached = this.metadataCache.getDatabases(connectionName);
         if (cached) {
             return cached.map((item: any) => {
                 if (item instanceof vscode.CompletionItem) return item;
@@ -389,7 +395,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
 
         try {
             const query = "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE";
-            const resultJson = await runQuery(this.context, query, true);
+            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) return [];
 
             const results = JSON.parse(resultJson);
@@ -399,7 +405,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 return item;
             });
 
-            this.metadataCache.setDatabases(items);
+            this.metadataCache.setDatabases(connectionName, items);
 
             return items;
         } catch (e) {
@@ -408,8 +414,9 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         }
     }
 
-    private async getSchemas(dbName: string): Promise<vscode.CompletionItem[]> {
-        const cached = this.metadataCache.getSchemas(dbName);
+    private async getSchemas(connectionName: string | undefined, dbName: string): Promise<vscode.CompletionItem[]> {
+        if (!connectionName) return [];
+        const cached = this.metadataCache.getSchemas(connectionName, dbName);
         if (cached) {
             return cached.map((item: any) => {
                 if (item instanceof vscode.CompletionItem) return item;
@@ -425,7 +432,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const statusBarDisposable = vscode.window.setStatusBarMessage(`Fetching schemas for ${dbName}...`);
         try {
             const query = `SELECT SCHEMA FROM ${dbName}.._V_SCHEMA ORDER BY SCHEMA`;
-            const resultJson = await runQuery(this.context, query, true);
+            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) {
                 return [];
             }
@@ -443,7 +450,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                     return item;
                 });
 
-            this.metadataCache.setSchemas(dbName, items);
+            this.metadataCache.setSchemas(connectionName, dbName, items);
 
             return items;
         } catch (e) {
@@ -454,9 +461,10 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         }
     }
 
-    private async getTables(dbName: string, schemaName?: string): Promise<vscode.CompletionItem[]> {
+    private async getTables(connectionName: string | undefined, dbName: string, schemaName?: string): Promise<vscode.CompletionItem[]> {
+        if (!connectionName) return [];
         const cacheKey = schemaName ? `${dbName}.${schemaName}` : `${dbName}..`;
-        const cached = this.metadataCache.getTables(cacheKey);
+        const cached = this.metadataCache.getTables(connectionName, cacheKey);
         if (cached) {
             return cached.map((item: any) => {
                 if (item instanceof vscode.CompletionItem) return item;
@@ -480,7 +488,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 query = `SELECT OBJNAME, OBJID, SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
             }
 
-            const resultJson = await runQuery(this.context, query, true);
+            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) return [];
 
             const results = JSON.parse(resultJson);
@@ -491,16 +499,22 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 const item = new vscode.CompletionItem(row.OBJNAME, vscode.CompletionItemKind.Class);
                 item.detail = schemaName ? 'Table' : `Table (${row.SCHEMA})`;
                 item.sortText = row.OBJNAME;
-                const fullKey = schemaName ? `${dbName}.${schemaName}.${row.OBJNAME}` : `${dbName}..${row.OBJNAME}`;
-                idMapForKey.set(fullKey, row.OBJID);
-                if (!schemaName && row.SCHEMA) {
+
+                // If we don't have schemaName, we can't reliably build the full key unless we use the schema from the row
+                // But the cache key for 'getTables' with no schema is 'DB..', so we just store under that.
+                // However, findTableId usually expects DB.SCHEMA.TABLE. 
+                // So idMapForKey should store fully qualified names if possible.
+
+                if (schemaName) {
+                    idMapForKey.set(`${dbName}.${schemaName}.${row.OBJNAME}`, row.OBJID);
+                } else if (row.SCHEMA) {
                     idMapForKey.set(`${dbName}.${row.SCHEMA}.${row.OBJNAME}`, row.OBJID);
                 }
 
                 return item;
             });
 
-            this.metadataCache.setTables(cacheKey, items, idMapForKey);
+            this.metadataCache.setTables(connectionName, cacheKey, items, idMapForKey);
 
             return items;
         } catch (e) {
@@ -511,18 +525,19 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         }
     }
 
-    private async getColumns(dbName: string | undefined, schemaName: string | undefined, tableName: string): Promise<vscode.CompletionItem[]> {
+    private async getColumns(connectionName: string | undefined, dbName: string | undefined, schemaName: string | undefined, tableName: string): Promise<vscode.CompletionItem[]> {
+        if (!connectionName) return [];
         let objId: number | undefined;
         const dbPrefix = dbName ? `${dbName}..` : '';
 
         const lookupKey = schemaName && dbName ? `${dbName}.${schemaName}.${tableName}` : (dbName ? `${dbName}..${tableName}` : undefined);
 
         if (lookupKey) {
-            objId = this.metadataCache.findTableId(lookupKey);
+            objId = this.metadataCache.findTableId(connectionName, lookupKey);
         }
 
         const cacheKey = `${dbName || 'CURRENT'}.${schemaName || ''}.${tableName}`;
-        const cached = this.metadataCache.getColumns(cacheKey);
+        const cached = this.metadataCache.getColumns(connectionName, cacheKey);
         if (cached) {
             return cached.map((item: any) => {
                 if (item instanceof vscode.CompletionItem) return item;
@@ -550,7 +565,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 `;
             }
 
-            const resultJson = await runQuery(this.context, query, true);
+            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) return [];
 
             const results = JSON.parse(resultJson);
@@ -560,7 +575,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 return item;
             });
 
-            this.metadataCache.setColumns(cacheKey, items);
+            this.metadataCache.setColumns(connectionName, cacheKey, items);
 
             // Trigger background prefetch of all other columns in same schema (non-blocking)
             if (dbName) {
@@ -569,9 +584,10 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 setTimeout(async () => {
                     try {
                         await cache.prefetchColumnsForSchema(
+                            connectionName, // Pass connection name
                             dbName,
                             schemaName,
-                            (q) => runQuery(context, q, true)
+                            (q) => runQuery(context, q, true, connectionName, this.connectionManager)
                         );
                     } catch (e) {
                         console.error('[SqlCompletion] Background column prefetch error:', e);

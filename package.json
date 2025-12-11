@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries via ODBC",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -93,11 +93,11 @@
       {
         "command": "netezza.runQuery",
         "title": "Run Query (Smart/Sequential)",
-        "icon": "$(play)"
+        "icon": "$(debug-start)"
       },
       {
         "command": "netezza.runQueryBatch",
-        "title": "Run Query Batch (Legacy)",
+        "title": "Run Query Batch",
         "icon": "$(run-all)"
       },
       {
@@ -205,6 +205,11 @@
         "command": "netezza.clearAutocompleteCache",
         "title": "Netezza: Clear Autocomplete Cache",
         "icon": "$(trash)"
+      },
+      {
+        "command": "netezza.dropCurrentSession",
+        "title": "Drop Current Session (Kill Query)",
+        "icon": "$(debug-stop)"
       }
     ],
     "menus": {
@@ -217,42 +222,47 @@
         {
           "command": "netezza.runQuery",
           "when": "resourceLangId == sql",
-          "group": "navigation"
+          "group": "navigation@2"
         },
         {
-          "command": "netezza.runQueryBatch",
+          "command": "netezza.dropCurrentSession",
           "when": "resourceLangId == sql",
-          "group": "navigation"
-        },
-        {
-          "command": "netezza.exportToXlsb",
-          "when": "resourceLangId == sql",
-          "group": "navigation"
-        },
-        {
-          "command": "netezza.exportToCsv",
-          "when": "resourceLangId == sql",
-          "group": "navigation"
-        },
-        {
-          "command": "netezza.exportToXlsbAndOpen",
-          "when": "resourceLangId == sql",
-          "group": "navigation"
+          "group": "navigation@3"
         },
         {
           "command": "netezza.copyXlsbToClipboard",
           "when": "resourceLangId == sql",
-          "group": "navigation"
+          "group": "navigation@4"
         },
         {
           "command": "netezza.importClipboard",
           "when": "resourceLangId == sql",
-          "group": "navigation"
+          "group": "navigation@5"
+        },
+        {
+          "command": "netezza.exportToXlsbAndOpen",
+          "when": "resourceLangId == sql",
+          "group": "navigation@6"
+        },
+        {
+          "command": "netezza.runQueryBatch",
+          "when": "resourceLangId == sql",
+          "group": "navigation@10"
+        },
+        {
+          "command": "netezza.exportToXlsb",
+          "when": "resourceLangId == sql",
+          "group": "navigation@11"
+        },
+        {
+          "command": "netezza.exportToCsv",
+          "when": "resourceLangId == sql",
+          "group": "navigation@12"
         },
         {
           "command": "netezza.importData",
           "when": "resourceLangId == sql",
-          "group": "navigation"
+          "group": "navigation@13"
         }
       ],
       "editor/context": [
@@ -364,7 +374,29 @@
     },
     "configuration": {
       "type": "object",
-      "title": "Netezza Configuration"
+      "title": "Netezza Configuration",
+      "properties": {
+        "netezza.highlightActiveStatement": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable highlighting of the active SQL statement."
+        },
+        "netezza.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python executable for running scripts."
+        },
+        "netezza.queryTimeout": {
+          "type": "integer",
+          "default": 1800,
+          "description": "Query execution timeout in seconds. 0 to disable."
+        },
+        "netezza.showConflictWarnings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show warning when other SQL extensions (SQLTools, MS SQL, etc.) are detected that may cause conflicts."
+        }
+      }
     },
     "keybindings": [
       {
@@ -410,8 +442,10 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
-    "odbc": "^2.4.9"
+    "odbc": "^2.4.9",
+    "yauzl": "^3.2.0"
   },
   "preview": true
 }

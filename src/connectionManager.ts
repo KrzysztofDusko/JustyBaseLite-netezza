@@ -7,6 +7,7 @@ export interface ConnectionDetails {
     database: string;
     user: string;
     password?: string;
+    dbType?: string;
 }
 
 export class ConnectionManager {
@@ -163,7 +164,14 @@ export class ConnectionManager {
             return null;
         }
 
-        return `DRIVER={NetezzaSQL};SERVER=${details.host};PORT=${details.port};DATABASE=${details.database};UID=${details.user};PWD=${details.password};`;
+        const dbType = details.dbType || 'NetezzaSQL';
+
+        if (dbType === 'NetezzaSQL') {
+            return `DRIVER={NetezzaSQL};SERVER=${details.host};PORT=${details.port};DATABASE=${details.database};UID=${details.user};PWD=${details.password};`;
+        }
+
+        // Fallback for NetezzaSQL or other potential future types
+        return `DRIVER={${dbType}};SERVER=${details.host};PORT=${details.port};DATABASE=${details.database};UID=${details.user};PWD=${details.password};`;
     }
 
     async getCurrentDatabase(name?: string): Promise<string | null> {
@@ -230,6 +238,10 @@ export class ConnectionManager {
         }
     }
 
+    dispose() {
+        this.closeAllPersistentConnections();
+    }
+
     // Per-document connection management
     getDocumentConnection(documentUri: string): string | undefined {
         return this._documentConnections.get(documentUri);
@@ -260,3 +272,4 @@ export class ConnectionManager {
         return this._activeConnectionName || undefined;
     }
 }
+
