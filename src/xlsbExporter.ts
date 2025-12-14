@@ -6,7 +6,7 @@ import { spawn } from 'child_process';
 // @ts-ignore
 import XlsbWriter = require('../ExcelHelpers/XlsbWriter');
 
-const odbc = require('odbc');
+// const odbc = require('odbc'); // Removed odbc dependency
 
 /**
  * Progress callback function type
@@ -26,6 +26,24 @@ export interface ExportResult {
         file_path: string;
         clipboard_success?: boolean;
     };
+}
+
+function parseConnectionString(connStr: string): any {
+    const parts = connStr.split(';');
+    const config: any = {};
+    for (const part of parts) {
+        const idx = part.indexOf('=');
+        if (idx > 0) {
+            const key = part.substring(0, idx).trim().toUpperCase();
+            const value = part.substring(idx + 1).trim();
+            if (key === 'SERVER') config.host = value;
+            else if (key === 'PORT') config.port = parseInt(value);
+            else if (key === 'DATABASE') config.database = value;
+            else if (key === 'UID') config.user = value;
+            else if (key === 'PWD') config.password = value;
+        }
+    }
+    return config;
 }
 
 /**
@@ -52,36 +70,49 @@ export async function exportQueryToXlsb(
             progressCallback('Connecting to database...');
         }
 
-        connection = await odbc.connect(connectionString);
+        const config = parseConnectionString(connectionString);
+        if (!config.port) config.port = 5480;
+
+        const NzConnection = require('../driver/src/NzConnection');
+        connection = new NzConnection(config);
+        await connection.connect();
 
         // Execute query
         if (progressCallback) {
             progressCallback('Executing query...');
         }
 
-        const result = await connection.query(query);
-
-        if (!result || !result.columns || result.columns.length === 0) {
-            return {
-                success: false,
-                message: 'Query did not return any results (no columns)'
-            };
-        }
-
-        const columnCount = result.columns.length;
-        if (progressCallback) {
-            progressCallback(`Query returned ${columnCount} columns`);
-        }
+        const cmd = connection.createCommand(query);
+        const reader = await cmd.executeReader();
 
         // Prepare data for XLSB
-        const headers = result.columns.map((col: any) => col.name);
+        const headers: string[] = [];
+        for (let i = 0; i < reader.fieldCount; i++) {
+            headers.push(reader.getName(i));
+        }
 
-        // We can pass the result directly if it acts like an array of objects/arrays
-        // XlsbWriter expects array of arrays (rows).
-        // odbc result is array of objects where keys are column names.
+        const columnCount = headers.length;
+        if (columnCount === 0) {
+            // Note: executeReader might not know fieldCount until read() if not implemented perfectly, 
+            // but NzDataReader usually parses description immediately after execution.
+        }
 
-        const rows = result.map((row: any) => headers.map((header: string) => row[header]));
-        const rowCount = rows.length;
+        if (progressCallback) {
+            progressCallback(`Query returned ${columnCount} columns`);
+            progressCallback('Reading rows...');
+        }
+
+        const rows: any[][] = [];
+        let rowCount = 0;
+
+        while (await reader.read()) {
+            const row: any[] = [];
+            for (let i = 0; i < reader.fieldCount; i++) {
+                row.push(reader.getValue(i));
+            }
+            rows.push(row);
+            rowCount++;
+        }
 
         if (progressCallback) {
             progressCallback(`Writing ${rowCount.toLocaleString()} rows to XLSB: ${outputPath}`);

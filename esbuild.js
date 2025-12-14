@@ -8,24 +8,13 @@ async function main() {
     bundle: true,
     format: 'cjs',
     minify: production,
-    sourcemap: !production, // ✅ Sourcemap tylko w dev, nie w production
-    sourcesContent: false,
+    sourcemap: !production, // ✅ Sourcemap only in dev, not in production
+    sourcesContent: true, // Required for debugging to map back to TS
     platform: 'node',
     outfile: 'dist/extension.js',
     external: ['vscode'],
     logLevel: 'info',
-    plugins: [
-      {
-        name: 'make-all-packages-external',
-        setup(build) {
-          let filter = /^[^.\/]|^\.[^.\/]|^\.\.[^\/]/;
-          build.onResolve({ filter }, args => ({
-            path: args.path,
-            external: true
-          }));
-        }
-      }
-    ]
+
   });
 
   const watch = process.argv.includes('--watch');

@@ -10,11 +10,29 @@ import * as vscode from 'vscode';
 import { ColumnTypeChooser, NetezzaDataType, ProgressCallback, ImportResult } from './dataImporter';
 
 // ODBC import
-let odbc: any;
-try {
-    odbc = require('odbc');
-} catch (e) {
-    console.error('ODBC module not available');
+// let odbc: any;
+// try {
+//     odbc = require('odbc');
+// } catch (e) {
+//     console.error('ODBC module not available');
+// }
+
+function parseConnectionString(connStr: string): any {
+    const parts = connStr.split(';');
+    const config: any = {};
+    for (const part of parts) {
+        const idx = part.indexOf('=');
+        if (idx > 0) {
+            const key = part.substring(0, idx).trim().toUpperCase();
+            const value = part.substring(idx + 1).trim();
+            if (key === 'SERVER') config.host = value;
+            else if (key === 'PORT') config.port = parseInt(value);
+            else if (key === 'DATABASE') config.database = value;
+            else if (key === 'UID') config.user = value;
+            else if (key === 'PWD') config.password = value;
+        }
+    }
+    return config;
 }
 
 /**
@@ -274,6 +292,7 @@ export async function importClipboardDataToNetezza(
 ): Promise<ImportResult> {
     const startTime = Date.now();
     let tempFilePath: string | null = null;
+    let connection: any = null;
 
     try {
         // Validate parameters
@@ -388,7 +407,7 @@ ${columns.join(',\n')}
     )
     USING
     (
-        REMOTESOURCE 'odbc'
+        REMOTESOURCE 'jdbc'
         DELIMITER '${delimiterPlain}'
         RecordDelim '${recordDelimPlain}'
         ESCAPECHAR '${escapechar}'
@@ -407,15 +426,19 @@ ${columns.join(',\n')}
         // Execute import
         progressCallback?.('Connecting to Netezza...');
 
-        if (!odbc) {
-            throw new Error('ODBC module not available');
-        }
+        const config = parseConnectionString(connectionString);
+        if (!config.port) config.port = 5480;
 
-        const connection = await odbc.connect(connectionString);
+        const NzConnection = require('../driver/src/NzConnection');
+        connection = new NzConnection(config);
+        await connection.connect();
 
         try {
             progressCallback?.('Executing CREATE TABLE with EXTERNAL clipboard data...');
-            await connection.query(createSql);
+            // NzConnection should handle the external table protocol automatically
+            const cmd = connection.createCommand(createSql);
+            await cmd.execute();
+
             progressCallback?.('Clipboard import completed successfully');
         } finally {
             await connection.close();
@@ -447,6 +470,10 @@ ${columns.join(',\n')}
             }
         };
     } finally {
+        if (connection && connection._connected) {
+            try { await connection.close(); } catch { }
+        }
+
         // Clean up temp file
         if (tempFilePath && fs.existsSync(tempFilePath)) {
             try {

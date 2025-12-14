@@ -1,0 +1,15 @@
+{
+  "scopeName": "netezza.injection",
+  "name": "Netezza SQL Injection",
+  "injectionSelector": "L:source.sql",
+  "patterns": [
+    {
+      "match": "(?i)\\b(BEGIN_PROC|END_PROC)\\b",
+      "name": "keyword.other.netezza"
+    },
+    {
+      "match": "(?i)\\b(EXCEPTION|RAISE|OTHERS)\\b",
+      "name": "keyword.control.exception.netezza"
+    }
+  ]
+}

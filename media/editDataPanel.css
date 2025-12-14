@@ -1,0 +1,264 @@
+/* Edit Data Panel - Matching Netezza Results Grid Style */
+
+:root {
+    --border-color: var(--vscode-panel-border);
+    --header-bg: var(--vscode-editorGroupHeader-tabsBackground);
+    --header-fg: var(--vscode-tab-activeForeground);
+    --row-hover: var(--vscode-list-hoverBackground);
+    --row-even: var(--vscode-editor-background);
+    --row-odd: var(--vscode-list-oddRowBackground, rgba(255, 255, 255, 0.02));
+    --cell-fg: var(--vscode-editor-foreground);
+}
+
+html,
+body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+}
+
+/* Toolbar - matches controls from resultPanel */
+.toolbar {
+    padding: 8px;
+    background-color: var(--vscode-editor-background);
+    border-bottom: 1px solid var(--vscode-panel-border);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.title {
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--vscode-foreground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+}
+
+.status {
+    font-size: 12px;
+    opacity: 0.8;
+    margin-left: auto;
+    margin-right: 10px;
+}
+
+.actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* Button Styles - matching resultPanel exactly */
+.actions button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    background-color: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+    border: 1px solid var(--vscode-contrastBorder, transparent);
+    padding: 4px 10px;
+    cursor: pointer;
+    border-radius: 2px;
+    font-family: var(--vscode-font-family);
+    font-size: 12px;
+    line-height: 18px;
+    transition: background-color 0.1s, transform 0.05s;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.actions button:hover {
+    background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.actions button:active {
+    transform: translateY(1px);
+}
+
+.actions button.primary {
+    background-color: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border-color: var(--vscode-button-border, transparent);
+}
+
+.actions button.primary:hover {
+    background-color: var(--vscode-button-hoverBackground);
+}
+
+.actions button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Grid Container */
+.grid-container {
+    flex: 1;
+    width: 100%;
+    position: relative;
+    overflow: auto;
+}
+
+/* Table Styles - matching resultPanel exactly */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+}
+
+thead {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: var(--header-bg);
+}
+
+th {
+    padding: 8px;
+    text-align: left;
+    border: 1px solid var(--border-color);
+    font-weight: 600;
+    color: var(--header-fg);
+    user-select: none;
+    background-color: var(--header-bg);
+    position: relative;
+}
+
+th:hover {
+    background-color: var(--row-hover);
+}
+
+td {
+    padding: 4px 8px;
+    border: 1px solid var(--border-color);
+    color: var(--cell-fg);
+    white-space: nowrap;
+}
+
+tr.even,
+tbody tr:nth-child(even) {
+    background-color: var(--row-even);
+}
+
+tr.odd,
+tbody tr:nth-child(odd) {
+    background-color: var(--row-odd);
+}
+
+tbody tr:hover {
+    background-color: var(--row-hover);
+}
+
+/* Action Column */
+td:first-child,
+th:first-child {
+    width: 40px;
+    min-width: 40px;
+    max-width: 40px;
+    text-align: center;
+    padding: 4px;
+}
+
+.delete-btn {
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--vscode-errorForeground, #f14c4c);
+    opacity: 0.6;
+    transition: opacity 0.1s;
+}
+
+.delete-btn:hover {
+    opacity: 1;
+}
+
+/* Input Styles */
+td input {
+    background: transparent;
+    border: none;
+    color: inherit;
+    width: 100%;
+    padding: 2px 0;
+    font-family: var(--vscode-font-family);
+    font-size: 13px;
+    outline: none;
+    box-sizing: border-box;
+}
+
+td input::placeholder {
+    color: var(--vscode-editorInfo-foreground);
+    font-style: italic;
+    opacity: 0.7;
+}
+
+td input:focus {
+    background-color: var(--vscode-input-background);
+    outline: 1px solid var(--vscode-focusBorder);
+    border-radius: 1px;
+}
+
+/* Readonly Columns (ROWID) - like null-value style */
+td.readonly {
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.readonly-val {
+    color: var(--vscode-editorInfo-foreground);
+    font-style: italic;
+    opacity: 0.7;
+}
+
+/* ========================================
+   EDITING STATE HIGHLIGHTS
+   ======================================== */
+
+/* Modified Cell - Yellow highlight */
+.cell-modified {
+    background-color: rgba(255, 200, 0, 0.15) !important;
+}
+
+/* New Row - Green highlight */
+.row-new {
+    background-color: rgba(80, 200, 80, 0.12) !important;
+}
+
+.row-new td:first-child {
+    border-left: 3px solid rgba(80, 200, 80, 0.8);
+}
+
+/* Deleted Row - Red highlight with strikethrough */
+.row-deleted {
+    background-color: rgba(255, 80, 80, 0.12) !important;
+}
+
+.row-deleted td {
+    text-decoration: line-through;
+    opacity: 0.5;
+}
+
+.row-deleted input {
+    pointer-events: none;
+}
+
+.row-deleted .delete-btn {
+    color: var(--vscode-foreground);
+    opacity: 0.4;
+}
+
+/* Empty state */
+.empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 200px;
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+}

@@ -1,0 +1,235 @@
+:root {
+    --container-paddding: 20px;
+    --input-padding-vertical: 6px;
+    --input-padding-horizontal: 4px;
+    --input-margin-vertical: 4px;
+    --input-margin-horizontal: 0;
+}
+
+body {
+    padding: 0;
+    margin: 0;
+    color: var(--vscode-editor-foreground);
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    background-color: var(--vscode-editor-background);
+    height: 100vh;
+    overflow: hidden;
+}
+
+#app {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+}
+
+/* Sidebar for Fields */
+.sidebar {
+    width: 250px;
+    min-width: 200px;
+    border-right: 1px solid var(--vscode-widget-border);
+    display: flex;
+    flex-direction: column;
+    background-color: var(--vscode-sideBar-background);
+}
+
+.section {
+    padding: 10px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.section h3 {
+    margin-top: 5px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    text-transform: uppercase;
+    font-weight: bold;
+}
+
+.field-list {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid var(--vscode-widget-border);
+    background-color: var(--vscode-input-background);
+}
+
+.field-item {
+    padding: 6px 10px;
+    cursor: grab;
+    user-select: none;
+    background-color: var(--vscode-editor-background);
+    border-bottom: 1px solid var(--vscode-widget-border);
+    display: flex;
+    align-items: center;
+}
+
+.field-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+}
+
+.field-item:active {
+    cursor: grabbing;
+}
+
+/* Main Content Area */
+.main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* Configuration Zones (Rows, Cols, Values) */
+.config-zones {
+    height: 180px;
+    display: flex;
+    border-bottom: 1px solid var(--vscode-widget-border);
+    padding: 10px;
+    box-sizing: border-box;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.zone-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.zone-container h4 {
+    margin: 0 0 5px 0;
+    font-size: 12px;
+    opacity: 0.8;
+}
+
+.drop-zone {
+    flex: 1;
+    border: 1px dashed var(--vscode-widget-border);
+    border-radius: 4px;
+    padding: 5px;
+    overflow-y: auto;
+    background-color: var(--vscode-editor-background);
+    transition: background-color 0.2s;
+}
+
+.drop-zone.drag-over {
+    background-color: var(--vscode-list-dropBackground);
+    border-style: solid;
+    border-color: var(--vscode-focusBorder);
+}
+
+/* Chips in Drop Zones */
+.chip {
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    background-color: var(--vscode-badge-background);
+    color: var(--vscode-badge-foreground);
+    border-radius: 3px;
+    font-size: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: grab;
+    user-select: none;
+}
+
+.chip:active {
+    cursor: grabbing;
+}
+
+.chip .remove-btn {
+    margin-left: 8px;
+    cursor: pointer;
+    opacity: 0.7;
+    font-weight: bold;
+}
+
+.chip .remove-btn:hover {
+    opacity: 1;
+}
+
+.chip-content {
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agg-select {
+    margin-left: 5px;
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: inherit;
+    cursor: pointer;
+    font-weight: bold;
+    opacity: 0.8;
+    outline: none;
+}
+
+.agg-select:hover {
+    opacity: 1;
+    text-decoration: underline;
+}
+
+/* Pivot Grid */
+.pivot-grid-container {
+    flex: 1;
+    overflow: auto;
+    background-color: var(--vscode-editor-background);
+    position: relative;
+    padding: 10px;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+th,
+td {
+    padding: 6px 12px;
+    text-align: left;
+    border: 1px solid var(--vscode-widget-border);
+    font-variant-numeric: tabular-nums;
+}
+
+th {
+    background-color: var(--vscode-editor-background);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    font-weight: bold;
+    color: var(--vscode-input-foreground);
+}
+
+/* Row Headers */
+td.row-header {
+    background-color: var(--vscode-editor-background);
+    font-weight: bold;
+    position: sticky;
+    left: 0;
+    z-index: 5;
+    border-right: 2px solid var(--vscode-widget-border);
+}
+
+/* Grouping indents */
+.group-indent {
+    display: inline-block;
+    width: 10px;
+}
+
+/* Empty state */
+.empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+}

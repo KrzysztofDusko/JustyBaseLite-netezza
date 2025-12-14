@@ -155,6 +155,12 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                        'Found in procedure source' AS DESCRIPTION, 'SOURCE' AS MATCH_TYPE
                 FROM _V_PROCEDURE P
                 WHERE UPPER(P.PROCEDURESOURCE) LIKE '${likeTerm}'
+                UNION ALL
+                SELECT 3 AS PRIORITY, E1.TABLENAME AS NAME, E1.SCHEMA, E1.DATABASE, 'EXTERNAL TABLE' AS TYPE, '' AS PARENT,
+                       COALESCE(E2.EXTOBJNAME, '') AS DESCRIPTION, 'DATAOBJECT' AS MATCH_TYPE
+                FROM _V_EXTERNAL E1
+                JOIN _V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
+                WHERE UPPER(E2.EXTOBJNAME) LIKE '${likeTerm}'
             ) AS R
             ORDER BY PRIORITY, NAME
             LIMIT 100
@@ -169,7 +175,12 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             }
 
             if (resultJson) {
-                const results = JSON.parse(resultJson);
+                let results: any[] = [];
+                if (resultJson === 'Query executed successfully (no results).' || resultJson.startsWith('Query executed successfully')) {
+                    results = [];
+                } else {
+                    results = JSON.parse(resultJson);
+                }
                 const mappedResults: any[] = [];
 
                 results.forEach((item: any) => {

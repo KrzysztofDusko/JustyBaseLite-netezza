@@ -1,0 +1,2 @@
+add missing brace to analysisPanel.js
+remove codicon.css reference from analysisPanelView.ts (it's not in media folder)

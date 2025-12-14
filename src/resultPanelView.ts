@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { AnalysisPanelView } from './analysisPanelView';
 
 export class ResultPanelView implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.results';
@@ -32,6 +33,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         webviewView.webview.onDidReceiveMessage(message => {
             switch (message.command) {
+                case 'analyze':
+                    AnalysisPanelView.createOrShow(this._extensionUri, message.data);
+                    return;
                 case 'exportCsv':
                     this.exportCsv(message.data);
                     return;
@@ -120,7 +124,13 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             }
         });
 
-        // Then add all new results
+        // Then add all new results with execution timestamp
+        // This timestamp is used as part of the state key to ensure
+        // state from previous executions is not applied to new results
+        const executionTimestamp = Date.now();
+        newResultSets.forEach(rs => {
+            rs.executionTimestamp = executionTimestamp;
+        });
         finalResultSets.push(...newResultSets);
 
         // Update pinned result indices to match new positions (AFTER building the array)

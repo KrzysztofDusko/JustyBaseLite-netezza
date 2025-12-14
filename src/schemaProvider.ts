@@ -16,6 +16,28 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
         this._onDidChangeTreeData.fire();
     }
 
+    /**
+     * Trigger background prefetch for a connection when database is expanded.
+     * This warms up the cache shared with autocomplete and revealInSchema.
+     */
+    private triggerDatabasePrefetch(connectionName: string, dbName: string): void {
+        // Don't block UI - run prefetch in background
+        if (!this.metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
+            console.log(`[SchemaProvider] Triggering connection prefetch for: ${connectionName}`);
+            this.metadataCache.triggerConnectionPrefetch(
+                connectionName,
+                async (query) => {
+                    try {
+                        return await runQuery(this.context, query, true, connectionName, this.connectionManager);
+                    } catch (e) {
+                        console.error('[SchemaProvider] Prefetch query error:', e);
+                        return undefined;
+                    }
+                }
+            );
+        }
+    }
+
     getTreeItem(element: SchemaItem): vscode.TreeItem {
         return element;
     }
@@ -33,7 +55,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 element.connectionName,
                 undefined // customIconPath - we can't easily resolve it here without context, potentially issue?
             );
-        } else if (element.contextValue === 'typeGroup') {
+        } else if (element.contextValue.startsWith('typeGroup')) {
             // Parent is database
             return new SchemaItem(
                 element.dbName!,
@@ -48,7 +70,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             return new SchemaItem(
                 element.objType!,
                 vscode.TreeItemCollapsibleState.Collapsed,
-                'typeGroup',
+                `typeGroup:${element.objType}`,
                 element.dbName,
                 element.objType,
                 undefined, undefined, undefined,
@@ -70,6 +92,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 'serverInstance',
                 undefined, undefined, undefined, undefined, undefined,
                 conn.name,
+                undefined, // parentName
                 iconPath // Pass custom icon
             ));
         } else if (element.contextValue === 'serverInstance') {
@@ -118,14 +141,41 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             }
         } else if (element.contextValue === 'database') {
             // Children: Object Types (Groups)
+            // Trigger background prefetch for this connection to warm up cache
+            if (element.connectionName && element.dbName) {
+                this.triggerDatabasePrefetch(element.connectionName, element.dbName);
+            }
+            // Check typeGroup cache first
+            if (element.connectionName && element.dbName) {
+                const cachedTypes = this.metadataCache.getTypeGroups(element.connectionName, element.dbName);
+                if (cachedTypes && cachedTypes.length > 0) {
+                    return cachedTypes.map((t: string) => new SchemaItem(
+                        t,
+                        vscode.TreeItemCollapsibleState.Collapsed,
+                        `typeGroup:${t}`,
+                        element.dbName,
+                        t,
+                        undefined, undefined, undefined,
+                        element.connectionName
+                    ));
+                }
+            }
+
             try {
                 const query = `SELECT DISTINCT OBJTYPE FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' ORDER BY OBJTYPE`;
                 const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const types = JSON.parse(results || '[]');
+
+                // Cache the type groups
+                if (element.connectionName && element.dbName) {
+                    const typeList = types.map((t: any) => t.OBJTYPE);
+                    this.metadataCache.setTypeGroups(element.connectionName, element.dbName, typeList);
+                }
+
                 return types.map((t: any) => new SchemaItem(
                     t.OBJTYPE,
                     vscode.TreeItemCollapsibleState.Collapsed,
-                    'typeGroup',
+                    `typeGroup:${t.OBJTYPE}`,
                     element.dbName,
                     t.OBJTYPE,
                     undefined, undefined, undefined,
@@ -135,10 +185,55 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 vscode.window.showErrorMessage("Failed to load object types: " + e);
                 return [];
             }
-        } else if (element.contextValue === 'typeGroup') {
+        } else if (element.contextValue.startsWith('typeGroup')) {
             // Children: Objects of specific type
+
+            // OPTIMIZATION: Try cache first (Offline support)
+            // Only for TABLE, VIEW, EXTERNAL TABLE as they are primarily cached
+            if (element.connectionName && element.dbName && (element.objType === 'TABLE' || element.objType === 'VIEW' || element.objType === 'EXTERNAL TABLE')) {
+                const cachedObjects = this.metadataCache.getObjectsWithSchema(element.connectionName, element.dbName);
+
+                if (cachedObjects && cachedObjects.length > 0) {
+                    const targetType = element.objType;
+
+                    // Filter items matching the type
+                    const filtered = cachedObjects.filter(obj => {
+                        const item = obj.item;
+                        // Check objType if available (preferred)
+                        if (item.objType) {
+                            return item.objType === targetType;
+                        }
+                        // Fallback to strict kind check if objType missing (legacy cache?)
+                        if (targetType === 'VIEW') return item.kind === 18;
+                        if (targetType === 'TABLE') return item.kind !== 18 && item.detail !== 'EXTERNAL TABLE';
+                        if (targetType === 'EXTERNAL TABLE') return item.detail === 'EXTERNAL TABLE' || item.detail?.startsWith('EXTERNAL TABLE');
+                        return false;
+                    });
+
+                    if (filtered.length > 0) {
+                        return filtered.map(obj => new SchemaItem(
+                            typeof obj.item.label === 'string' ? obj.item.label : (obj.item.label?.label || 'unknown'),
+                            vscode.TreeItemCollapsibleState.Collapsed,
+                            `netezza:${element.objType}`,
+                            element.dbName,
+                            element.objType,
+                            obj.schema,
+                            obj.objId, // Now includes objId from cache
+                            undefined,
+                            element.connectionName
+                        ));
+                    }
+                }
+            }
+
             try {
-                const query = `SELECT OBJNAME, SCHEMA, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' AND OBJTYPE = '${element.objType}' ORDER BY OBJNAME`;
+                let query: string;
+                if (element.objType === 'PROCEDURE') {
+                    // Start of Modification for Procedures
+                    query = `SELECT PROCEDURESIGNATURE AS OBJNAME, SCHEMA, OBJID::INT AS OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_PROCEDURE WHERE DATABASE = '${element.dbName}' ORDER BY PROCEDURESIGNATURE`;
+                } else {
+                    query = `SELECT OBJNAME, SCHEMA, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' AND OBJTYPE = '${element.objType}' ORDER BY OBJNAME`;
+                }
                 const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const objects = JSON.parse(results || '[]');
 
@@ -211,13 +306,13 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 vscode.window.showErrorMessage("Failed to load objects: " + e);
                 return [];
             }
-        } else if (element.contextValue.startsWith('netezza:') && element.objId) {
+        } else if (element.contextValue.startsWith('netezza:')) {
             // Children: Columns
             const tableName = element.label; // SchemaItem label is the object name
             const schemaName = element.schema;
             const dbName = element.dbName;
 
-            // Try cache first
+            // Try cache first (works even without objId)
             if (element.connectionName && dbName) {
                 const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
                 const cachedCols = this.metadataCache.getColumns(element.connectionName, columnKey);
@@ -232,38 +327,65 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         undefined,
                         undefined,
                         col.documentation || '', // Assuming description stored in documentation or similar
-                        element.connectionName
+                        element.connectionName,
+                        tableName // Parent (Table) Name
                     ));
                 }
             }
 
+            // If no cached columns, try to query (need connection)
+            if (!element.connectionName || !dbName) {
+                return [];
+            }
+
             try {
-                const query = `SELECT 
-                        X.ATTNAME
-                        , X.FORMAT_TYPE
-                        , X.ATTNOTNULL::BOOL AS ATTNOTNULL
-                        , X.COLDEFAULT
-                        , COALESCE(X.DESCRIPTION, '') AS DESCRIPTION
-                    FROM
-                        ${element.dbName}.._V_RELATION_COLUMN X
-                    WHERE
-                        X.OBJID = ${element.objId}
-                    ORDER BY 
-                        X.ATTNUM`;
+                let query: string;
+                if (element.objId) {
+                    // Use objId for efficient lookup
+                    query = `SELECT 
+                            X.ATTNAME
+                            , X.FORMAT_TYPE
+                            , X.ATTNOTNULL::BOOL AS ATTNOTNULL
+                            , X.COLDEFAULT
+                            , COALESCE(X.DESCRIPTION, '') AS DESCRIPTION
+                        FROM
+                            ${dbName}.._V_RELATION_COLUMN X
+                        WHERE
+                            X.OBJID = ${element.objId}
+                        ORDER BY 
+                            X.ATTNUM`;
+                } else {
+                    // Fallback: lookup by table name (slower but works without objId)
+                    const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
+                    query = `SELECT 
+                            X.ATTNAME
+                            , X.FORMAT_TYPE
+                            , X.ATTNOTNULL::BOOL AS ATTNOTNULL
+                            , X.COLDEFAULT
+                            , COALESCE(X.DESCRIPTION, '') AS DESCRIPTION
+                        FROM
+                            ${dbName}.._V_RELATION_COLUMN X
+                        INNER JOIN
+                            ${dbName}.._V_OBJECT_DATA O ON X.OBJID = O.OBJID
+                        WHERE
+                            UPPER(O.OBJNAME) = UPPER('${tableName}')
+                            AND UPPER(O.DBNAME) = UPPER('${dbName}')
+                            ${schemaClause}
+                        ORDER BY 
+                            X.ATTNUM`;
+                }
                 const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const columns = JSON.parse(results || '[]');
 
                 // Cache the results
-                if (element.connectionName && dbName) {
-                    const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
-                    const cacheItems = columns.map((col: any) => ({
-                        label: col.ATTNAME,
-                        kind: 5, // Field
-                        detail: col.FORMAT_TYPE,
-                        documentation: col.DESCRIPTION
-                    }));
-                    this.metadataCache.setColumns(element.connectionName, columnKey, cacheItems);
-                }
+                const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
+                const cacheItems = columns.map((col: any) => ({
+                    label: col.ATTNAME,
+                    kind: 5, // Field
+                    detail: col.FORMAT_TYPE,
+                    documentation: col.DESCRIPTION
+                }));
+                this.metadataCache.setColumns(element.connectionName, columnKey, cacheItems);
 
                 return columns.map((col: any) => new SchemaItem(
                     `${col.ATTNAME} (${col.FORMAT_TYPE})`,
@@ -274,7 +396,8 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     undefined,
                     undefined,
                     col.DESCRIPTION,
-                    element.connectionName
+                    element.connectionName,
+                    tableName // Parent (Table) Name
                 ));
             } catch (e) {
                 vscode.window.showErrorMessage("Failed to load columns: " + e);
@@ -297,6 +420,7 @@ export class SchemaItem extends vscode.TreeItem {
         public readonly objId?: number,
         public readonly objectDescription?: string,
         public readonly connectionName?: string,
+        public readonly parentName?: string, // Add parent (Table) name for stable ID
         customIconPath?: vscode.Uri
     ) {
         super(label, collapsibleState);
@@ -316,13 +440,26 @@ export class SchemaItem extends vscode.TreeItem {
 
         this.description = schema ? `(${schema})` : '';
 
+        // Generate a stable ID for the tree item to support reveal()
+        // Format: connection|context|database|schema|label|parent
+        const parts = [
+            connectionName || 'global',
+            contextValue,
+            dbName || '',
+            schema || '',
+            objType || '',
+            parentName || '',
+            label
+        ];
+        this.id = parts.join('|');
+
         if (customIconPath) {
             this.iconPath = customIconPath;
         } else if (contextValue === 'serverInstance') {
             this.iconPath = new vscode.ThemeIcon('server');
         } else if (contextValue === 'database') {
             this.iconPath = new vscode.ThemeIcon('database');
-        } else if (contextValue === 'typeGroup') {
+        } else if (contextValue.startsWith('typeGroup')) {
             this.iconPath = new vscode.ThemeIcon('folder');
         } else if (contextValue.startsWith('netezza:')) {
             this.iconPath = this.getIconForType(objType);

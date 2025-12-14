@@ -18,12 +18,14 @@ export class MetadataCache {
     public columnCache: Map<string, PerKeyEntry<any[]>> = new Map(); // Key: "DB.SCHEMA.TABLE" or "DB..TABLE"
     // tableIdMap is synced with tableCache - stored per tableCache key
     public tableIdMap: Map<string, PerKeyEntry<Map<string, number>>> = new Map(); // Key: tableCache key -> {tableName -> OBJID}
+    // typeGroupCache - stores list of object types for each database
+    public typeGroupCache: Map<string, PerKeyEntry<string[]>> = new Map(); // Key: "CONN|DB" -> ['TABLE', 'VIEW', ...]
 
     private readonly CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+    private cacheFilePath: string | undefined;
 
     // Debounce support for saves
     private savePending: boolean = false;
-    private pendingCacheTypes: Set<CacheType> = new Set();
     private saveTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
     // Background prefetch tracking
@@ -31,142 +33,158 @@ export class MetadataCache {
 
 
     constructor(private context: vscode.ExtensionContext) {
-        this.loadCacheFromWorkspaceState();
+        if (this.context.storageUri) {
+            this.cacheFilePath = vscode.Uri.joinPath(this.context.storageUri, 'schema-cache.json').fsPath;
+            // Ensure storage directory exists
+            try {
+                // We can't easily use fs.mkdirSync with Uri on all platforms, but mostly fsPath works.
+                // Better to use vscode.workspace.fs, but that's async and we want to load in constructor or init.
+                // Let's us async init pattern or just fire and forget load.
+                this.ensureStorageDir();
+            } catch (e) {
+                console.error('[MetadataCache] Error creating storage directory:', e);
+            }
+        }
     }
 
-    private loadCacheFromWorkspaceState(): void {
-        try {
-            const now = Date.now();
+    private async ensureStorageDir() {
+        if (this.context.storageUri) {
+            try {
+                await vscode.workspace.fs.createDirectory(this.context.storageUri);
+            } catch (e) {
+                // ignore if exists
+            }
+        }
+    }
 
-            // Load databases cache (map of connection -> entry)
-            // Previous version was single entry. We try to load as Record<string, ...>
-            // If it was the old format, it will fail the loop or need check. 
-            // Better to use new key or just check type.
-            const dbCacheEntry = this.context.workspaceState.get<any>('sqlCompletion.dbCache');
-            if (dbCacheEntry) {
-                // Check if it's the old single entry format
-                if (dbCacheEntry.data && Array.isArray(dbCacheEntry.data)) {
-                    // specific case: ignore old cache or map to 'default'?
-                    // Let's ignore old cache to avoid confusion.
-                } else {
-                    // Assume it's Record<string, Entry>
-                    for (const [key, entry] of Object.entries(dbCacheEntry as Record<string, { data: any[], timestamp: number }>)) {
+    public async initialize(): Promise<void> {
+        // Cleanup legacy workspaceState to resolve "large state" warning
+        try {
+            const keys = [
+                'sqlCompletion.dbCache',
+                'sqlCompletion.schemaCache',
+                'sqlCompletion.tableCache',
+                'sqlCompletion.columnCache',
+                'sqlCompletion.tableIdMap'
+            ];
+            for (const key of keys) {
+                if (this.context.workspaceState.get(key) !== undefined) {
+                    await this.context.workspaceState.update(key, undefined);
+                }
+            }
+        } catch (e) {
+            console.error('[MetadataCache] Error cleaning up legacy workspace state:', e);
+        }
+
+        if (!this.cacheFilePath) return;
+
+        try {
+            const fs = require('fs');
+            if (fs.existsSync(this.cacheFilePath)) {
+                const raw = await fs.promises.readFile(this.cacheFilePath, 'utf-8');
+                const json = JSON.parse(raw);
+                const now = Date.now();
+
+                // Load dbCache
+                if (json.dbCache) {
+                    for (const [key, entry] of Object.entries(json.dbCache as Record<string, { data: any[], timestamp: number }>)) {
                         if ((now - entry.timestamp) < this.CACHE_TTL) {
                             this.dbCache.set(key, entry);
                         }
                     }
                 }
-            }
 
-            // Load schemas cache (per-key timestamps)
-            const schemaCacheEntry = this.context.workspaceState.get<Record<string, { data: any[], timestamp: number }>>('sqlCompletion.schemaCache');
-            if (schemaCacheEntry) {
-                for (const [key, entry] of Object.entries(schemaCacheEntry)) {
-                    if ((now - entry.timestamp) < this.CACHE_TTL) {
-                        this.schemaCache.set(key, entry);
+                // Load schemaCache
+                if (json.schemaCache) {
+                    for (const [key, entry] of Object.entries(json.schemaCache as Record<string, { data: any[], timestamp: number }>)) {
+                        if ((now - entry.timestamp) < this.CACHE_TTL) {
+                            this.schemaCache.set(key, entry);
+                        }
                     }
                 }
-            }
 
-            // Load tables cache (per-key timestamps)
-            const tableCacheEntry = this.context.workspaceState.get<Record<string, { data: any[], timestamp: number }>>('sqlCompletion.tableCache');
-            if (tableCacheEntry) {
-                for (const [key, entry] of Object.entries(tableCacheEntry)) {
-                    if ((now - entry.timestamp) < this.CACHE_TTL) {
-                        this.tableCache.set(key, entry);
+                // Load tableCache
+                if (json.tableCache) {
+                    for (const [key, entry] of Object.entries(json.tableCache as Record<string, { data: any[], timestamp: number }>)) {
+                        if ((now - entry.timestamp) < this.CACHE_TTL) {
+                            this.tableCache.set(key, entry);
+                        }
                     }
                 }
-            }
 
-            // Load table ID map (synced with tableCache - per-key timestamps)
-            const tableIdMapEntry = this.context.workspaceState.get<Record<string, { data: Record<string, number>, timestamp: number }>>('sqlCompletion.tableIdMap');
-            if (tableIdMapEntry) {
-                for (const [key, entry] of Object.entries(tableIdMapEntry)) {
-                    // Only load if corresponding tableCache entry is still valid or not expired
-                    if (this.tableCache.has(key) || (now - entry.timestamp) < this.CACHE_TTL) {
-                        this.tableIdMap.set(key, {
-                            data: new Map(Object.entries(entry.data)),
-                            timestamp: entry.timestamp
-                        });
+                // Load tableIdMap
+                if (json.tableIdMap) {
+                    for (const [key, entry] of Object.entries(json.tableIdMap as Record<string, { data: Record<string, number>, timestamp: number }>)) {
+                        if (this.tableCache.has(key) || (now - entry.timestamp) < this.CACHE_TTL) {
+                            this.tableIdMap.set(key, {
+                                data: new Map(Object.entries(entry.data)),
+                                timestamp: entry.timestamp
+                            });
+                        }
                     }
                 }
-            }
 
-            // Load columns cache (per-key timestamps)
-            const columnCacheEntry = this.context.workspaceState.get<Record<string, { data: any[], timestamp: number }>>('sqlCompletion.columnCache');
-            if (columnCacheEntry) {
-                for (const [key, entry] of Object.entries(columnCacheEntry)) {
-                    if ((now - entry.timestamp) < this.CACHE_TTL) {
-                        this.columnCache.set(key, entry);
+                // Load columnCache
+                if (json.columnCache) {
+                    for (const [key, entry] of Object.entries(json.columnCache as Record<string, { data: any[], timestamp: number }>)) {
+                        if ((now - entry.timestamp) < this.CACHE_TTL) {
+                            this.columnCache.set(key, entry);
+                        }
                     }
                 }
             }
         } catch (e) {
-            console.error('[MetadataCache] Error loading cache from workspace state:', e);
+            console.error('[MetadataCache] Error loading cache from disk:', e);
         }
     }
 
-    // Debounced save scheduler - only saves specified cache types
+    // Debounced save scheduler - now saves everything to one file
     public scheduleSave(cacheType: CacheType): void {
-        this.pendingCacheTypes.add(cacheType);
+        // We can ignore cacheType since we save all-in-one file for simplicity, 
+        // or we could optimize partial updates if we were using a database. 
+        // For JSON file, we have to write the whole file.
         if (!this.savePending) {
             this.savePending = true;
-            this.saveTimeoutId = setTimeout(() => this.flushSave(), 1000); // 1s debounce
+            this.saveTimeoutId = setTimeout(() => this.flushSave(), 2000); // 2s debounce to aggregate writes
         }
     }
 
     private async flushSave(): Promise<void> {
         this.savePending = false;
-        const typesToSave = new Set(this.pendingCacheTypes);
-        this.pendingCacheTypes.clear();
+        if (!this.cacheFilePath) return;
 
         try {
-            // Save only the cache types that were modified
-            if (typesToSave.has('db') && this.dbCache.size > 0) {
-                const serialized: Record<string, { data: any[], timestamp: number }> = {};
-                this.dbCache.forEach((entry, key) => {
-                    serialized[key] = entry;
-                });
-                await this.context.workspaceState.update('sqlCompletion.dbCache', serialized);
-            }
+            const fs = require('fs');
 
-            if (typesToSave.has('schema') && this.schemaCache.size > 0) {
-                const serialized: Record<string, { data: any[], timestamp: number }> = {};
-                this.schemaCache.forEach((entry, key) => {
-                    serialized[key] = entry;
-                });
-                await this.context.workspaceState.update('sqlCompletion.schemaCache', serialized);
-            }
+            // Serialize all caches
+            const exportMap = (map: Map<string, any>) => {
+                const obj: any = {};
+                map.forEach((v, k) => { obj[k] = v; });
+                return obj;
+            };
 
-            if (typesToSave.has('table') && this.tableCache.size > 0) {
-                const serialized: Record<string, { data: any[], timestamp: number }> = {};
-                this.tableCache.forEach((entry, key) => {
-                    serialized[key] = entry;
+            const exportTableIdMap = (map: Map<string, any>) => {
+                const obj: any = {};
+                map.forEach((entry, key) => {
+                    const dataObj: any = {};
+                    entry.data.forEach((v: number, k: string) => { dataObj[k] = v; });
+                    obj[key] = { data: dataObj, timestamp: entry.timestamp };
                 });
-                await this.context.workspaceState.update('sqlCompletion.tableCache', serialized);
+                return obj;
+            };
 
-                // Also save tableIdMap synced with tableCache
-                const tableIdSerialized: Record<string, { data: Record<string, number>, timestamp: number }> = {};
-                this.tableIdMap.forEach((entry, key) => {
-                    const dataObj: Record<string, number> = {};
-                    entry.data.forEach((value, k) => { dataObj[k] = value; });
-                    tableIdSerialized[key] = {
-                        data: dataObj,
-                        timestamp: entry.timestamp
-                    };
-                });
-                await this.context.workspaceState.update('sqlCompletion.tableIdMap', tableIdSerialized);
-            }
+            const data = {
+                dbCache: exportMap(this.dbCache),
+                schemaCache: exportMap(this.schemaCache),
+                tableCache: exportMap(this.tableCache),
+                columnCache: exportMap(this.columnCache),
+                tableIdMap: exportTableIdMap(this.tableIdMap)
+            };
 
-            if (typesToSave.has('column') && this.columnCache.size > 0) {
-                const serialized: Record<string, { data: any[], timestamp: number }> = {};
-                this.columnCache.forEach((entry, key) => {
-                    serialized[key] = entry;
-                });
-                await this.context.workspaceState.update('sqlCompletion.columnCache', serialized);
-            }
+            await fs.promises.writeFile(this.cacheFilePath, JSON.stringify(data), 'utf-8');
+
         } catch (e) {
-            console.error('[MetadataCache] Error saving cache to workspace state:', e);
+            console.error('[MetadataCache] Error saving cache to disk:', e);
         }
     }
 
@@ -177,19 +195,24 @@ export class MetadataCache {
             this.saveTimeoutId = undefined;
         }
         this.savePending = false;
-        this.pendingCacheTypes.clear();
 
         this.dbCache.clear();
         this.schemaCache.clear();
         this.tableCache.clear();
         this.columnCache.clear();
         this.tableIdMap.clear();
+        this.typeGroupCache.clear();
 
-        await this.context.workspaceState.update('sqlCompletion.dbCache', undefined);
-        await this.context.workspaceState.update('sqlCompletion.schemaCache', undefined);
-        await this.context.workspaceState.update('sqlCompletion.tableCache', undefined);
-        await this.context.workspaceState.update('sqlCompletion.columnCache', undefined);
-        await this.context.workspaceState.update('sqlCompletion.tableIdMap', undefined);
+        if (this.cacheFilePath) {
+            try {
+                const fs = require('fs');
+                if (fs.existsSync(this.cacheFilePath)) {
+                    await fs.promises.unlink(this.cacheFilePath);
+                }
+            } catch (e) {
+                console.error('[MetadataCache] Error clearing cache file:', e);
+            }
+        }
     }
 
     // Modifying cache methods to accept connectionName
@@ -219,12 +242,80 @@ export class MetadataCache {
         return this.tableCache.get(fullKey)?.data;
     }
 
+    /**
+     * Get tables from all schemas for a given database.
+     * Used for double-dot pattern (DB..) where schema is not specified.
+     * Aggregates tables from all cached schemas for that database.
+     */
+    public getTablesAllSchemas(connectionName: string, dbName: string): any[] | undefined {
+        const prefix = `${connectionName}|${dbName}.`;
+        const allTables: any[] = [];
+        const seenNames = new Set<string>(); // Avoid duplicates
+
+        for (const [key, entry] of this.tableCache) {
+            if (key.startsWith(prefix)) {
+                for (const item of entry.data) {
+                    const name = typeof item.label === 'string' ? item.label : item.label?.label;
+                    if (name && !seenNames.has(name.toUpperCase())) {
+                        seenNames.add(name.toUpperCase());
+                        allTables.push(item);
+                    }
+                }
+            }
+        }
+
+        return allTables.length > 0 ? allTables : undefined;
+    }
+
     public setTables(connectionName: string, key: string, data: any[], idMap: Map<string, number>) {
         const now = Date.now();
         const fullKey = `${connectionName}|${key}`;
         this.tableCache.set(fullKey, { data, timestamp: now });
         this.tableIdMap.set(fullKey, { data: idMap, timestamp: now });
         this.scheduleSave('table');
+    }
+
+    public getObjectsWithSchema(connectionName: string, dbName: string): { item: any, schema: string, objId?: number }[] {
+        const prefix = `${connectionName}|${dbName}.`;
+        const results: { item: any, schema: string, objId?: number }[] = [];
+        const seenKeys = new Set<string>();
+
+        for (const [key, entry] of this.tableCache) {
+            // Check match for "nz|JUST_DATA.ADMIN" or "nz|JUST_DATA.."
+            if (key.startsWith(prefix) || key === `${connectionName}|${dbName}..`) {
+                const parts = key.split('|');
+                if (parts.length < 2) continue;
+
+                const dbKey = parts[1];
+                const dbParts = dbKey.split('.');
+                // entrySchemaName might be "ADMIN" or "" (if dbKey is JUST_DATA..)
+                const entrySchemaName = (dbParts.length > 1 ? dbParts[1] : '') || '';
+
+                // Get the idMap for this cache key to lookup objId
+                const idMapEntry = this.tableIdMap.get(key);
+
+                for (const item of entry.data) {
+                    const label = typeof item.label === 'string' ? item.label : item.label?.label;
+                    const uniqueKey = `${entrySchemaName}.${label}`;
+
+                    if (label && !seenKeys.has(uniqueKey)) {
+                        seenKeys.add(uniqueKey);
+
+                        // Lookup objId from the idMap
+                        let objId: number | undefined;
+                        if (idMapEntry) {
+                            const lookupKey = entrySchemaName
+                                ? `${dbName}.${entrySchemaName}.${label}`
+                                : `${dbName}..${label}`;
+                            objId = idMapEntry.data.get(lookupKey);
+                        }
+
+                        results.push({ item, schema: entrySchemaName, objId });
+                    }
+                }
+            }
+        }
+        return results;
     }
 
     public getColumns(connectionName: string, key: string): any[] | undefined {
@@ -252,6 +343,79 @@ export class MetadataCache {
         }
         return undefined;
     }
+
+    // ========== TypeGroup Cache ==========
+    public getTypeGroups(connectionName: string, dbName: string): string[] | undefined {
+        const key = `${connectionName}|${dbName}`;
+        return this.typeGroupCache.get(key)?.data;
+    }
+
+    public setTypeGroups(connectionName: string, dbName: string, types: string[]) {
+        const key = `${connectionName}|${dbName}`;
+        this.typeGroupCache.set(key, { data: types, timestamp: Date.now() });
+        // No need to persist typeGroups - they are quick to fetch
+    }
+
+    /**
+     * Find object in cache with type information.
+     * Returns objId, objType and schema if found, undefined otherwise.
+     * This is more powerful than findTableId as it includes the object type.
+     * When schemaName is undefined or empty, it searches all schemas and returns the actual schema found.
+     */
+    public findObjectWithType(
+        connectionName: string,
+        dbName: string,
+        schemaName: string | undefined,
+        objectName: string
+    ): { objId: number; objType: string; schema: string; name: string } | undefined {
+        const prefix = `${connectionName}|`;
+        const upperName = objectName.toUpperCase();
+
+        for (const [key, entry] of this.tableCache) {
+            if (!key.startsWith(prefix)) continue;
+
+            // Parse key: "CONN|DBNAME.SCHEMA" or "CONN|DBNAME.."
+            const parts = key.split('|');
+            if (parts.length < 2) continue;
+
+            const dbKey = parts[1];
+            const dbParts = dbKey.split('.');
+            const entryDbName = dbParts[0];
+            const entrySchemaName = dbParts.length > 1 ? dbParts[1] : undefined;
+
+            // Match database
+            if (entryDbName.toUpperCase() !== dbName.toUpperCase()) continue;
+
+            // Match schema if provided
+            if (schemaName !== undefined && schemaName !== '' &&
+                entrySchemaName?.toUpperCase() !== schemaName.toUpperCase()) continue;
+
+            // Search for object in this cache entry
+            for (const item of entry.data) {
+                const itemName = typeof item.label === 'string' ? item.label : item.label?.label;
+                if (itemName?.toUpperCase() === upperName) {
+                    // Found! Get objType from item and objId from idMap
+                    const objType = item.objType || (item.kind === 18 ? 'VIEW' : 'TABLE');
+
+                    // Build lookup key for idMap
+                    const lookupKey = entrySchemaName
+                        ? `${entryDbName}.${entrySchemaName}.${itemName}`
+                        : `${entryDbName}..${itemName}`;
+
+                    const idMapKey = key;
+                    const idEntry = this.tableIdMap.get(idMapKey);
+                    const objId = idEntry?.data.get(lookupKey);
+
+                    if (objId !== undefined) {
+                        return { objId, objType, schema: entrySchemaName || '', name: itemName || objectName };
+                    }
+                }
+            }
+        }
+
+        return undefined;
+    }
+
 
     // Search Method
     public search(term: string, connectionName?: string): { name: string, type: string, database?: string, schema?: string, parent?: string }[] {
@@ -282,9 +446,11 @@ export class MetadataCache {
                 const name = typeof item.label === 'string' ? item.label : item.label.label;
 
                 if (name && name.toLowerCase().includes(lowerTerm)) {
+                    // Get objType from item if available, otherwise infer from kind
+                    const objType = item.objType || (item.kind === 18 ? 'VIEW' : 'TABLE');
                     results.push({
                         name: name,
-                        type: 'TABLE',
+                        type: objType,
                         database: dbName,
                         schema: schemaName || (item.detail && item.detail.includes('(') ? item.detail.match(/\((.*?)\)/)?.[1] : undefined)
                     });
@@ -477,6 +643,40 @@ export class MetadataCache {
         }
     }
 
+    /**
+     * Invalidate cache for a specific schema.
+     * Use this when objects are added/removed/renamed in a schema.
+     */
+    public invalidateSchema(connectionName: string, dbName: string, schemaName?: string): void {
+        const prefix = `${connectionName}|`;
+        // Key format: "CONN|DBNAME.SCHEMA" or "CONN|DBNAME.."
+
+        // We need to match keys that represent this schema
+        // If schemaName is provided: match "CONN|DBNAME.SCHEMA"
+        // If schemaName is undefined/empty: match "CONN|DBNAME.."
+
+        const targetSuffix = schemaName
+            ? `${dbName}.${schemaName}`
+            : `${dbName}..`;
+
+        const fullKey = `${connectionName}|${targetSuffix}`;
+
+        if (this.tableCache.has(fullKey)) {
+            this.tableCache.delete(fullKey);
+            // Also remove associated ID map
+            this.tableIdMap.delete(fullKey);
+            this.scheduleSave('table');
+            console.log(`[MetadataCache] Invalidated cache for ${fullKey}`);
+        }
+
+        // Also invalidate column cache for tables in this schema?
+        // It's harder to find all tables in columnCache without iterating.
+        // But if a table is renamed, the old column cache key is now orphaned (which is fine, eventually cleared on full clear)
+        // and new table will need fetch.
+        // If we want to be thorough we could iterate columnCache, but maybe overkill.
+        // Let's stick to table list invalidation which is the visible issue.
+    }
+
     private allObjectsPrefetchTriggeredSet: Set<string> = new Set();
 
     public hasAllObjectsPrefetchTriggered(connectionName: string): boolean {
@@ -623,11 +823,11 @@ export class MetadataCache {
         runQueryFn: (query: string) => Promise<string | undefined>
     ): Promise<void> {
         try {
-            // Fetch all tables AND views in one query
+            // Fetch all tables AND views AND external tables in one query
             const query = `
                 SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE
                 FROM _V_OBJECT_DATA 
-                WHERE OBJTYPE IN ('TABLE', 'VIEW')
+                WHERE OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
                 ORDER BY DBNAME, SCHEMA, OBJNAME
             `;
 
@@ -643,11 +843,24 @@ export class MetadataCache {
                     tablesByKey.set(key, { tables: [], idMap: new Map() });
                 }
                 const entry = tablesByKey.get(key)!;
+                // Determine kind: 18 (Interface) for VIEW, 7 (Class) for TABLE
+                // For EXTERNAL TABLE, maybe use 7 (Class) or similar? 
+                // VS Code kinds: Class=6, Interface=7. Let's use Class(6) for Table and External Table.
+                // Wait, existing code used 7 (Class previously 6? TS enum) for TABLE.
+                // CompletionItemKind.Class is 6.
+                // Let's stick to existing convention: row.OBJTYPE === 'VIEW' ? 18 : 7
+                let kind = 7; // Default Class
+                if (row.OBJTYPE === 'VIEW') kind = 18; // Interface/View
+                if (row.OBJTYPE === 'EXTERNAL TABLE') kind = 6; // Class (External Table similar to Table) - or just 7? 
+                // Let's match Table (7 in this codebase apparently, or Verify what 7 is. Class is 6 usually).
+                // Existing code: row.OBJTYPE === 'VIEW' ? 18 : 7.
+
                 entry.tables.push({
                     label: row.OBJNAME,
-                    kind: row.OBJTYPE === 'VIEW' ? 18 : 7, // Interface for VIEW, Class for TABLE
+                    kind: row.OBJTYPE === 'VIEW' ? 18 : 7,
                     detail: row.SCHEMA ? row.OBJTYPE : `${row.OBJTYPE} (${row.SCHEMA})`,
-                    sortText: row.OBJNAME
+                    sortText: row.OBJNAME,
+                    objType: row.OBJTYPE
                 });
 
                 const fullKey = row.SCHEMA

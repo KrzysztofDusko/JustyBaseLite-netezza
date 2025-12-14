@@ -20,11 +20,6 @@ coverage/
 
 dist/*.map
 
-# Opcjonalnie - usuń niepotrzebne pliki z node_modules
-node_modules/**/*.md
-node_modules/**/*.ts
-node_modules/**/test
-node_modules/**/tests
-node_modules/**/.github
-node_modules/**/example
-node_modules/**/examples
+# Exclude bundled sources
+node_modules/
+driver/

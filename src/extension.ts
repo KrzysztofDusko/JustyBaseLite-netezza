@@ -10,6 +10,7 @@ import { SqlParser } from './sqlParser';
 import { NetezzaDocumentLinkProvider } from './documentLinkProvider';
 import { NetezzaFoldingRangeProvider } from './foldingProvider';
 import { QueryHistoryView } from './queryHistoryView';
+import { EditDataProvider } from './editDataProvider';
 import { MetadataCache } from './metadataCache';
 import * as path from 'path';
 
@@ -72,6 +73,12 @@ async function checkForConflictingExtensions(context: vscode.ExtensionContext): 
             lang.id === 'sql' || lang.extensions?.includes('.sql')
         );
 
+        // Skip "SQL Language Basics" - it's acceptable without warning
+        const displayName = pkg.displayName || '';
+        if (displayName === 'SQL Language Basics') {
+            return false;
+        }
+
         return activatesOnSql || contributesSql;
     });
 
@@ -80,22 +87,22 @@ async function checkForConflictingExtensions(context: vscode.ExtensionContext): 
 
     if (allConflicts.length > 0) {
         const message = allConflicts.length === 1
-            ? `Wykryto rozszerzenie SQL "${allConflicts[0]}" które może powodować konflikty (np. zduplikowane skróty klawiszowe F5, Ctrl+Enter).`
-            : `Wykryto rozszerzenia SQL które mogą powodować konflikty: ${allConflicts.join(', ')}. Niektóre funkcje (np. F5, Ctrl+Enter) mogą być zduplikowane.`;
+            ? `SQL extension detected "${allConflicts[0]}" which may cause conflicts (e.g. duplicate keybindings F5, Ctrl+Enter).`
+            : `SQL extensions detected which may cause conflicts: ${allConflicts.join(', ')}. Some functions (e.g. F5, Ctrl+Enter) may be duplicated.`;
 
         const result = await vscode.window.showWarningMessage(
             message,
             'OK',
-            'Nie pokazuj ponownie'
+            'Do not show again'
         );
 
-        if (result === 'Nie pokazuj ponownie') {
+        if (result === 'Do not show again') {
             await config.update('showConflictWarnings', false, vscode.ConfigurationTarget.Global);
         }
     }
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('Netezza extension: Activating...');
 
     // Check for other SQL extensions that may conflict
@@ -110,6 +117,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const connectionManager = new ConnectionManager(context);
     const metadataCache = new MetadataCache(context);
+    await metadataCache.initialize();
     const schemaProvider = new SchemaProvider(context, connectionManager, metadataCache);
     const resultPanelProvider = new ResultPanelView(context.extensionUri);
 
@@ -400,6 +408,56 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('netezza.viewEditData', (item: any) => {
+            EditDataProvider.createOrShow(context.extensionUri, item, context, connectionManager);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('netezza.createProcedure', async (item: any) => {
+            if (!item || !item.dbName) {
+                vscode.window.showErrorMessage('Invalid selection. Select a Procedure folder.');
+                return;
+            }
+
+            const procName = await vscode.window.showInputBox({
+                prompt: 'Enter new procedure name',
+                placeHolder: 'NEW_PROCEDURE',
+                value: 'NEW_PROCEDURE'
+            });
+
+            if (procName === undefined) {
+                return;
+            }
+
+            const finalName = procName.trim() || 'NEW_PROCEDURE';
+            const database = item.dbName;
+
+            const codetemplate = `CREATE OR REPLACE PROCEDURE ${database}.SCHEMA.${finalName}(INTEGER)
+RETURNS INTEGER
+EXECUTE AS CALLER
+LANGUAGE NZPLSQL AS
+BEGIN_PROC
+DECLARE
+    arg1 ALIAS FOR $1;
+BEGIN
+    -- YOUR CODE GOES HERE
+    
+    EXCEPTION
+    WHEN OTHERS THEN
+        ROLLBACK;
+        RAISE EXCEPTION  'Procedure failed: %', sqlerrm;
+        --RAISE NOTICE 'Caught error, continuing %', sqlerrm;
+
+END;
+END_PROC;`;
+
+            const doc = await vscode.workspace.openTextDocument({ content: codetemplate, language: 'sql' });
+            await vscode.window.showTextDocument(doc);
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('netezza.toggleKeepConnectionOpen', () => {
             const currentState = connectionManager.getKeepConnectionOpen();
             connectionManager.setKeepConnectionOpen(!currentState);
@@ -434,19 +492,33 @@ export function activate(context: vscode.ExtensionContext) {
 
             try {
                 // Get connection string for the same connection (or active if not specified)
-                const connStr = await connectionManager.getConnectionString(sessionConnectionName);
-                if (!connStr) {
+                const details = await connectionManager.getConnection(sessionConnectionName!);
+                if (!details) {
                     vscode.window.showErrorMessage('No connection available to execute DROP SESSION');
                     return;
                 }
 
                 // IMPORTANT: Create a NEW connection, ignoring keepConnection setting
                 // This is necessary because the persistent connection is the one we want to kill
-                const odbc = require('odbc');
-                const freshConnection = await odbc.connect({ connectionString: connStr, fetchArray: true });
+                // const odbc = require('odbc');
+                // const freshConnection = await odbc.connect({ connectionString: connStr, fetchArray: true });
+
+                const NzConnection = require('../driver/src/NzConnection');
+                const config = {
+                    host: details.host,
+                    port: details.port || 5480,
+                    database: details.database,
+                    user: details.user,
+                    password: details.password
+                };
+                const freshConnection = new NzConnection(config);
+                await freshConnection.connect();
 
                 try {
-                    await freshConnection.query(`DROP SESSION ${sessionId}`);
+                    // await freshConnection.query(`DROP SESSION ${sessionId}`);
+                    const cmd = freshConnection.createCommand(`DROP SESSION ${sessionId}`);
+                    await cmd.execute();
+
                     vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
                     // Clear the session tracking
                     clearCurrentSession();
@@ -508,21 +580,35 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('netezza.openLogin', () => {
             LoginPanel.createOrShow(context.extensionUri, connectionManager);
         }),
-        vscode.commands.registerCommand('netezza.refreshSchema', () => {
+        vscode.commands.registerCommand('netezza.refreshSchema', async () => {
+            // Clear metadata cache to ensure fresh data
+            await metadataCache.clearCache();
             schemaProvider.refresh();
-            vscode.window.showInformationMessage('Schema refreshed');
+            vscode.window.showInformationMessage('Schema refreshed (Cache cleared)');
         }),
-        vscode.commands.registerCommand('netezza.copySelectAll', (item: any) => {
+        vscode.commands.registerCommand('netezza.copySelectAll', async (item: any) => {
             if (item && item.label && item.dbName && item.schema) {
-                // If Item has connectionName, ideally we should prefix SQL or use it?
-                // But this command just copies SQL. The user executes it.
-                // The new Query Runner will use the Active Connection by default.
-                // If they want to run it against a specific one, they should select it.
-                // However, if we copy SQL to clipboard, we can't force the connection unless we use a comment or directive ?
-                // For now, simple SQL copy is fine.
-                const sql = `SELECT * FROM ${item.dbName}.${item.schema}.${item.label} LIMIT 100;`;
-                vscode.env.clipboard.writeText(sql);
-                vscode.window.showInformationMessage('Copied to clipboard');
+                const sql = `SELECT * FROM ${item.dbName}.${item.schema}.${item.label} LIMIT 1000;`;
+
+                const action = await vscode.window.showQuickPick([
+                    { label: 'Open in Editor', description: 'Open SQL in a new editor', value: 'editor' },
+                    { label: 'Copy to Clipboard', description: 'Copy SQL to clipboard', value: 'clipboard' }
+                ], {
+                    placeHolder: 'How would you like to access the SQL?'
+                });
+
+                if (action) {
+                    if (action.value === 'editor') {
+                        const doc = await vscode.workspace.openTextDocument({
+                            content: sql,
+                            language: 'sql'
+                        });
+                        await vscode.window.showTextDocument(doc);
+                    } else {
+                        await vscode.env.clipboard.writeText(sql);
+                        vscode.window.showInformationMessage('Copied to clipboard');
+                    }
+                }
             }
         }),
         vscode.commands.registerCommand('netezza.copyDrop', async (item: any) => {
@@ -686,7 +772,7 @@ export function activate(context: vscode.ExtensionContext) {
                 if (backupsetOption.value === 'CUSTOM') {
                     const customId = await vscode.window.showInputBox({
                         prompt: 'Enter backupset ID',
-                        placeHolder: 'np. 12345',
+                        placeHolder: 'e.g. 12345',
                         validateInput: (value) => {
                             if (!value || value.trim().length === 0) {
                                 return 'Backupset ID cannot be empty';
@@ -981,6 +1067,155 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showErrorMessage(`Error generating DDL: ${err.message}`);
             }
         }),
+        vscode.commands.registerCommand('netezza.recreateTable', async (item: any) => {
+            try {
+                if (!item || !item.label || !item.dbName || !item.schema || !item.objType || item.objType !== 'TABLE') {
+                    vscode.window.showErrorMessage('Invalid object selected for Recreate Table');
+                    return;
+                }
+
+                const connectionString = await connectionManager.getConnectionString();
+                if (!connectionString) {
+                    vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
+                    return;
+                }
+
+                // Prompt for New Table Name (Optional)
+                // Default to current name effectively, but maybe suggest a temp name? 
+                // The script generates the temp name. The user might want to dictate the temp name or the final name?
+                // The task says "create under different name columns" -> "Create table just_data..._251214..."
+                // It seems the user wants the script to create a *new structure* table.
+                // The generated script uses a temp name for the "new" table, then swaps.
+                // If the user wants to rename columns, they will edit the script.
+                // So really we just need to generate the script template.
+
+                // Let's ask for an optional suffix or name just in case, but default is fine.
+                const newNameInput = await vscode.window.showInputBox({
+                    prompt: 'Enter temporary table name (Optional)',
+                    placeHolder: 'Leave empty to auto-generate timestamped name',
+                    value: ''
+                });
+
+                if (newNameInput === undefined) return; // Cancelled
+
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Generating Recreate Script for ${item.label}...`,
+                    cancellable: false
+                }, async () => {
+                    const { generateRecreateTableScript } = await import('./tableRecreator');
+
+                    const result = await generateRecreateTableScript(
+                        connectionString,
+                        item.dbName,
+                        item.schema,
+                        item.label,
+                        newNameInput || undefined
+                    );
+
+                    if (result.success && result.sqlScript) {
+                        const doc = await vscode.workspace.openTextDocument({
+                            content: result.sqlScript,
+                            language: 'sql'
+                        });
+                        await vscode.window.showTextDocument(doc);
+                        vscode.window.showInformationMessage(`Recreate script generated for ${item.label}`);
+                    } else {
+                        throw new Error(result.error || 'Script generation failed');
+                    }
+                });
+
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Error generating recreate script: ${err.message}`);
+            }
+        }),
+        vscode.commands.registerCommand('netezza.checkSkew', async (item: any) => {
+            if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {
+                const fullName = `${item.dbName}.${item.schema}.${item.label}`;
+                const sql = `SELECT datasliceid, count(*) as row_count FROM ${fullName} GROUP BY 1 ORDER BY 1;`;
+
+                const confirm = await vscode.window.showInformationMessage(
+                    `Check skew for "${fullName}"?\n\nThis will run: ${sql}\n\nNote: This may be slow on very large tables.`,
+                    { modal: true },
+                    'Yes, check skew',
+                    'Cancel'
+                );
+
+                if (confirm === 'Yes, check skew') {
+                    // Open in a new SQL editor so user can see results clearly
+                    const doc = await vscode.workspace.openTextDocument({
+                        content: `-- Check Skew for ${fullName}\n${sql}`,
+                        language: 'sql'
+                    });
+                    await vscode.window.showTextDocument(doc);
+                    // trigger run
+                    vscode.commands.executeCommand('netezza.runQuery');
+                }
+            }
+        }),
+        vscode.commands.registerCommand('netezza.changeOwner', async (item: any) => {
+            if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {
+                const fullName = `${item.dbName}.${item.schema}.${item.label}`;
+
+                const newOwner = await vscode.window.showInputBox({
+                    prompt: 'Enter new owner name',
+                    placeHolder: 'e.g. USER_NAME or GROUP_NAME'
+                });
+
+                if (!newOwner) return;
+
+                const sql = `ALTER TABLE ${fullName} OWNER TO ${newOwner.trim()};`;
+
+                try {
+                    const connectionString = await connectionManager.getConnectionString();
+                    if (!connectionString) {
+                        vscode.window.showErrorMessage('No database connection');
+                        return;
+                    }
+
+                    await runQuery(context, sql, true, item.connectionName, connectionManager);
+                    vscode.window.showInformationMessage(`Owner changed to ${newOwner} for ${fullName}`);
+
+                    // Invalidate cache for this schema so the update is reflected
+                    metadataCache.invalidateSchema(item.connectionName, item.dbName, item.schema);
+                    schemaProvider.refresh();
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Error changing owner: ${err.message}`);
+                }
+            }
+        }),
+        vscode.commands.registerCommand('netezza.renameTable', async (item: any) => {
+            if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {
+                const fullName = `${item.dbName}.${item.schema}.${item.label}`;
+
+                const newName = await vscode.window.showInputBox({
+                    prompt: 'Enter new table name',
+                    placeHolder: 'NewTableName',
+                    value: item.label
+                });
+
+                if (!newName || newName === item.label) return;
+
+                const sql = `ALTER TABLE ${fullName} RENAME TO ${newName.trim()};`;
+
+                try {
+                    const connectionString = await connectionManager.getConnectionString();
+                    if (!connectionString) {
+                        vscode.window.showErrorMessage('No database connection');
+                        return;
+                    }
+
+                    await runQuery(context, sql, true, item.connectionName, connectionManager);
+                    vscode.window.showInformationMessage(`Table renamed to ${newName}`);
+
+                    // Invalidate cache for this schema
+                    metadataCache.invalidateSchema(item.connectionName, item.dbName, item.schema);
+                    schemaProvider.refresh();
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Error renaming table: ${err.message}`);
+                }
+            }
+        }),
         vscode.commands.registerCommand('netezza.revealInSchema', async (data: any) => {
             const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Revealing ${data.name} in schema...`);
             try {
@@ -1010,12 +1245,8 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                const connectionString = await connectionManager.getConnectionString(targetConnectionName);
-                if (!connectionString) {
-                    statusBarDisposable.dispose();
-                    vscode.window.showWarningMessage('Not connected to database');
-                    return;
-                }
+                // REMOVED EARLY CONNECTION CHECK to support offline usage with cache
+                // Connection will be checked later if cache lookup fails
 
                 let searchName = data.name;
                 let searchType = data.objType;
@@ -1034,96 +1265,201 @@ export function activate(context: vscode.ExtensionContext) {
                     // We don't change searchTypes here because we want to find the parent object
                 }
 
-                // OPTIMIZATION: Try to find the object in cache first (instant lookup)
-                if (data.database && data.schema && (searchType === 'TABLE' || !searchType)) {
-                    const cacheKey = `${data.database}.${data.schema}.${searchName}`;
-                    const cachedObjId = metadataCache.findTableId(targetConnectionName, cacheKey);
-                    if (cachedObjId !== undefined) {
-                        // Found in cache - create SchemaItem directly without DB query
+                // OPTIMIZATION 1: Try to find the object in cache first using new findObjectWithType
+                // This works for any object type, not just TABLE
+                if (data.database) {
+                    const cachedObj = metadataCache.findObjectWithType(
+                        targetConnectionName,
+                        data.database,
+                        data.schema,
+                        searchName
+                    );
+                    if (cachedObj) {
+                        // Found in cache with proper objType - create SchemaItem directly without DB query
                         const { SchemaItem } = await import('./schemaProvider');
                         const targetItem = new SchemaItem(
-                            searchName,
+                            cachedObj.name, // Use canonical name from cache
                             vscode.TreeItemCollapsibleState.Collapsed,
-                            'netezza:TABLE',
+                            `netezza:${cachedObj.objType}`,
                             data.database,
-                            'TABLE',
-                            data.schema,
-                            cachedObjId,
+                            cachedObj.objType,
+                            cachedObj.schema || data.schema, // Use schema from cache (actual) or fallback to input
+                            cachedObj.objId,
                             undefined,
                             targetConnectionName
                         );
                         await schemaTreeView.reveal(targetItem, { select: true, focus: true, expand: true });
                         statusBarDisposable.dispose();
-                        vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${data.database}.${data.schema} (cached)`, 3000);
+                        vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${data.database}.${cachedObj.schema || data.schema} (cached)`, 3000);
                         return;
-                    }
-                }
-
-                // Determine which databases to search
-                let databasesToSearch: string[] = [];
-                if (data.database) {
-                    // Use the specific database from the data
-                    databasesToSearch = [data.database];
-                } else {
-                    // If no database specified, try to get current database from schema or fetch all
-                    // First, check if there's a schema-based hint
-                    const currentDb = await connectionManager.getCurrentDatabase(targetConnectionName);
-                    if (currentDb) {
-                        databasesToSearch = [currentDb];
                     } else {
-                        // Fall back to searching all databases (slower)
-                        const dbResults = await runQuery(context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true, targetConnectionName, connectionManager);
-                        if (!dbResults) {
-                            statusBarDisposable.dispose();
-                            return;
+                        // Object not in cache - trigger prefetch in background for faster next time
+                        if (!metadataCache.hasConnectionPrefetchTriggered(targetConnectionName)) {
+                            metadataCache.triggerConnectionPrefetch(
+                                targetConnectionName,
+                                async (q) => runQuery(context, q, true, targetConnectionName, connectionManager)
+                            );
                         }
-                        const databases = JSON.parse(dbResults);
-                        databasesToSearch = databases.map((db: any) => db.DATABASE);
                     }
                 }
 
-                for (const dbName of databasesToSearch) {
+                // Check connection before attempting DB query (Optimization 2 fallback)
+                const connectionString = await connectionManager.getConnectionString(targetConnectionName);
+                if (!connectionString) {
+                    statusBarDisposable.dispose();
+                    vscode.window.showWarningMessage('Not connected to database and object not found in cache.');
+                    return;
+                }
+
+                // OPTIMIZATION 2: Single query without iterating types
+                // Build one query that finds the object regardless of type
+                const targetDb = data.database || await connectionManager.getCurrentDatabase(targetConnectionName);
+
+                if (targetDb) {
+                    // Single query approach - much faster than iterating types
+                    const typeFilter = searchType && searchType !== 'COLUMN'
+                        ? `AND UPPER(OBJTYPE) = UPPER('${searchType}')`
+                        : '';
+                    const schemaFilter = data.schema
+                        ? `AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''")}')`
+                        : '';
+
+                    const query = `
+                        SELECT OBJNAME, OBJTYPE, SCHEMA, OBJID 
+                        FROM ${targetDb}.._V_OBJECT_DATA 
+                        WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''")}') 
+                        AND DBNAME = '${targetDb}'
+                        ${typeFilter}
+                        ${schemaFilter}
+                        LIMIT 1
+                    `;
+
                     try {
-                        const types = searchType === 'COLUMN' ? ['TABLE', 'VIEW', 'EXTERNAL TABLE'] : searchTypes;
-
-                        for (const type of types) {
-                            let query = `SELECT OBJNAME, OBJTYPE, SCHEMA, OBJID FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''")}') AND UPPER(OBJTYPE) = UPPER('${type}') AND DBNAME = '${dbName}'`;
-
-                            if (data.schema) {
-                                query += ` AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''")}')`;
+                        const objResults = await runQuery(context, query, true, targetConnectionName, connectionManager);
+                        if (objResults) {
+                            let objects: any[] = [];
+                            if (objResults === 'Query executed successfully (no results).' || objResults.startsWith('Query executed successfully')) {
+                                objects = [];
+                            } else {
+                                objects = JSON.parse(objResults);
                             }
 
-                            // Pass connection name provided in data or determined above
-                            const objResults = await runQuery(context, query, true, targetConnectionName, connectionManager);
-                            if (objResults) {
-                                const objects = JSON.parse(objResults);
-                                if (objects.length > 0) {
-                                    const obj = objects[0];
-                                    const { SchemaItem } = await import('./schemaProvider');
-                                    // IMPORTANT: Pass the connectionName so the SchemaItem can be found in the tree
-                                    const targetItem = new SchemaItem(
-                                        obj.OBJNAME,
-                                        vscode.TreeItemCollapsibleState.Collapsed,
-                                        `netezza:${obj.OBJTYPE}`,
-                                        dbName,
-                                        obj.OBJTYPE,
-                                        obj.SCHEMA,
-                                        obj.OBJID,
-                                        undefined,
-                                        targetConnectionName
-                                    );
+                            if (objects.length > 0) {
+                                let obj = objects[0];
 
-                                    // If we were looking for a column, we found the parent table. Now we might want to expand it?
-                                    // The original code just revealed the table.
-
-                                    await schemaTreeView.reveal(targetItem, { select: true, focus: true, expand: true });
-                                    statusBarDisposable.dispose();
-                                    vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${dbName}.${obj.SCHEMA}`, 3000);
-                                    return;
+                                // Fix for Procedures: Resolve signature instead of simple name
+                                if (obj.OBJTYPE === 'PROCEDURE') {
+                                    try {
+                                        const sigQuery = `SELECT PROCEDURESIGNATURE FROM ${targetDb}.._V_PROCEDURE WHERE OBJID = ${obj.OBJID}`;
+                                        const sigRes = await runQuery(context, sigQuery, true, targetConnectionName, connectionManager);
+                                        if (sigRes) {
+                                            const sigObj = JSON.parse(sigRes);
+                                            if (sigObj.length > 0 && sigObj[0].PROCEDURESIGNATURE) {
+                                                obj.OBJNAME = sigObj[0].PROCEDURESIGNATURE;
+                                            }
+                                        }
+                                    } catch (sigErr) {
+                                        console.warn('Failed to resolve procedure signature:', sigErr);
+                                    }
                                 }
+
+                                const { SchemaItem } = await import('./schemaProvider');
+                                const targetItem = new SchemaItem(
+                                    obj.OBJNAME,
+                                    vscode.TreeItemCollapsibleState.Collapsed,
+                                    `netezza:${obj.OBJTYPE}`,
+                                    targetDb,
+                                    obj.OBJTYPE,
+                                    obj.SCHEMA,
+                                    obj.OBJID,
+                                    undefined,
+                                    targetConnectionName
+                                );
+
+                                await schemaTreeView.reveal(targetItem, { select: true, focus: true, expand: true });
+                                statusBarDisposable.dispose();
+                                vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${targetDb}.${obj.SCHEMA}`, 3000);
+                                return;
                             }
                         }
-                    } catch (e) { console.log(`Error searching in ${dbName}:`, e); }
+                    } catch (e) {
+                        console.log(`Error searching in ${targetDb}:`, e);
+                    }
+                }
+
+                // Fallback: search all databases if no target database available
+                if (!targetDb) {
+                    const dbResults = await runQuery(context, "SELECT DATABASE FROM system.._v_database ORDER BY DATABASE", true, targetConnectionName, connectionManager);
+                    if (dbResults) {
+                        const databases = JSON.parse(dbResults);
+                        for (const db of databases) {
+                            const dbName = db.DATABASE;
+                            try {
+                                const schemaFilter = data.schema
+                                    ? `AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''")}')`
+                                    : '';
+
+                                const query = `
+                                    SELECT OBJNAME, OBJTYPE, SCHEMA, OBJID 
+                                    FROM ${dbName}.._V_OBJECT_DATA 
+                                    WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''")}') 
+                                    AND DBNAME = '${dbName}'
+                                    ${schemaFilter}
+                                    LIMIT 1
+                                `;
+
+                                const objResults = await runQuery(context, query, true, targetConnectionName, connectionManager);
+                                if (objResults) {
+                                    let objects: any[] = [];
+                                    if (objResults === 'Query executed successfully (no results).' || objResults.startsWith('Query executed successfully')) {
+                                        objects = [];
+                                    } else {
+                                        objects = JSON.parse(objResults);
+                                    }
+
+                                    if (objects.length > 0) {
+                                        let obj = objects[0];
+
+                                        // Fix for Procedures: Resolve signature instead of simple name
+                                        if (obj.OBJTYPE === 'PROCEDURE') {
+                                            try {
+                                                const sigQuery = `SELECT PROCEDURESIGNATURE FROM ${dbName}.._V_PROCEDURE WHERE OBJID = ${obj.OBJID}`;
+                                                const sigRes = await runQuery(context, sigQuery, true, targetConnectionName, connectionManager);
+                                                if (sigRes) {
+                                                    const sigObj = JSON.parse(sigRes);
+                                                    if (sigObj.length > 0 && sigObj[0].PROCEDURESIGNATURE) {
+                                                        obj.OBJNAME = sigObj[0].PROCEDURESIGNATURE;
+                                                    }
+                                                }
+                                            } catch (sigErr) {
+                                                console.warn('Failed to resolve procedure signature:', sigErr);
+                                            }
+                                        }
+
+                                        const { SchemaItem } = await import('./schemaProvider');
+                                        const targetItem = new SchemaItem(
+                                            obj.OBJNAME,
+                                            vscode.TreeItemCollapsibleState.Collapsed,
+                                            `netezza:${obj.OBJTYPE}`,
+                                            dbName,
+                                            obj.OBJTYPE,
+                                            obj.SCHEMA,
+                                            obj.OBJID,
+                                            undefined,
+                                            targetConnectionName
+                                        );
+
+                                        await schemaTreeView.reveal(targetItem, { select: true, focus: true, expand: true });
+                                        statusBarDisposable.dispose();
+                                        vscode.window.setStatusBarMessage(`$(check) Found ${searchName} in ${dbName}.${obj.SCHEMA}`, 3000);
+                                        return;
+                                    }
+                                }
+                            } catch (e) {
+                                console.log(`Error searching in ${dbName}:`, e);
+                            }
+                        }
+                    }
                 }
                 statusBarDisposable.dispose();
                 vscode.window.showWarningMessage(`Could not find ${searchType || 'object'} ${searchName}`);
@@ -1211,7 +1547,13 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage('No SQL query selected');
                 return;
             }
-            queries = SqlParser.splitStatements(selectedText);
+            // If the code is a procedure definition, execute in batch mode (don't split)
+            // Procedures contain semicolons in their body which breaks the standard splitter
+            if (/^\s*CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b/i.test(selectedText)) {
+                queries = [selectedText];
+            } else {
+                queries = SqlParser.splitStatements(selectedText);
+            }
         } else {
             // Execute statement at cursor
             const offset = document.offsetAt(selection.active);

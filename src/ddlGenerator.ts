@@ -4,7 +4,7 @@
  * TypeScript port of ddl_generator.py
  */
 
-import * as odbc from 'odbc';
+// import * as odbc from 'odbc'; // Removed odbc dependency
 
 interface ColumnInfo {
     name: string;
@@ -40,9 +40,28 @@ export interface DDLResult {
 }
 
 /**
+ * Execute query and return array of objects (shim for odbc.query)
+ */
+async function executeQueryHelper(connection: any, sql: string): Promise<any[]> {
+    const cmd = connection.createCommand(sql);
+    const reader = await cmd.executeReader();
+    const results: any[] = [];
+
+    // Read all rows
+    while (await reader.read()) {
+        const row: any = {};
+        for (let i = 0; i < reader.fieldCount; i++) {
+            row[reader.getName(i)] = reader.getValue(i);
+        }
+        results.push(row);
+    }
+    return results;
+}
+
+/**
  * Quote identifier name if needed (contains special characters or is mixed case)
  */
-function quoteNameIfNeeded(name: string): string {
+export function quoteNameIfNeeded(name: string): string {
     if (!name) {
         return name;
     }
@@ -62,8 +81,8 @@ function quoteNameIfNeeded(name: string): string {
 /**
  * Get table column information from Netezza system views
  */
-async function getColumns(
-    connection: odbc.Connection,
+export async function getColumns(
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -89,10 +108,10 @@ async function getColumns(
             X.OBJID, X.ATTNUM
     `;
 
-    const result = await connection.query(sql);
+    const result = await executeQueryHelper(connection, sql);
     const columns: ColumnInfo[] = [];
 
-    for (const row of result as any[]) {
+    for (const row of result) {
         // Safe boolean parsing for ODBC result
         let isNotNull = false;
         const val = row.ATTNOTNULL;
@@ -120,8 +139,8 @@ async function getColumns(
 /**
  * Get table distribution information
  */
-async function getDistributionInfo(
-    connection: odbc.Connection,
+export async function getDistributionInfo(
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -135,8 +154,8 @@ async function getDistributionInfo(
             ORDER BY DISTSEQNO
         `;
 
-        const result = await connection.query(sql);
-        return (result as any[]).map(row => row.ATTNAME);
+        const result = await executeQueryHelper(connection, sql);
+        return result.map(row => row.ATTNAME);
     } catch {
         // Distribution info may not be available in all Netezza versions
         return [];
@@ -146,8 +165,8 @@ async function getDistributionInfo(
 /**
  * Get table organization information
  */
-async function getOrganizeInfo(
-    connection: odbc.Connection,
+export async function getOrganizeInfo(
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -161,8 +180,8 @@ async function getOrganizeInfo(
             ORDER BY ORGSEQNO
         `;
 
-        const result = await connection.query(sql);
-        return (result as any[]).map(row => row.ATTNAME);
+        const result = await executeQueryHelper(connection, sql);
+        return result.map(row => row.ATTNAME);
     } catch {
         // Organization info may not be available in all Netezza versions
         return [];
@@ -172,8 +191,8 @@ async function getOrganizeInfo(
 /**
  * Get table keys information (primary key, foreign key, unique)
  */
-async function getKeysInfo(
-    connection: odbc.Connection,
+export async function getKeysInfo(
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -204,9 +223,9 @@ async function getKeysInfo(
     const keysInfo = new Map<string, KeyInfo>();
 
     try {
-        const result = await connection.query(sql);
+        const result = await executeQueryHelper(connection, sql);
 
-        for (const row of result as any[]) {
+        for (const row of result) {
             const keyName = row.CONSTRAINTNAME;
 
             if (!keysInfo.has(keyName)) {
@@ -245,8 +264,8 @@ async function getKeysInfo(
 /**
  * Get table comment from metadata
  */
-async function getTableComment(
-    connection: odbc.Connection,
+export async function getTableComment(
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -260,9 +279,9 @@ async function getTableComment(
                 AND OBJTYPE = 'TABLE'
         `;
 
-        const result = await connection.query(sql);
-        if ((result as any[]).length > 0 && (result as any[])[0].DESCRIPTION) {
-            return (result as any[])[0].DESCRIPTION;
+        const result = await executeQueryHelper(connection, sql);
+        if (result.length > 0 && result[0].DESCRIPTION) {
+            return result[0].DESCRIPTION;
         }
     } catch {
         // Try without OBJTYPE filter
@@ -274,9 +293,9 @@ async function getTableComment(
                     AND OBJNAME = '${tableName.toUpperCase()}'
             `;
 
-            const result = await connection.query(sql);
-            if ((result as any[]).length > 0 && (result as any[])[0].DESCRIPTION) {
-                return (result as any[])[0].DESCRIPTION;
+            const result = await executeQueryHelper(connection, sql);
+            if (result.length > 0 && result[0].DESCRIPTION) {
+                return result[0].DESCRIPTION;
             }
         } catch {
             // Silently ignore - comments are optional
@@ -287,10 +306,37 @@ async function getTableComment(
 }
 
 /**
+ * Get table owner
+ */
+export async function getTableOwner(
+    connection: any,
+    database: string,
+    schema: string,
+    tableName: string
+): Promise<string | null> {
+    try {
+        const sql = `
+            SELECT OWNER
+            FROM ${database.toUpperCase()}.._V_TABLE
+            WHERE SCHEMA = '${schema.toUpperCase()}'
+                AND TABLENAME = '${tableName.toUpperCase()}'
+        `;
+
+        const result = await executeQueryHelper(connection, sql);
+        if (result.length > 0 && result[0].OWNER) {
+            return result[0].OWNER;
+        }
+    } catch {
+        // Ignore errors
+    }
+    return null;
+}
+
+/**
  * Generate complete DDL code for creating a table in Netezza
  */
 async function generateTableDDL(
-    connection: odbc.Connection,
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -404,7 +450,7 @@ async function generateTableDDL(
  * Generate DDL code for creating a view in Netezza
  */
 async function generateViewDDL(
-    connection: odbc.Connection,
+    connection: any,
     database: string,
     schema: string,
     viewName: string
@@ -421,8 +467,8 @@ async function generateViewDDL(
             AND VIEWNAME = '${viewName.toUpperCase()}'
     `;
 
-    const result = await connection.query(sql);
-    const rows = result as any[];
+    const result = await executeQueryHelper(connection, sql);
+    const rows = result;
 
     if (rows.length === 0) {
         throw new Error(`View ${database}.${schema}.${viewName} not found`);
@@ -448,14 +494,37 @@ interface ProcedureInfo {
     executeAsOwner: boolean;
     description: string | null;
     procedureSignature: string;
+    procedureName: string;
     arguments: string | null;
+}
+
+/**
+ * Fix Netezza procedure return type syntax for ANY length types
+ */
+function fixProcReturnType(procReturns: string): string {
+    if (!procReturns) return procReturns;
+
+    const upper = procReturns.trim().toUpperCase();
+    if (upper === "CHARACTER VARYING") {
+        return "CHARACTER VARYING(ANY)";
+    }
+    else if (upper === "NATIONAL CHARACTER VARYING") {
+        return "NATIONAL CHARACTER VARYING(ANY)";
+    }
+    else if (upper === "NATIONAL CHARACTER") {
+        return "NATIONAL CHARACTER(ANY)";
+    }
+    else if (upper === "CHARACTER") {
+        return "CHARACTER(ANY)";
+    }
+    return procReturns;
 }
 
 /**
  * Generate DDL code for creating a procedure in Netezza
  */
 async function generateProcedureDDL(
-    connection: odbc.Connection,
+    connection: any,
     database: string,
     schema: string,
     procName: string
@@ -469,17 +538,18 @@ async function generateProcedureDDL(
             EXECUTEDASOWNER,
             DESCRIPTION,
             PROCEDURESIGNATURE,
+            PROCEDURE,
             ARGUMENTS,
             NULL AS LANGUAGE
         FROM ${database.toUpperCase()}.._V_PROCEDURE
         WHERE DATABASE = '${database.toUpperCase()}'
             AND SCHEMA = '${schema.toUpperCase()}'
-            AND PROCEDURE = '${procName.toUpperCase()}'
+            AND PROCEDURESIGNATURE = '${procName.toUpperCase()}'
         ORDER BY 1, 2, 3
     `;
 
-    const result = await connection.query(sql);
-    const rows = result as any[];
+    const result = await executeQueryHelper(connection, sql);
+    const rows = result;
 
     if (rows.length === 0) {
         throw new Error(`Procedure ${database}.${schema}.${procName} not found`);
@@ -490,19 +560,35 @@ async function generateProcedureDDL(
         schema: row.SCHEMA,
         procedureSource: row.PROCEDURESOURCE,
         objId: row.OBJID,
-        returns: row.RETURNS,
+        returns: fixProcReturnType(row.RETURNS),
         executeAsOwner: Boolean(row.EXECUTEDASOWNER),
         description: row.DESCRIPTION || null,
         procedureSignature: row.PROCEDURESIGNATURE,
+        procedureName: row.PROCEDURE,
         arguments: row.ARGUMENTS || null
     };
 
     const cleanDatabase = quoteNameIfNeeded(database);
     const cleanSchema = quoteNameIfNeeded(schema);
-    const cleanProcName = quoteNameIfNeeded(procName);
+    const cleanProcName = quoteNameIfNeeded(procInfo.procedureName);
 
     const ddlLines: string[] = [];
-    ddlLines.push(`CREATE OR REPLACE PROCEDURE ${cleanDatabase}.${cleanSchema}.${cleanProcName}`);
+    let procHeader = `CREATE OR REPLACE PROCEDURE ${cleanDatabase}.${cleanSchema}.${cleanProcName}`;
+
+    // Add arguments
+    if (procInfo.arguments) {
+        const args = procInfo.arguments.trim();
+        // Check if parens already present (unlikely for ARGUMENTS column but safe to check)
+        if (args.startsWith('(') && args.endsWith(')')) {
+            procHeader += args;
+        } else {
+            procHeader += `(${args})`;
+        }
+    } else {
+        procHeader += '()';
+    }
+
+    ddlLines.push(procHeader);
     ddlLines.push(`RETURNS ${procInfo.returns}`);
 
     if (procInfo.executeAsOwner) {
@@ -567,7 +653,7 @@ interface ExternalTableInfo {
  * Generate DDL code for creating an external table in Netezza
  */
 async function generateExternalTableDDL(
-    connection: odbc.Connection,
+    connection: any,
     database: string,
     schema: string,
     tableName: string
@@ -623,8 +709,8 @@ async function generateExternalTableDDL(
             AND E1.TABLENAME = '${tableName.toUpperCase()}'
     `;
 
-    const result = await connection.query(sql);
-    const rows = result as any[];
+    const result = await executeQueryHelper(connection, sql);
+    const rows = result;
 
     if (rows.length === 0) {
         throw new Error(`External table ${database}.${schema}.${tableName} not found`);
@@ -805,7 +891,7 @@ async function generateExternalTableDDL(
  * Generate DDL code for creating a synonym in Netezza
  */
 async function generateSynonymDDL(
-    connection: odbc.Connection,
+    connection: any,
     database: string,
     schema: string,
     synonymName: string
@@ -823,8 +909,8 @@ async function generateSynonymDDL(
             AND SYNONYM_NAME = '${synonymName.toUpperCase()}'
     `;
 
-    const result = await connection.query(sql);
-    const rows = result as any[];
+    const result = await executeQueryHelper(connection, sql);
+    const rows = result;
 
     if (rows.length === 0) {
         throw new Error(`Synonym ${database}.${schema}.${synonymName} not found`);
@@ -847,6 +933,24 @@ async function generateSynonymDDL(
     return ddlLines.join('\n');
 }
 
+function parseConnectionString(connStr: string): any {
+    const parts = connStr.split(';');
+    const config: any = {};
+    for (const part of parts) {
+        const idx = part.indexOf('=');
+        if (idx > 0) {
+            const key = part.substring(0, idx).trim().toUpperCase();
+            const value = part.substring(idx + 1).trim();
+            if (key === 'SERVER') config.host = value;
+            else if (key === 'PORT') config.port = parseInt(value);
+            else if (key === 'DATABASE') config.database = value;
+            else if (key === 'UID') config.user = value;
+            else if (key === 'PWD') config.password = value;
+        }
+    }
+    return config;
+}
+
 /**
  * Generate DDL code for a database object
  */
@@ -857,10 +961,15 @@ export async function generateDDL(
     objectName: string,
     objectType: string
 ): Promise<DDLResult> {
-    let connection: odbc.Connection | null = null;
+    let connection: any = null;
 
     try {
-        connection = await odbc.connect(connectionString);
+        const config = parseConnectionString(connectionString);
+        if (!config.port) config.port = 5480;
+
+        const NzConnection = require('../driver/src/NzConnection');
+        connection = new NzConnection(config);
+        await connection.connect();
 
         const upperType = objectType.toUpperCase();
 

@@ -1,8 +1,8 @@
 {
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
-  "description": "Execute Netezza / IBM PureData System for Analytics SQL queries via ODBC",
-  "version": "0.0.8",
+  "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
+  "version": "0.0.11",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -22,8 +22,7 @@
     "IBM PureData System for Analytics",
     "SQL",
     "nz",
-    "database",
-    "ODBC"
+    "database"
   ],
   "categories": [
     "Programming Languages",
@@ -127,7 +126,7 @@
       },
       {
         "command": "netezza.copySelectAll",
-        "title": "Copy Select *"
+        "title": "Select Top 1000"
       },
       {
         "command": "netezza.copyDrop",
@@ -210,6 +209,32 @@
         "command": "netezza.dropCurrentSession",
         "title": "Drop Current Session (Kill Query)",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "netezza.recreateTable",
+        "title": "Recreate Table (Maintenance Script)"
+      },
+      {
+        "command": "netezza.checkSkew",
+        "title": "Check Data Skew"
+      },
+      {
+        "command": "netezza.changeOwner",
+        "title": "Change Owner"
+      },
+      {
+        "command": "netezza.renameTable",
+        "title": "Rename Table"
+      },
+      {
+        "command": "netezza.viewEditData",
+        "title": "View/Edit Data (Limit 50k)",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "netezza.createProcedure",
+        "title": "Create New Procedure",
+        "icon": "$(add)"
       }
     ],
     "menus": {
@@ -369,9 +394,48 @@
           "command": "netezza.createDDL",
           "when": "view == netezza.schema && viewItem =~ /netezza:(TABLE|VIEW|PROCEDURE|FUNCTION|AGGREGATE|EXTERNAL TABLE|SYNONYM)/",
           "group": "1_copy"
+        },
+        {
+          "command": "netezza.recreateTable",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.checkSkew",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.changeOwner",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.renameTable",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.viewEditData",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "1_copy"
+        },
+        {
+          "command": "netezza.createProcedure",
+          "when": "view == netezza.schema && viewItem == typeGroup:PROCEDURE",
+          "group": "0_create"
         }
       ]
     },
+    "grammars": [
+      {
+        "path": "./syntaxes/netezza.tmLanguage.json",
+        "scopeName": "netezza.injection",
+        "injectTo": [
+          "source.sql"
+        ]
+      }
+    ],
     "configuration": {
       "type": "object",
       "title": "Netezza Configuration",
@@ -439,12 +503,10 @@
     "@types/node": "^16.0.0",
     "@types/vscode": "^1.80.0",
     "esbuild": "^0.27.1",
-    "typescript": "^5.9.3"
-  },
-  "dependencies": {
+    "typescript": "^5.9.3",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
-    "odbc": "^2.4.9",
+    "debug": "^4.4.3",
     "yauzl": "^3.2.0"
   },
   "preview": true

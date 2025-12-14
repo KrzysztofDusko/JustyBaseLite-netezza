@@ -1,11 +1,24 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 
-let odbc: any;
-try {
-    odbc = require('odbc');
-} catch (err) {
-    console.error('odbc package not installed. Run: npm install odbc');
+// import * as odbc from 'odbc'; // Removed odbc dependency
+
+function parseConnectionString(connStr: string): any {
+    const parts = connStr.split(';');
+    const config: any = {};
+    for (const part of parts) {
+        const idx = part.indexOf('=');
+        if (idx > 0) {
+            const key = part.substring(0, idx).trim().toUpperCase();
+            const value = part.substring(idx + 1).trim();
+            if (key === 'SERVER') config.host = value;
+            else if (key === 'PORT') config.port = parseInt(value);
+            else if (key === 'DATABASE') config.database = value;
+            else if (key === 'UID') config.user = value;
+            else if (key === 'PWD') config.password = value;
+        }
+    }
+    return config;
 }
 
 export async function exportToCsv(
@@ -15,20 +28,27 @@ export async function exportToCsv(
     filePath: string,
     progress?: vscode.Progress<{ message?: string; increment?: number }>
 ): Promise<void> {
-    if (!odbc) {
-        throw new Error('odbc package not installed. Please run: npm install odbc');
-    }
-
-    const connection = await odbc.connect(connectionString);
+    let connection: any = null;
 
     try {
+        if (progress) {
+            progress.report({ message: 'Connecting to database...' });
+        }
+
+        const config = parseConnectionString(connectionString);
+        if (!config.port) config.port = 5480;
+
+        const NzConnection = require('../driver/src/NzConnection');
+        connection = new NzConnection(config);
+        await connection.connect();
+
         if (progress) {
             progress.report({ message: 'Executing query...' });
         }
 
-        // Use cursor-based query to stream results row-by-row instead of loading all into memory
-        // fetchSize determines how many rows are fetched per batch from the database
-        const cursor = await connection.query(query, { cursor: true, fetchSize: 1000 });
+        // executeReader returns a reader that allows streaming rows
+        const cmd = connection.createCommand(query);
+        const reader = await cmd.executeReader();
 
         if (progress) {
             progress.report({ message: 'Writing to CSV...' });
@@ -40,10 +60,10 @@ export async function exportToCsv(
             highWaterMark: 64 * 1024 // 64KB buffer
         });
 
-        // Get headers from cursor columns
-        let headers: string[] = [];
-        if (cursor.columns) {
-            headers = cursor.columns.map((col: any) => col.name);
+        // Get headers
+        const headers: string[] = [];
+        for (let i = 0; i < reader.fieldCount; i++) {
+            headers.push(reader.getName(i));
         }
 
         // Write headers
@@ -51,54 +71,42 @@ export async function exportToCsv(
             writeStream.write(headers.map(escapeCsvField).join(',') + '\n');
         }
 
-        // Stream rows from cursor with buffering for better performance
+        // Stream rows
         let totalRows = 0;
-        let batch: any[] = [];
         let rowBuffer: string[] = []; // Buffer multiple rows before writing
-        const BUFFER_SIZE = 100; // Write every 100 rows
+        const BUFFER_SIZE = 500; // Increased buffer size
 
-        // Fetch rows in batches using cursor
-        do {
-            batch = await cursor.fetch();
+        while (await reader.read()) {
+            totalRows++;
 
-            for (const row of batch) {
-                totalRows++;
-
-                // Build row string
-                let rowValues: string[];
-                if (headers.length > 0) {
-                    rowValues = headers.map(header => escapeCsvField(row[header]));
-                } else {
-                    rowValues = Object.values(row).map(val => escapeCsvField(val));
-                }
-
-                rowBuffer.push(rowValues.join(','));
-
-                // Write buffer when it reaches BUFFER_SIZE
-                if (rowBuffer.length >= BUFFER_SIZE) {
-                    const canWrite = writeStream.write(rowBuffer.join('\n') + '\n');
-                    rowBuffer = []; // Clear buffer
-
-                    // Handle backpressure
-                    if (!canWrite) {
-                        await new Promise<void>(resolve => writeStream.once('drain', resolve));
-                    }
-                }
+            // Build row string
+            const rowValues: string[] = [];
+            for (let i = 0; i < reader.fieldCount; i++) {
+                rowValues.push(escapeCsvField(reader.getValue(i)));
             }
 
-            if (progress && batch.length > 0) {
-                progress.report({ message: `Processed ${totalRows} rows...` });
-            }
+            rowBuffer.push(rowValues.join(','));
 
-        } while (batch.length > 0 && !cursor.noData);
+            // Write buffer when it reaches BUFFER_SIZE
+            if (rowBuffer.length >= BUFFER_SIZE) {
+                const canWrite = writeStream.write(rowBuffer.join('\n') + '\n');
+                rowBuffer = []; // Clear buffer
+
+                // Handle backpressure
+                if (!canWrite) {
+                    await new Promise<void>(resolve => writeStream.once('drain', resolve));
+                }
+
+                if (progress && totalRows % 1000 === 0) {
+                    progress.report({ message: `Processed ${totalRows} rows...` });
+                }
+            }
+        }
 
         // Write remaining buffered rows
         if (rowBuffer.length > 0) {
             writeStream.write(rowBuffer.join('\n') + '\n');
         }
-
-        // Close cursor
-        await cursor.close();
 
         writeStream.end();
 
@@ -112,10 +120,12 @@ export async function exportToCsv(
         }
 
     } finally {
-        try {
-            await connection.close();
-        } catch (e) {
-            console.error('Error closing connection:', e);
+        if (connection) {
+            try {
+                await connection.close();
+            } catch (e) {
+                console.error('Error closing connection:', e);
+            }
         }
     }
 }
@@ -133,11 +143,9 @@ function escapeCsvField(field: any): string {
             stringValue = field.toString();
         }
     } else if (field instanceof Date) {
-        // Format date as ISO string or similar, matching Python's default behavior if possible
-        // Python's default str(date) is usually YYYY-MM-DD HH:MM:SS or similar. 
-        // ISO is safe.
+        // Format date as ISO string
         stringValue = field.toISOString();
-    } else if (field instanceof Buffer) {
+    } else if (typeof field === 'object' && Buffer.isBuffer(field)) {
         // Handle binary data as hex string
         stringValue = field.toString('hex');
     } else if (typeof field === 'object') {

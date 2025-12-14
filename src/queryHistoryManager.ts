@@ -29,20 +29,74 @@ export class QueryHistoryManager {
     private cache: QueryHistoryEntry[] = [];
     private initialized = false;
 
+    private historyFilePath: string | undefined;
+
     constructor(private context: vscode.ExtensionContext) {
+        if (this.context.globalStorageUri) {
+            this.historyFilePath = vscode.Uri.joinPath(this.context.globalStorageUri, 'query-history.json').fsPath;
+            // Ensure storage directory exists
+            try {
+                if (!fs.existsSync(this.context.globalStorageUri.fsPath)) {
+                    fs.mkdirSync(this.context.globalStorageUri.fsPath, { recursive: true });
+                }
+            } catch (e) {
+                console.error('[QueryHistoryManager] Error creating storage directory:', e);
+            }
+        }
         this.initialize();
     }
 
     private async initialize(): Promise<void> {
         try {
-            // Try to load from VS Code storage
-            const stored = this.context.globalState.get<StorageData>(QueryHistoryManager.STORAGE_KEY);
+            // Priority 1: Load from File
+            let loadedFromFile = false;
+            if (this.historyFilePath && fs.existsSync(this.historyFilePath)) {
+                try {
+                    const raw = await fs.promises.readFile(this.historyFilePath, 'utf-8');
+                    // Check for empty or whitespace-only content
+                    if (!raw || !raw.trim()) {
+                        console.log('[QueryHistoryManager] File is empty, starting fresh');
+                        this.cache = [];
+                        loadedFromFile = true; // Treat as loaded to avoid migration attempts
+                    } else {
+                        const stored = JSON.parse(raw);
+                        if (stored && stored.entries) {
+                            this.cache = stored.entries;
+                            // console.log(`✅ Loaded ${this.cache.length} entries from file storage`);
+                            loadedFromFile = true;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[QueryHistoryManager] Corrupted history file, resetting:', e);
+                    // Reset the corrupted file with valid empty JSON to prevent repeated errors
+                    this.cache = [];
+                    loadedFromFile = true;
+                    try {
+                        await this.saveToStorage();
+                        console.log('[QueryHistoryManager] Reset corrupted file to empty state');
+                    } catch (saveErr) {
+                        console.error('[QueryHistoryManager] Failed to reset file:', saveErr);
+                    }
+                }
+            }
 
-            if (stored && stored.entries) {
-                this.cache = stored.entries;
-                console.log(`✅ Loaded ${this.cache.length} entries from VS Code storage`);
-            } else {
-                // Migrate from SQLite/JSON if needed
+            // Priority 2: Migration from globalState (Large State Warning Fix)
+            if (!loadedFromFile) {
+                const stored = this.context.globalState.get<StorageData>(QueryHistoryManager.STORAGE_KEY);
+                if (stored && stored.entries) {
+                    this.cache = stored.entries;
+                    console.log(`✅ Migrated ${this.cache.length} entries from globalState`);
+                    await this.saveToStorage(); // Save to file
+
+                    // Clear globalState to resolve warning
+                    await this.context.globalState.update(QueryHistoryManager.STORAGE_KEY, undefined);
+                } else {
+                    // Check for other legacy formats if needed (skipped for now as per plan focus on large state)
+                }
+            }
+
+            // Legacy migration check (kept from original code but simplified)
+            if (!loadedFromFile && this.cache.length === 0) {
                 await this.migrateFromLegacyStorage();
             }
 
@@ -62,30 +116,29 @@ export class QueryHistoryManager {
             const dbPath = path.join(globalStoragePath, 'query-history.db');
             if (fs.existsSync(dbPath)) {
                 console.log('⚠️ SQLite database found but migration not implemented');
-                console.log('💡 Consider manually exporting data before switching');
             }
 
-            // Check for JSON files
-            const jsonPath = path.join(globalStoragePath, 'query-history.json');
-            if (fs.existsSync(jsonPath)) {
-                const content = fs.readFileSync(jsonPath, 'utf8');
-                if (content.trim()) {
-                    const entries: QueryHistoryEntry[] = JSON.parse(content);
-                    this.cache = entries;
-                    await this.saveToStorage();
-                    console.log(`✅ Migrated ${entries.length} entries from JSON`);
-                }
-            }
+            // Check for OLD JSON files (if any existed before globalState?)
+            // The original code checked 'query-history.json' in globalStoragePath, 
+            // which IS EXACTLY what we are using now. 
+            // So if `this.initialize` checked file first, this is redundant regarding the SAME file,
+            // but might be useful if we changed naming convention. We kept 'query-history.json'.
+            // So this part acts as a "reload" if for some reason initialize failed? 
+            // Or if we are migrating from a manual file usage to this class usage.
+            // Let's keep it safe.
 
             const archivePath = path.join(globalStoragePath, 'query-history-archive.json');
             if (fs.existsSync(archivePath)) {
-                const content = fs.readFileSync(archivePath, 'utf8');
-                if (content.trim()) {
-                    const entries: QueryHistoryEntry[] = JSON.parse(content);
-                    this.cache.push(...entries);
-                    await this.saveToStorage();
-                    console.log(`✅ Migrated archive with ${entries.length} entries`);
-                }
+                try {
+                    const content = fs.readFileSync(archivePath, 'utf8');
+                    if (content.trim()) {
+                        const entries: QueryHistoryEntry[] = JSON.parse(content);
+                        this.cache.push(...entries);
+                        await this.saveToStorage();
+                        console.log(`✅ Migrated archive with ${entries.length} entries`);
+                        // Optional: rename/delete archive?
+                    }
+                } catch (e) { /* ignore */ }
             }
         } catch (error) {
             console.error('Error during migration:', error);
@@ -93,12 +146,13 @@ export class QueryHistoryManager {
     }
 
     private async saveToStorage(): Promise<void> {
+        if (!this.historyFilePath) return;
         try {
             const data: StorageData = {
                 entries: this.cache,
                 version: QueryHistoryManager.STORAGE_VERSION
             };
-            await this.context.globalState.update(QueryHistoryManager.STORAGE_KEY, data);
+            await fs.promises.writeFile(this.historyFilePath, JSON.stringify(data), 'utf-8');
         } catch (error) {
             console.error('Error saving to storage:', error);
         }

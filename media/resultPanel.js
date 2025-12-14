@@ -108,6 +108,30 @@ function renderResultSetTabs() {
         };
         tab.appendChild(pinSpan);
 
+        // Analyze Button
+        const analyzeSpan = document.createElement('span');
+        analyzeSpan.className = 'codicon codicon-graph';
+        analyzeSpan.style.marginLeft = '6px';
+        analyzeSpan.style.cursor = 'pointer';
+        analyzeSpan.title = 'Analyze Data (Pivot Table)';
+        analyzeSpan.textContent = '📊';
+
+        analyzeSpan.onclick = (e) => {
+            e.stopPropagation();
+            // Send analyze message
+            const rs = window.resultSets[index];
+            if (rs) {
+                vscode.postMessage({
+                    command: 'analyze',
+                    data: {
+                        data: rs.data,
+                        columns: rs.columns
+                    }
+                });
+            }
+        };
+        tab.appendChild(analyzeSpan);
+
         tab.onclick = () => switchToResultSet(index);
         container.appendChild(tab);
     });
@@ -115,6 +139,9 @@ function renderResultSetTabs() {
 
 function switchToResultSet(index) {
     if (index < 0 || index >= grids.length) return;
+
+    // Save state of current grid before switching (including scroll position)
+    saveAllGridStates();
 
     activeGridIndex = index;
 
@@ -137,6 +164,25 @@ function switchToResultSet(index) {
             wrapper.style.display = 'none';
         }
     });
+
+    // Restore scroll position of newly active grid
+    if (grids[index] && grids[index].executionTimestamp) {
+        // Force render to ensure visualization is correct (sorting arrows, etc.)
+        if (grids[index].render) {
+            grids[index].render();
+        }
+
+        const savedState = getSavedStateFor(index, grids[index].executionTimestamp);
+        if (savedState) {
+            const wrapper = gridWrappers[index];
+            if (wrapper && (savedState.scrollTop !== undefined || savedState.scrollLeft !== undefined)) {
+                requestAnimationFrame(() => {
+                    wrapper.scrollTop = savedState.scrollTop || 0;
+                    wrapper.scrollLeft = savedState.scrollLeft || 0;
+                });
+            }
+        }
+    }
 
     // Update row count for active grid
     if (grids[index] && grids[index].updateRowCount) {
@@ -500,8 +546,8 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         };
     });
 
-    // State - Try to restore from saved state
-    const savedState = getSavedStateFor(rsIndex);
+    // State - Try to restore from saved state (using executionTimestamp in key)
+    const savedState = getSavedStateFor(rsIndex, rs.executionTimestamp);
 
     // Restore custom states
     if (savedState) {
@@ -646,6 +692,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     const gridObj = {
         tanTable,
         rsIndex,
+        executionTimestamp: rs.executionTimestamp,
         renderGrouping: () => renderGrouping(),
         updateRowCount: () => updateRowCount(),
         render: () => render()
@@ -965,58 +1012,92 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
 
     render();
 
+    // Restore scroll position and globalFilter input value after initial render
+    if (savedState) {
+        // Restore scroll position (use requestAnimationFrame to ensure DOM is ready)
+        if (savedState.scrollTop || savedState.scrollLeft) {
+            requestAnimationFrame(() => {
+                wrapper.scrollTop = savedState.scrollTop || 0;
+                wrapper.scrollLeft = savedState.scrollLeft || 0;
+            });
+        }
+    }
+
+    // Save state when scrolling (debounced)
+    const debouncedSaveOnScroll = debounce(() => {
+        saveAllGridStates();
+    }, 200);
+    wrapper.addEventListener('scroll', debouncedSaveOnScroll);
+
     // Setup cell selection events for rectangular selection with mouse
     const selectionHandlers = setupCellSelectionEvents(wrapper, tanTable, columns.length);
     Object.assign(gridObj, selectionHandlers);
 }
 
 // State Management
-function savePinnedState() {
-    if (!window.pinnedResults || window.pinnedResults.length === 0) {
-        vscode.setState({}); // Clear state if no pins
-        return;
-    }
+// Save state for ALL grids using sourceUri:rsIndex:executionTimestamp key
+// The executionTimestamp ensures state from previous SQL executions is not reused
+function saveAllGridStates() {
+    const stateToSave = vscode.getState() || {};
 
-    const stateToSave = {};
-    window.pinnedResults.forEach(pin => {
-        if (pin.sourceUri !== window.activeSource) return;
+    grids.forEach((grid, rsIndex) => {
+        if (!grid || !grid.tanTable) return;
 
-        const rsIndex = pin.resultSetIndex;
-        if (rsIndex >= 0 && rsIndex < grids.length && grids[rsIndex]) {
-            const grid = grids[rsIndex];
-            const tableState = grid.tanTable.getState();
-            stateToSave[pin.id] = {
-                sorting: tableState.sorting,
-                grouping: tableState.grouping,
-                expanded: tableState.expanded,
-                columnOrder: tableState.columnOrder,
-                columnFilters: tableState.columnFilters,
-                columnPinning: tableState.columnPinning,
-                columnVisibility: tableState.columnVisibility,
-                globalFilter: tableState.globalFilter,
-                // Custom states
-                customColumnFilters: columnFilterStates[rsIndex],
-                aggregations: aggregationStates[rsIndex]
-            };
+        const timestamp = grid.executionTimestamp || '';
+        const key = `${window.activeSource}:${rsIndex}:${timestamp}`;
+        const tableState = grid.tanTable.getState();
+        const wrapper = document.querySelectorAll('.grid-wrapper')[rsIndex];
+        const isVisible = wrapper && wrapper.style.display !== 'none';
+
+        let scrollTop = 0;
+        let scrollLeft = 0;
+
+        if (isVisible) {
+            scrollTop = wrapper?.scrollTop || 0;
+            scrollLeft = wrapper?.scrollLeft || 0;
+        } else {
+            // If hidden, try to preserve existing scroll from saved state
+            // to avoid overwriting it with 0
+            if (stateToSave[key]) {
+                scrollTop = stateToSave[key].scrollTop || 0;
+                scrollLeft = stateToSave[key].scrollLeft || 0;
+            }
         }
+
+        stateToSave[key] = {
+            sorting: tableState.sorting,
+            grouping: tableState.grouping,
+            expanded: tableState.expanded,
+            columnOrder: tableState.columnOrder,
+            columnFilters: tableState.columnFilters,
+            columnPinning: tableState.columnPinning,
+            columnVisibility: tableState.columnVisibility,
+            globalFilter: tableState.globalFilter,
+            // Custom states
+            customColumnFilters: columnFilterStates[rsIndex],
+            aggregations: aggregationStates[rsIndex],
+            // Scroll position
+            scrollTop: scrollTop,
+            scrollLeft: scrollLeft
+        };
     });
 
     vscode.setState(stateToSave);
 }
 
-// Helper to get saved state for a result set
-function getSavedStateFor(rsIndex) {
-    if (!window.pinnedResults) return null;
+// Backward compatibility alias
+function savePinnedState() {
+    saveAllGridStates();
+}
 
-    // Find if this rsIndex corresponds to a pinned result
-    const pin = window.pinnedResults.find(p =>
-        p.sourceUri === window.activeSource && p.resultSetIndex === rsIndex
-    );
-
-    if (!pin) return null;
-
+// Helper to get saved state for a result set using sourceUri:rsIndex:executionTimestamp key
+function getSavedStateFor(rsIndex, executionTimestamp) {
     const savedState = vscode.getState();
-    return savedState ? savedState[pin.id] : null;
+    if (!savedState) return null;
+
+    const timestamp = executionTimestamp || '';
+    const key = `${window.activeSource}:${rsIndex}:${timestamp}`;
+    return savedState[key] || null;
 }
 
 // Function to create header cell with Excel-like filter dropdown

@@ -464,7 +464,12 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
     private async getTables(connectionName: string | undefined, dbName: string, schemaName?: string): Promise<vscode.CompletionItem[]> {
         if (!connectionName) return [];
         const cacheKey = schemaName ? `${dbName}.${schemaName}` : `${dbName}..`;
-        const cached = this.metadataCache.getTables(connectionName, cacheKey);
+
+        // For double-dot pattern (no schema), try to aggregate from all cached schemas first
+        const cached = schemaName
+            ? this.metadataCache.getTables(connectionName, cacheKey)
+            : (this.metadataCache.getTables(connectionName, cacheKey) || this.metadataCache.getTablesAllSchemas(connectionName, dbName));
+
         if (cached) {
             return cached.map((item: any) => {
                 if (item instanceof vscode.CompletionItem) return item;
