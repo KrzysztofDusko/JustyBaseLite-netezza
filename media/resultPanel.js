@@ -1,6 +1,43 @@
 // Enhanced resultPanel.js with Excel-like column filtering
-// Global variables - grids is declared in the inline HTML script
-// let grids = []; // Do not redeclare - already exists in HTML
+// Add CSS for Console View
+const style = document.createElement('style');
+style.textContent = `
+    .console-wrapper {
+        background-color: var(--vscode-editor-background);
+        color: var(--vscode-editor-foreground);
+        font-family: var(--vscode-editor-font-family), 'Consolas', 'Courier New', monospace;
+        font-size: var(--vscode-editor-font-size, 13px);
+        overflow-y: auto;
+        padding: 10px;
+        height: 100%;
+        box-sizing: border-box;
+    }
+    .console-view {
+        display: flex;
+        flex-direction: column;
+    }
+    .console-line {
+        line-height: 1.5;
+        white-space: pre-wrap;
+        border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .console-line.separator {
+        color: var(--vscode-textLink-foreground);
+        font-weight: bold;
+        margin-top: 10px;
+        margin-bottom: 5px;
+        border-bottom: 1px solid var(--vscode-textLink-foreground);
+    }
+    .console-time {
+        color: var(--vscode-descriptionForeground);
+        margin-right: 8px;
+        user-select: none;
+    }
+    .console-msg {
+        color: var(--vscode-editor-foreground);
+    }
+`;
+document.head.appendChild(style);
 
 // Entry point for resultPanelView.ts
 function init() {
@@ -74,7 +111,7 @@ function renderResultSetTabs() {
 
         // Tab Text
         const textSpan = document.createElement('span');
-        textSpan.textContent = `Result ${index + 1}`;
+        textSpan.textContent = rs.name || `Result ${index + 1}`;
         tab.appendChild(textSpan);
 
         // Pin Button
@@ -144,6 +181,7 @@ function switchToResultSet(index) {
     saveAllGridStates();
 
     activeGridIndex = index;
+    updateControlsVisibility(index);
 
     // Update tab styling
     const tabs = document.querySelectorAll('.result-set-tab');
@@ -188,6 +226,18 @@ function switchToResultSet(index) {
     if (grids[index] && grids[index].updateRowCount) {
         grids[index].updateRowCount();
     }
+}
+
+function updateControlsVisibility(index) {
+    const rs = window.resultSets[index];
+    const isLog = rs && rs.isLog;
+    const controls = document.querySelector('.controls');
+    // Use flex for controls if visible (default for div is block, but css might say flex)
+    // Actually empty string reverts to CSS value which is best.
+    if (controls) controls.style.display = isLog ? 'none' : '';
+
+    const groupingPanel = document.getElementById('groupingPanel');
+    if (groupingPanel) groupingPanel.style.display = isLog ? 'none' : '';
 }
 
 function createSourceTab(source) {
@@ -246,7 +296,11 @@ function renderGrids() {
     // Render all result sets
     window.resultSets.forEach((rs, index) => {
         try {
-            createResultSetGrid(rs, index, container, createTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel, getGroupedRowModel, getExpandedRowModel);
+            if (rs.isLog) {
+                createLogConsole(rs, index, container);
+            } else {
+                createResultSetGrid(rs, index, container, createTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel, getGroupedRowModel, getExpandedRowModel);
+            }
         } catch (e) {
             console.error(`Error rendering grid ${index}:`, e);
             const wrapper = document.createElement('div');
@@ -257,6 +311,66 @@ function renderGrids() {
             grids.push(null);
         }
     });
+
+    // Ensure controls are set correctly for the initial active grid
+    updateControlsVisibility(activeGridIndex);
+}
+
+function createLogConsole(rs, rsIndex, container) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'grid-wrapper console-wrapper';
+    wrapper.style.display = rsIndex === activeGridIndex ? 'block' : 'none';
+    wrapper.dataset.index = rsIndex;
+
+    const consoleView = document.createElement('div');
+    consoleView.className = 'console-view';
+
+    // Render existing logs
+    // rs.data structure is [[Time, Message], ...] based on startExecution
+    if (rs.data && Array.isArray(rs.data)) {
+        rs.data.forEach(row => {
+            const line = document.createElement('div');
+            line.className = 'console-line';
+
+            if (row[1] === '') {
+                // Spacer/Separator Logic if handled by startExecution pushing empty
+                line.innerHTML = '&nbsp;';
+            } else if (row[1] && row[1].startsWith('---')) {
+                line.className += ' separator';
+                line.textContent = `${row[0]} ${row[1]}`;
+            } else {
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'console-time';
+                timeSpan.textContent = `[${row[0]}] `;
+
+                const msgSpan = document.createElement('span');
+                msgSpan.className = 'console-msg';
+                msgSpan.textContent = row[1];
+
+                line.appendChild(timeSpan);
+                line.appendChild(msgSpan);
+            }
+            consoleView.appendChild(line);
+        });
+    }
+
+    wrapper.appendChild(consoleView);
+    container.appendChild(wrapper);
+
+    // "Grid" interface mock so switching tabs works
+    const mockGrid = {
+        executionTimestamp: rs.executionTimestamp,
+        // Custom update function for when new logs arrive (re-render or append?)
+        // Since we re-render everything on updateResults call, this function mainly handles
+        // initial render scrolling.
+        // But if init() is called again, we are re-rendereding from scratch.
+    };
+    grids.push(mockGrid);
+
+    // Auto-scroll to bottom
+    setTimeout(() => {
+        wrapper.scrollTop = wrapper.scrollHeight;
+    }, 0);
 }
 
 function validateRequiredLibraries() {
@@ -1971,55 +2085,60 @@ function setupGlobalKeyboardShortcuts() {
 
 // Export functions (keeping existing functionality)
 
-function openInExcel() {
-    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
 
-    const table = grids[activeGridIndex].tanTable;
-    const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
+function getAllGridsExportData() {
+    if (!window.resultSets || window.resultSets.length === 0) return [];
 
-    let csv = headers.map(h => escapeCsvValue(h.columnDef.header)).join(',') + '\n';
+    const exportData = [];
 
-    rows.forEach(row => {
-        const rowData = headers.map(header => {
-            const cell = row.getValue(header.id);
-            return escapeCsvValue(cell);
+    window.resultSets.forEach((rs, index) => {
+        if (rs.isLog) return; // Skip logs
+
+        const grid = grids[index];
+        if (!grid || !grid.tanTable) return;
+
+        const table = grid.tanTable;
+        const rows = table.getFilteredRowModel().rows;
+        const headers = table.getAllColumns().filter(col => col.getIsVisible());
+
+        let csv = headers.map(h => escapeCsvValue(h.columnDef.header)).join(',') + '\n';
+
+        rows.forEach(row => {
+            const rowData = headers.map(header => {
+                const cell = row.getValue(header.id);
+                return escapeCsvValue(cell);
+            });
+            csv += rowData.join(',') + '\n';
         });
-        csv += rowData.join(',') + '\n';
+
+        exportData.push({
+            csv: csv,
+            sql: rs.sql || '',
+            name: rs.name || `Result ${index + 1}`, // Use result set name if available
+            isActive: index === activeGridIndex
+        });
     });
 
-    const sql = (window.resultSets && window.resultSets[activeGridIndex]) ? window.resultSets[activeGridIndex].sql : '';
+    return exportData;
+}
+
+function openInExcel() {
+    const data = getAllGridsExportData();
+    if (data.length === 0) return;
 
     vscode.postMessage({
         command: 'openInExcel',
-        data: csv,
-        sql: sql
+        data: data
     });
 }
 
 function copyAsExcel() {
-    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
-
-    const table = grids[activeGridIndex].tanTable;
-    const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
-
-    let csv = headers.map(h => escapeCsvValue(h.columnDef.header)).join(',') + '\n';
-
-    rows.forEach(row => {
-        const rowData = headers.map(header => {
-            const cell = row.getValue(header.id);
-            return escapeCsvValue(cell);
-        });
-        csv += rowData.join(',') + '\n';
-    });
-
-    const sql = (window.resultSets && window.resultSets[activeGridIndex]) ? window.resultSets[activeGridIndex].sql : '';
+    const data = getAllGridsExportData();
+    if (data.length === 0) return;
 
     vscode.postMessage({
         command: 'copyAsExcel',
-        data: csv,
-        sql: sql
+        data: data
     });
 }
 

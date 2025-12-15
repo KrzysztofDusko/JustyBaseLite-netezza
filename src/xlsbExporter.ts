@@ -77,59 +77,77 @@ export async function exportQueryToXlsb(
         connection = new NzConnection(config);
         await connection.connect();
 
-        // Execute query
-        if (progressCallback) {
-            progressCallback('Executing query...');
-        }
-
-        const cmd = connection.createCommand(query);
-        const reader = await cmd.executeReader();
-
-        // Prepare data for XLSB
-        const headers: string[] = [];
-        for (let i = 0; i < reader.fieldCount; i++) {
-            headers.push(reader.getName(i));
-        }
-
-        const columnCount = headers.length;
-        if (columnCount === 0) {
-            // Note: executeReader might not know fieldCount until read() if not implemented perfectly, 
-            // but NzDataReader usually parses description immediately after execution.
-        }
-
-        if (progressCallback) {
-            progressCallback(`Query returned ${columnCount} columns`);
-            progressCallback('Reading rows...');
-        }
-
-        const rows: any[][] = [];
-        let rowCount = 0;
-
-        while (await reader.read()) {
-            const row: any[] = [];
-            for (let i = 0; i < reader.fieldCount; i++) {
-                row.push(reader.getValue(i));
-            }
-            rows.push(row);
-            rowCount++;
-        }
-
-        if (progressCallback) {
-            progressCallback(`Writing ${rowCount.toLocaleString()} rows to XLSB: ${outputPath}`);
-        }
-
         // Use XlsbWriter
         const writer = new XlsbWriter(outputPath);
 
-        // First sheet: Query Results
-        writer.addSheet('Query Results');
-        writer.writeSheet(rows, headers);
+        // Split queries
+        const { SqlParser } = await import('./sqlParser');
+        const queries = SqlParser.splitStatements(query);
 
-        // Second sheet: SQL Code
+        let totalRows = 0;
+        let totalCols = 0;
+
+        for (let qIndex = 0; qIndex < queries.length; qIndex++) {
+            const currentQuery = queries[qIndex];
+            if (!currentQuery.trim()) continue;
+
+            const sheetName = queries.length > 1 ? `Result ${qIndex + 1}` : 'Query Results';
+
+            if (progressCallback) {
+                progressCallback(`Executing query ${qIndex + 1}/${queries.length}...`);
+            }
+
+            try {
+                const cmd = connection.createCommand(currentQuery);
+                const reader = await cmd.executeReader();
+
+                // Prepare data for XLSB
+                const headers: string[] = [];
+                for (let i = 0; i < reader.fieldCount; i++) {
+                    headers.push(reader.getName(i));
+                }
+
+                const columnCount = headers.length;
+                totalCols = Math.max(totalCols, columnCount);
+
+                const rows: any[][] = [];
+                let rowCount = 0;
+
+                while (await reader.read()) {
+                    const row: any[] = [];
+                    for (let i = 0; i < reader.fieldCount; i++) {
+                        row.push(reader.getValue(i));
+                    }
+                    rows.push(row);
+                    rowCount++;
+                }
+
+                totalRows += rowCount;
+
+                if (progressCallback) {
+                    progressCallback(`Writing ${rowCount.toLocaleString()} rows to sheet "${sheetName}"`);
+                }
+
+                // Add Sheet
+                writer.addSheet(sheetName);
+                writer.writeSheet(rows, headers);
+
+            } catch (err: any) {
+                // If one query fails, maybe we log it to a sheet or just continue? 
+                // Let's create an error sheet
+                writer.addSheet(`Error ${qIndex + 1}`);
+                writer.writeSheet([[`Error executing query: ${err.message}`]], ['Error'], false);
+            }
+        }
+
+        // Final sheet: SQL Code
         writer.addSheet('SQL Code');
         const sqlRows = [['SQL Query:'], ...query.split('\n').map(line => [line])];
         writer.writeSheet(sqlRows, null, false); // No header, no autofilter for SQL
 
+        if (progressCallback) {
+            progressCallback('Finalizing file...');
+        }
         await writer.finalize();
 
         // Check file size
@@ -137,19 +155,18 @@ export async function exportQueryToXlsb(
         const fileSizeMb = stats.size / (1024 * 1024);
 
         if (progressCallback) {
-            progressCallback(`XLSB file created successfully (via XlsbWriter)`);
-            progressCallback(`  - Rows: ${rowCount.toLocaleString()}`);
-            progressCallback(`  - Columns: ${columnCount}`);
+            progressCallback(`XLSB file created successfully`);
+            progressCallback(`  - Total Rows: ${totalRows.toLocaleString()}`);
             progressCallback(`  - File size: ${fileSizeMb.toFixed(1)} MB`);
             progressCallback(`  - Location: ${outputPath}`);
         }
 
         const exportResult: ExportResult = {
             success: true,
-            message: `Successfully exported ${rowCount} rows to ${outputPath}`,
+            message: `Successfully exported ${totalRows} rows to ${outputPath}`,
             details: {
-                rows_exported: rowCount,
-                columns: columnCount,
+                rows_exported: totalRows,
+                columns: totalCols,
                 file_size_mb: parseFloat(fileSizeMb.toFixed(1)),
                 file_path: outputPath
             }
@@ -193,99 +210,138 @@ export async function exportQueryToXlsb(
  * @param progressCallback Optional callback for progress updates
  * @returns Export result with success status and details
  */
+interface CsvExportItem {
+    csv: string;
+    sql?: string; // Made optional as not all items might have SQL
+    name: string;
+}
+
 export async function exportCsvToXlsb(
-    csvContent: string,
+    csvContent: string | CsvExportItem[],
     outputPath: string,
     copyToClipboard: boolean = false,
-    metadata?: { source?: string;[key: string]: any },
+    metadata: { source: string, sql?: string } = { source: 'Unknown' },
     progressCallback?: ProgressCallback
 ): Promise<ExportResult> {
     try {
         if (progressCallback) {
-            progressCallback('Reading CSV content...');
+            progressCallback('Initializing XLSB writer...');
         }
 
-        // We can't easily parse CSV without a library if we removed xlsx. 
-        // But the prompt implied we move to XlsbWriter.
-        // Assuming we still have some way to parse CSV or we should implement a simple parser?
-        // Wait, removing 'xlsx' means we lose 'XLSX.read'.
-        // For now, I will assume a simple split by newline and comma is NOT sufficient for proper CSV (quotes etc).
-        // However, since I am asked to use ExcelHelpers for "generowanie plików xlsx", maybe I can keep xlsx for READ?
-        // The user said "Wszeslkie towrzenia plikó xlsx genereuj w oparciu o @[ExcelHelpers]".
-        // "Creation" (tworzenia) should be XlsbWriter. "Reading" is a different story.
-        // But I removed xlsx from imports in the plan.
-        // Let's implement a basic CSV parser or clarify. 
-        // Actually, let's keep it simple: split lines. If it's complex CSV, this might break.
-        // But for "Select * output", it's usually standard.
-        // Let's try to do a robust enough parse manually or re-introduce a csv parser if needed.
-        // Or better: use the 'csv-parse' library? No, I shouldn't add too many libs without asking.
-        // Actually, I'll use a simple regex-based parser for now.
-
-        const parseCsvLine = (line: string): string[] => {
-            const result = [];
-            let start = 0;
-            let inQuotes = false;
-            for (let i = 0; i < line.length; i++) {
-                if (line[i] === '"') {
-                    inQuotes = !inQuotes;
-                } else if (line[i] === ',' && !inQuotes) {
-                    let val = line.substring(start, i);
-                    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1).replace(/""/g, '"');
-                    result.push(val);
-                    start = i + 1;
-                }
-            }
-            let lastVal = line.substring(start);
-            if (lastVal.startsWith('"') && lastVal.endsWith('"')) lastVal = lastVal.slice(1, -1).replace(/""/g, '"');
-            result.push(lastVal);
-            return result;
-        };
-
-        const lines = csvContent.split(/\r?\n/);
-        const data: any[][] = [];
-
-        for (const line of lines) {
-            if (line.trim()) {
-                data.push(parseCsvLine(line));
-            }
-        }
-
-        if (data.length === 0) {
-            return {
-                success: false,
-                message: 'CSV content is empty'
-            };
-        }
-
-        const headers = data[0];
-        const rows = data.slice(1);
-
-        const rowCount = rows.length;
-        const columnCount = headers.length;
-
-        if (progressCallback) {
-            progressCallback(`Writing ${rowCount.toLocaleString()} rows to XLSB: ${outputPath}`);
-        }
-
-        // Use XlsbWriter
         const writer = new XlsbWriter(outputPath);
 
-        // First sheet: CSV Data
-        writer.addSheet('CSV Data');
-        writer.writeSheet(rows, headers);
+        let totalRows = 0;
+        let totalColumns = 0;
+        let sqlItems: { name: string, sql: string }[] = [];
 
-        // Second sheet: SQL Content or CSV Source
-        if (metadata?.sql) {
-            writer.addSheet('SQL');
-            const sqlRows = [['SQL Query:'], ...metadata.sql.split('\n').map((line: string) => [line])];
-            writer.writeSheet(sqlRows, null, false);
+        // Helper to process a single CSV string
+        const processCsv = (csv: string, sheetName: string) => {
+            const rows: any[][] = [];
+            const lines = csv.split(/\r?\n/); // Handle both \n and \r\n
+
+            // Simple regex parser for CSV lines
+            const parseCsvLine = (line: string): string[] => {
+                const result = [];
+                let start = 0;
+                let inQuotes = false;
+                for (let i = 0; i < line.length; i++) {
+                    if (line[i] === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (line[i] === ',' && !inQuotes) {
+                        let field = line.substring(start, i);
+                        // Unescape quotes
+                        if (field.startsWith('"') && field.endsWith('"')) {
+                            field = field.substring(1, field.length - 1).replace(/""/g, '"');
+                        }
+                        result.push(field);
+                        start = i + 1;
+                    }
+                }
+                // Last field
+                let field = line.substring(start);
+                if (field.startsWith('"') && field.endsWith('"')) {
+                    field = field.substring(1, field.length - 1).replace(/""/g, '"');
+                }
+                result.push(field);
+                return result;
+            };
+
+            let headers: string[] = [];
+            let currentRowCount = 0;
+
+            lines.forEach((line, index) => {
+                if (!line.trim()) return;
+
+                const fields = parseCsvLine(line);
+                if (index === 0) {
+                    headers = fields;
+                } else {
+                    rows.push(fields);
+                    currentRowCount++;
+                }
+            });
+
+            if (headers.length > 0) {
+                totalColumns = Math.max(totalColumns, headers.length);
+                writer.addSheet(sheetName);
+                writer.writeSheet(rows, headers);
+                totalRows += currentRowCount; // Accumulate total rows
+            }
+        };
+
+        if (Array.isArray(csvContent)) {
+            // Multiple results
+            if (progressCallback) {
+                progressCallback(`Processing ${csvContent.length} result sets...`);
+            }
+
+            csvContent.forEach((item, index) => {
+                const sheetName = item.name || `Result ${index + 1}`;
+                if (progressCallback) {
+                    progressCallback(`Processing sheet "${sheetName}"...`);
+                }
+                processCsv(item.csv, sheetName);
+                if (item.sql) {
+                    sqlItems.push({ name: sheetName, sql: item.sql });
+                }
+            });
+
         } else {
-            const sourcePath = metadata?.source || 'Clipboard';
-            writer.addSheet('CSV Source');
-            const sourceRows = [['CSV Source:'], [sourcePath]];
-            writer.writeSheet(sourceRows, null, false);
+            // Single result (legacy)
+            if (progressCallback) {
+                progressCallback('Reading CSV content...');
+            }
+            processCsv(csvContent, 'Query Results');
+            if (metadata.sql) {
+                sqlItems.push({ name: 'Query Results', sql: metadata.sql });
+            } else if (metadata.source) {
+                // If no SQL, but a source, add a source sheet
+                writer.addSheet('CSV Source');
+                const sourceRows = [['CSV Source:'], [metadata.source]];
+                writer.writeSheet(sourceRows, null, false);
+            }
         }
 
+        // Add SQL Code sheet if we have any SQL
+        if (sqlItems.length > 0) {
+            writer.addSheet('SQL Code');
+            const sqlRows: string[][] = [];
+
+            sqlItems.forEach(item => {
+                sqlRows.push([`--- SQL for ${item.name} ---`]);
+                // Split multiline SQL
+                item.sql.split('\n').forEach(line => {
+                    sqlRows.push([line]);
+                });
+                sqlRows.push(['']); // Spacer
+            });
+
+            writer.writeSheet(sqlRows, null, false);
+        }
+
+        if (progressCallback) {
+            progressCallback('Finalizing XLSB file...');
+        }
         await writer.finalize();
 
         // Check file size
@@ -293,28 +349,26 @@ export async function exportCsvToXlsb(
         const fileSizeMb = stats.size / (1024 * 1024);
 
         if (progressCallback) {
-            progressCallback(`XLSB file created successfully (via XlsbWriter)`);
-            progressCallback(`  - Rows: ${rowCount.toLocaleString()}`);
-            progressCallback(`  - Columns: ${columnCount}`);
+            progressCallback(`XLSB file created successfully`);
+            progressCallback(`  - Rows: ${totalRows.toLocaleString()}`);
             progressCallback(`  - File size: ${fileSizeMb.toFixed(1)} MB`);
-            progressCallback(`  - Location: ${outputPath}`);
         }
 
         const exportResult: ExportResult = {
             success: true,
-            message: `Successfully exported ${rowCount} rows from CSV to ${outputPath}`,
+            message: `Successfully exported ${totalRows} rows to ${outputPath}`,
             details: {
-                rows_exported: rowCount,
-                columns: columnCount,
+                rows_exported: totalRows,
+                columns: totalColumns,
                 file_size_mb: parseFloat(fileSizeMb.toFixed(1)),
                 file_path: outputPath
             }
         };
 
-        // Copy to clipboard if requested
+        // Copy to clipboard logic if needed
         if (copyToClipboard) {
             if (progressCallback) {
-                progressCallback('Copying to clipboard...');
+                progressCallback('Copying file to clipboard...');
             }
             const clipboardSuccess = await copyFileToClipboard(outputPath);
             if (exportResult.details) {
@@ -324,10 +378,10 @@ export async function exportCsvToXlsb(
 
         return exportResult;
 
-    } catch (error: any) {
+    } catch (err: any) {
         return {
             success: false,
-            message: `Export error: ${error.message || error}`
+            message: `Export failed: ${err.message}`
         };
     }
 }

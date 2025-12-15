@@ -6,10 +6,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _extensionUri: vscode.Uri;
     // Map<sourceUri, resultSets[]>
-    private _resultsMap: Map<string, any[][]> = new Map();
+    private _resultsMap: Map<string, any[]> = new Map();
     private _pinnedSources: Set<string> = new Set();
     // Map<resultId, {sourceUri, resultSetIndex, timestamp, label}>
     private _pinnedResults: Map<string, { sourceUri: string, resultSetIndex: number, timestamp: number, label: string }> = new Map();
+    private _autoPinnedResults: Set<string> = new Set(); // Track auto-pinned results for current execution
     private _activeSourceUri: string | undefined;
     private _resultIdCounter: number = 0;
 
@@ -91,6 +92,132 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
+
+
+    /**
+     * Start a new execution for the given source.
+     * Clears unpinned results and sets up an initial "Execution Log" result set.
+     */
+    public startExecution(sourceUri: string) {
+        // Clear unpinned results for this source
+        const existingResults = this._resultsMap.get(sourceUri) || [];
+
+        let logResultSet: any;
+
+        // Find existing log in results
+        const existingLogIndex = existingResults.findIndex(r => r.isLog);
+        if (existingLogIndex !== -1) {
+            logResultSet = existingResults[existingLogIndex];
+            // APPEND log for new execution instead of reset
+            const timestamp = new Date().toLocaleTimeString();
+            logResultSet.data.push(['', '']); // Spacer
+            logResultSet.data.push([timestamp, '--- New Execution Started ---']);
+            logResultSet.message = 'Execution started...';
+            logResultSet.executionTimestamp = Date.now();
+        } else {
+            // Create new Log
+            logResultSet = {
+                columns: [
+                    { name: 'Time', type: 'string' },
+                    { name: 'Message', type: 'string' }
+                ],
+                data: [],
+                message: 'Execution started...',
+                executionTimestamp: Date.now(),
+                isLog: true,
+                name: 'Logs'
+            };
+        }
+
+        // Identify other pinned results (excluding the log if it was already there)
+        const otherPinnedInfo = Array.from(this._pinnedResults.entries())
+            .filter(([_, info]) => info.sourceUri === sourceUri && existingResults[info.resultSetIndex] !== logResultSet)
+            .sort((a, b) => a[1].resultSetIndex - b[1].resultSetIndex); // Keep relative order of others
+
+        const otherPinnedResults: any[] = [];
+        otherPinnedInfo.forEach(([id, info]) => {
+            if (info.resultSetIndex < existingResults.length) {
+                otherPinnedResults.push(existingResults[info.resultSetIndex]);
+            }
+        });
+
+        // Log is ALWAYS FIRST
+        const finalResultSets = [logResultSet, ...otherPinnedResults];
+        this._resultsMap.set(sourceUri, finalResultSets);
+
+        // CLEAR old pins for this source and RE-PIN everything with new indices
+        const oldPinIds = Array.from(this._pinnedResults.entries())
+            .filter(([_, info]) => info.sourceUri === sourceUri)
+            .map(([id, _]) => id);
+        oldPinIds.forEach(id => this._pinnedResults.delete(id));
+
+        // Re-pin Log at index 0
+        const logResultId = `result_${++this._resultIdCounter}`;
+        const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
+        this._pinnedResults.set(logResultId, {
+            sourceUri,
+            resultSetIndex: 0,
+            timestamp: Date.now(),
+            label: `${filename} - Logs`
+        });
+
+        // Re-pin others (shifted by 1)
+        otherPinnedInfo.forEach(([oldId, info], idx) => {
+            const newId = `result_${++this._resultIdCounter}`;
+            this._pinnedResults.set(newId, {
+                sourceUri,
+                resultSetIndex: idx + 1, // 0 is Log
+                timestamp: Date.now(),
+                label: `${filename} - Result ${idx + 2}` // +2 because 0 is Log, 1 is Result 2 (visually)
+            });
+        });
+
+        this._pinnedSources.add(sourceUri);
+        this._activeSourceUri = sourceUri;
+
+        this._updateWebview();
+        this._view?.show?.(true);
+    }
+
+    /**
+     * Append a log message to the active execution log for the source.
+     */
+    public log(sourceUri: string, message: string) {
+        const results = this._resultsMap.get(sourceUri);
+        if (!results || results.length === 0) return;
+
+        // Find the result set with isLog=true
+        const logResultSet = results.find(r => r.isLog);
+
+        if (logResultSet) {
+            const timestamp = new Date().toLocaleTimeString();
+            logResultSet.data.push([timestamp, message]);
+
+            // If we have too many logs, maybe trim? For now keep all.
+
+            // Send partial update to frontend instead of full re-render if possible?
+            // For now, full update is safer to implement quickly, but might be flashy.
+            // Let's try full update first.
+            this._updateWebview();
+        }
+    }
+
+    /**
+     * Called after all queries in an execution complete.
+     * Unpins the auto-pinned results so they behave normally on next run.
+     */
+    public finalizeExecution(sourceUri: string) {
+        // Unpin all auto-pinned results for this source
+        for (const resultId of this._autoPinnedResults) {
+            const pin = this._pinnedResults.get(resultId);
+            if (pin && pin.sourceUri === sourceUri) {
+                this._pinnedResults.delete(resultId);
+            }
+        }
+        this._autoPinnedResults.clear();
+        // Note: We don't call _updateWebview() here to avoid flicker
+    }
+
     public updateResults(results: any[], sourceUri: string, append: boolean = false) {
         // results is now QueryResult[] (array of { columns, data, ... }) or any[] (legacy)
 
@@ -106,49 +233,98 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             newResultSets = [results];
         }
 
-        // New logic: Preserve pinned individual results and add new ones
-        const existingResults = this._resultsMap.get(sourceUri) || [];
-        const pinnedResultsForSource = Array.from(this._pinnedResults.entries())
-            .filter(([_, info]) => info.sourceUri === sourceUri)
-            .sort((a, b) => a[1].resultSetIndex - b[1].resultSetIndex);
-
-        // Build final result set array: pinned results + new results
-        let finalResultSets: any[] = [];
-
-        // First, add all pinned results from existing data (preserve original indices for identification)
-        const validPinnedResults: Array<[string, any]> = [];
-        pinnedResultsForSource.forEach(([resultId, pinnedInfo]) => {
-            if (pinnedInfo.resultSetIndex < existingResults.length) {
-                finalResultSets.push(existingResults[pinnedInfo.resultSetIndex]);
-                validPinnedResults.push([resultId, pinnedInfo]);
-            }
-        });
-
-        // Then add all new results with execution timestamp
-        // This timestamp is used as part of the state key to ensure
-        // state from previous executions is not applied to new results
         const executionTimestamp = Date.now();
         newResultSets.forEach(rs => {
             rs.executionTimestamp = executionTimestamp;
         });
-        finalResultSets.push(...newResultSets);
 
-        // Update pinned result indices to match new positions (AFTER building the array)
-        validPinnedResults.forEach(([resultId, _], newIndex) => {
-            const pinnedEntry = this._pinnedResults.get(resultId);
-            if (pinnedEntry) {
-                pinnedEntry.resultSetIndex = newIndex;
+        const existingResults = this._resultsMap.get(sourceUri) || [];
+        const existingLog = existingResults.find(r => r.isLog);
+
+        // Identify currently pinned results
+        const pinnedEntryPairs = Array.from(this._pinnedResults.entries())
+            .filter(([_, info]) => info.sourceUri === sourceUri)
+            .sort((a, b) => a[1].resultSetIndex - b[1].resultSetIndex);
+
+        let finalResultSets: any[] = [];
+        let remappedPins = new Map<string, any>(); // resultId -> resultSetObject
+
+        // 1. Logs (Always first if exists)
+        if (existingLog) {
+            finalResultSets.push(existingLog);
+        }
+
+        // 2. Add other pinned results (excluding log to avoid dupe)
+        pinnedEntryPairs.forEach(([id, info]) => {
+            const rs = existingResults[info.resultSetIndex];
+            if (rs) {
+                if (rs === existingLog) {
+                    // Already added log logic, just track the pin ID
+                    remappedPins.set(id, rs);
+                } else {
+                    // Add other pinned result
+                    // Avoid duplicating if multiple pins point to same result
+                    if (!finalResultSets.includes(rs)) {
+                        finalResultSets.push(rs);
+                    }
+                    remappedPins.set(id, rs);
+                }
             }
         });
 
-        // Clear unpinned sources (other files)
+        // 3. Append New Results
+        const newResultsStartIndex = finalResultSets.length;
+        finalResultSets.push(...newResultSets);
+
+        // Auto-pin new results so they don't get lost on next updateResults call
+        const filename = sourceUri.split(/[\\\\/]/).pop() || sourceUri;
+        newResultSets.forEach((rs, idx) => {
+            const resultId = `result_${++this._resultIdCounter}`;
+            const resultIndex = newResultsStartIndex + idx;
+            this._pinnedResults.set(resultId, {
+                sourceUri,
+                resultSetIndex: resultIndex,
+                timestamp: Date.now(),
+                label: rs.isLog ? `${filename} - Logs` : `${filename} - Result ${resultIndex}`
+            });
+            // Track as auto-pinned (will be unpinned after execution completes)
+            this._autoPinnedResults.add(resultId);
+        });
+
+        this._resultsMap.set(sourceUri, finalResultSets);
+
+        // 4. Update indices for existing pins
+        remappedPins.forEach((rs, id) => {
+            const newIndex = finalResultSets.indexOf(rs);
+            if (newIndex !== -1) {
+                const pin = this._pinnedResults.get(id);
+                if (pin) pin.resultSetIndex = newIndex;
+            }
+        });
+
+        // 5. Ensure Log is pinned ("Default pinned" behavior)
+        if (existingLog) {
+            // Check if we already have a pin pointing to existingLog
+            const isLogPinned = Array.from(remappedPins.values()).includes(existingLog);
+            if (!isLogPinned) {
+                const logResultId = `result_${++this._resultIdCounter}`;
+                const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
+                this._pinnedResults.set(logResultId, {
+                    sourceUri,
+                    resultSetIndex: 0, // It is always at 0
+                    timestamp: Date.now(),
+                    label: `${filename} - Logs`
+                });
+            }
+        }
+
+        // 6. Handle unpinned cleanup (if !append)
         if (!append) {
             const unpinnedSources = Array.from(this._resultsMap.keys()).filter(uri =>
                 uri !== sourceUri && !this._pinnedSources.has(uri)
             );
             unpinnedSources.forEach(uri => {
                 this._resultsMap.delete(uri);
-                // Also remove any pinned results for this source
                 const pinnedResultsToRemove = Array.from(this._pinnedResults.entries())
                     .filter(([_, info]) => info.sourceUri === uri)
                     .map(([id, _]) => id);
@@ -156,7 +332,6 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             });
         }
 
-        this._resultsMap.set(sourceUri, finalResultSets);
         this._activeSourceUri = sourceUri;
 
         if (this._view) {
@@ -166,6 +341,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             vscode.window.showInformationMessage('Query completed. Please open "Query Results" panel to view data.');
         }
     }
+
 
     private _updateWebview() {
         if (this._view) {
@@ -229,13 +405,15 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async openInExcel(csvContent: string, sql?: string) {
-        // Use the existing XLSB export functionality to create and open Excel file
-        vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', csvContent, sql);
+    private async openInExcel(data: any, sql?: string) {
+        // Data can now be a string (CSV) OR an array of { csv, sql, name } objects
+        // If it's the old format (string), we wrap it? Or just pass it?
+        // The command handler will need to handle both provided we update it.
+        vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', data, sql);
     }
 
-    private async copyAsExcel(csvContent: string, sql?: string) {
-        vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', csvContent, sql);
+    private async copyAsExcel(data: any, sql?: string) {
+        vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', data, sql);
     }
 
     private closeSource(sourceUri: string) {

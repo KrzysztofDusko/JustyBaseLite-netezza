@@ -340,9 +340,34 @@ export async function importClipboardDataToNetezza(
         const sqlHeaders = clipboardData[0].map(col => cleanColumnName(col));
         const dataRows = clipboardData.slice(1);
 
+        // Detect decimal delimiter
+        progressCallback?.('Detecting decimal separator...');
+        let decimalDelimiter = '.';
+
+        // Check first 100 rows for numeric patterns
+        let dotCount = 0;
+        let commaCount = 0;
+        const checkRows = dataRows.slice(0, 100);
+
+        for (const row of checkRows) {
+            for (const cell of row) {
+                if (!cell || !cell.trim()) continue;
+                const val = cell.trim();
+                // Check for patterns like 12.34 vs 12,34
+                // We want to avoid date confusion if possible, but simplest is checking for n,n vs n.n
+                if (/^\d+\.\d+$/.test(val)) dotCount++;
+                if (/^\d+,\d+$/.test(val)) commaCount++;
+            }
+        }
+
+        if (commaCount > dotCount && commaCount > 0) {
+            decimalDelimiter = ',';
+        }
+        progressCallback?.(`Detected decimal separator: '${decimalDelimiter}'`);
+
         // Analyze data types
         progressCallback?.('Analyzing clipboard data types...');
-        const dataTypes: ColumnTypeChooser[] = sqlHeaders.map(() => new ColumnTypeChooser());
+        const dataTypes: ColumnTypeChooser[] = sqlHeaders.map(() => new ColumnTypeChooser(decimalDelimiter));
 
         for (let i = 0; i < dataRows.length; i++) {
             const row = dataRows[i];
@@ -379,7 +404,30 @@ export async function importClipboardDataToNetezza(
         const outputLines: string[] = [];
         for (let i = 0; i < dataRows.length; i++) {
             const row = dataRows[i];
-            const formattedRow = row.map((value, j) => formatValue(value, j, dataTypes, escapechar, valuesToEscape));
+            const formattedRow = row.map((value, j) => {
+                let val = formatValue(value, j, dataTypes, escapechar, valuesToEscape);
+
+                // If it is a NUMERIC type and we are using comma as delimiter, replace it with dot for DB consistency
+                if (dataTypes[j].currentType.dbType === 'NUMERIC' && decimalDelimiter === ',') {
+                    val = val.replace(',', '.');
+                }
+
+                // If DATETIME, check if we need to reformat dd.mm.yyyy
+                if (dataTypes[j].currentType.dbType === 'DATETIME') {
+                    const dateTimeMatch = val.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+                    if (dateTimeMatch) {
+                        const day = dateTimeMatch[1];
+                        const month = dateTimeMatch[2];
+                        const year = dateTimeMatch[3];
+                        const hour = dateTimeMatch[4] || '00';
+                        const min = dateTimeMatch[5] || '00';
+                        const sec = dateTimeMatch[6] || '00';
+                        val = `${year}-${month}-${day} ${hour}:${min}:${sec}`;
+                    }
+                }
+
+                return val;
+            });
             outputLines.push(formattedRow.join(delimiter));
 
             if ((i + 1) % 1000 === 0) {

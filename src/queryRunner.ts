@@ -5,20 +5,29 @@ import { QueryHistoryManager } from './queryHistoryManager';
 
 
 // Session tracking for DROP SESSION functionality
-let currentExecutingSessionId: number | null = null;
-let currentExecutingConnectionName: string | undefined = undefined;
+const executingCommands = new Map<string, any>(); // Map documentUri -> NzCommand
 
-export function getCurrentSessionId(): number | null {
-    return currentExecutingSessionId;
-}
+export async function cancelCurrentQuery(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showWarningMessage('No active editor to cancel query for.');
+        return;
+    }
 
-export function getCurrentSessionConnectionName(): string | undefined {
-    return currentExecutingConnectionName;
-}
+    // Check if we have a command for this specific document
+    const docUri = editor.document.uri.toString();
+    const cmd = executingCommands.get(docUri);
 
-export function clearCurrentSession(): void {
-    currentExecutingSessionId = null;
-    currentExecutingConnectionName = undefined;
+    if (cmd) {
+        try {
+            await cmd.cancel();
+            vscode.window.showInformationMessage('Cancellation request sent.');
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to cancel query: ${e.message}`);
+        }
+    } else {
+        vscode.window.showInformationMessage('No active query found for this tab.');
+    }
 }
 
 /**
@@ -132,19 +141,26 @@ export interface QueryResult {
     sql?: string;
 }
 
-export async function runQueryRaw(context: vscode.ExtensionContext, query: string, silent: boolean = false, connectionManager?: ConnectionManager, connectionName?: string, documentUri?: string): Promise<QueryResult> {
+export async function runQueryRaw(context: vscode.ExtensionContext, query: string, silent: boolean = false, connectionManager?: ConnectionManager, connectionName?: string, documentUri?: string, logCallback?: (msg: string) => void): Promise<QueryResult> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
 
-    // Create and show output channel only if not silent
+    // Create and show output channel only if not silent AND no callback
+    // If callback is provided, we assume the caller handles UI/Logging (e.g. Logs Tab)
+    // The user requested: "Skoro zapisujesz do 'Log' to już nie zapisuj do 'Output'"
     let outputChannel: vscode.OutputChannel | undefined;
-    if (!silent) {
+    if (!silent && !logCallback) {
         outputChannel = vscode.window.createOutputChannel('Netezza SQL');
         outputChannel.show(true);
         outputChannel.appendLine('Executing query...');
-        if (connectionName) {
-            outputChannel.appendLine(`Target Connection: ${connectionName}`);
-        }
+    }
+
+    if (logCallback) logCallback('Executing query...');
+
+    if (connectionName) {
+        const msg = `Target Connection: ${connectionName}`;
+        if (outputChannel) outputChannel.appendLine(msg);
+        if (logCallback) logCallback(msg);
     }
 
     try {
@@ -219,94 +235,105 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
             const cmd = connection.createCommand(queryToExecute);
             cmd.commandTimeout = queryTimeout;
 
-            // We use executeReader which works for SELECT and others (returns reader logic)
-            // But we need to handle "non-query" commands too? 
-            // In JsNzDriver, executeReader returns a reader even if empty?
-            // Or we can use execute() for non-queries? 
-            // Let's assume most are SELECT-like or we want to allow reading result if any.
-            // If it's pure INSERT/UPDATE without RETURNING, reader might be empty.
+            // Track command for cancellation if documentUri is available
+            if (documentUri) {
+                executingCommands.set(documentUri, cmd);
+            }
 
-            const reader = await cmd.executeReader();
-            const columns: { name: string; type?: string }[] = [];
-            const data: any[][] = [];
-            let rowsAffected: number | undefined;
+            try {
+                // We use executeReader which works for SELECT and others (returns reader logic)
+                // But we need to handle "non-query" commands too? 
+                // In JsNzDriver, executeReader returns a reader even if empty?
+                // Or we can use execute() for non-queries? 
+                // Let's assume most are SELECT-like or we want to allow reading result if any.
+                // If it's pure INSERT/UPDATE without RETURNING, reader might be empty.
 
-            // Check if we have columns
-            // JsNzDriver reader API: reader.read() returns boolean, reader.getName(i), reader.getValue(i) 
+                const reader = await cmd.executeReader();
+                const columns: { name: string; type?: string }[] = [];
+                const data: any[][] = [];
+                let rowsAffected: number | undefined;
 
-            // Fetch loop with limit
-            const limit = 200000;
-            let fetchedCount = 0;
-            let limitReached = false;
+                // Check if we have columns
+                // JsNzDriver reader API: reader.read() returns boolean, reader.getName(i), reader.getValue(i) 
 
-            while (await reader.read()) {
-                // Initialize columns on first row if not done
-                if (columns.length === 0) {
+                // Fetch loop with limit
+                const limit = 200000;
+                let fetchedCount = 0;
+                let limitReached = false;
+
+                while (await reader.read()) {
+                    // Initialize columns on first row if not done
+                    if (columns.length === 0) {
+                        for (let i = 0; i < reader.fieldCount; i++) {
+                            columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+                        }
+                    }
+
+                    const row: any[] = [];
                     for (let i = 0; i < reader.fieldCount; i++) {
-                        columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+                        row.push(reader.getValue(i));
+                    }
+                    data.push(row);
+                    fetchedCount++;
+
+                    if (fetchedCount >= limit) {
+                        limitReached = true;
+                        break;
                     }
                 }
 
-                const row: any[] = [];
-                for (let i = 0; i < reader.fieldCount; i++) {
-                    row.push(reader.getValue(i));
+                // Only close reader (it doesn't have close method? JsNzDriver NzDataReader usually just completes)
+                // But we can check rowsAffected if available in reader or command?
+                // JsNzDriver doesn't seem to expose rowsAffected directly on reader easily unless extended.
+                // But 'CommandComplete' message has it. NzConnections usually stores it?
+                // Let's assume undefined for now or check if Reader has it.
+
+                // Get current schema for history logging
+                let currentSchema = 'unknown';
+                try {
+                    // Reuse valid connection to get schema? Or skip to avoid overhead?
+                    // Let's skip automatic schema check for performance unless crucial.
+                } catch (schemaErr) { }
+
+                // Log to history (async, don't wait)
+                // We need valid details
+                const details = await connManager.getConnection(resolvedConnectionName!);
+                if (details) {
+                    const historyManager = new QueryHistoryManager(context);
+                    historyManager.addEntry(
+                        details.host,
+                        details.database,
+                        currentSchema,
+                        query,
+                        resolvedConnectionName
+                    ).catch(err => console.error('History log error:', err));
                 }
-                data.push(row);
-                fetchedCount++;
 
-                if (fetchedCount >= limit) {
-                    limitReached = true;
-                    break;
+                if (columns.length > 0) {
+                    if (outputChannel) outputChannel.appendLine('Query completed.');
+                    return {
+                        columns: columns,
+                        data: data,
+                        rowsAffected: rowsAffected,
+                        limitReached: limitReached,
+                        sql: queryToExecute
+                    };
+                } else {
+                    if (outputChannel) outputChannel.appendLine('Query executed successfully (no results).');
+                    return {
+                        columns: [],
+                        data: [],
+                        rowsAffected: rowsAffected,
+                        message: 'Query executed successfully (no results).',
+                        sql: queryToExecute
+                    };
+                }
+            } finally {
+                // Cleanup cancellation tracking
+                if (documentUri) {
+                    executingCommands.delete(documentUri);
                 }
             }
-
-            // Only close reader (it doesn't have close method? JsNzDriver NzDataReader usually just completes)
-            // But we can check rowsAffected if available in reader or command?
-            // JsNzDriver doesn't seem to expose rowsAffected directly on reader easily unless extended.
-            // But 'CommandComplete' message has it. NzConnections usually stores it?
-            // Let's assume undefined for now or check if Reader has it.
-
-            // Get current schema for history logging
-            let currentSchema = 'unknown';
-            try {
-                // Reuse valid connection to get schema? Or skip to avoid overhead?
-                // Let's skip automatic schema check for performance unless crucial.
-            } catch (schemaErr) { }
-
-            // Log to history (async, don't wait)
-            // We need valid details
-            const details = await connManager.getConnection(resolvedConnectionName);
-            if (details) {
-                const historyManager = new QueryHistoryManager(context);
-                historyManager.addEntry(
-                    details.host,
-                    details.database,
-                    currentSchema,
-                    query,
-                    resolvedConnectionName
-                ).catch(err => console.error('History log error:', err));
-            }
-
-            if (columns.length > 0) {
-                if (outputChannel) outputChannel.appendLine('Query completed.');
-                return {
-                    columns: columns,
-                    data: data,
-                    rowsAffected: rowsAffected,
-                    limitReached: limitReached,
-                    sql: queryToExecute
-                };
-            } else {
-                if (outputChannel) outputChannel.appendLine('Query executed successfully (no results).');
-                return {
-                    columns: [],
-                    data: [],
-                    rowsAffected: rowsAffected,
-                    message: 'Query executed successfully (no results).',
-                    sql: queryToExecute
-                };
-            }
-
         } finally {
             // Close connection only if not using persistent connection
             if (shouldCloseConnection) {
@@ -319,6 +346,7 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
         if (outputChannel) {
             outputChannel.appendLine(errorMessage);
         }
+        if (logCallback) logCallback(errorMessage);
         throw new Error(errorMessage);
     }
 }
@@ -359,13 +387,16 @@ export async function runQuery(context: vscode.ExtensionContext, query: string, 
     }
 }
 
-export async function runQueriesSequentially(context: vscode.ExtensionContext, queries: string[], connectionManager?: ConnectionManager, documentUri?: string): Promise<QueryResult[]> {
+export async function runQueriesSequentially(context: vscode.ExtensionContext, queries: string[], connectionManager?: ConnectionManager, documentUri?: string, logCallback?: (msg: string) => void, resultCallback?: (results: QueryResult[]) => void): Promise<QueryResult[]> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
 
-    const outputChannel = vscode.window.createOutputChannel('Netezza SQL');
-    outputChannel.show(true);
-    outputChannel.appendLine(`Executing ${queries.length} queries sequentially...`);
+    let outputChannel: vscode.OutputChannel | undefined;
+    if (!logCallback) {
+        outputChannel = vscode.window.createOutputChannel('Netezza SQL');
+        outputChannel.show(true);
+        outputChannel.appendLine(`Executing ${queries.length} queries sequentially...`);
+    }
 
     const allResults: QueryResult[] = [];
 
@@ -376,7 +407,8 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
     }
 
     if (!resolvedConnectionName) {
-        outputChannel.appendLine('Error: No connection selected');
+        if (outputChannel) outputChannel.appendLine('Error: No connection selected');
+        if (logCallback) logCallback('Error: No connection selected');
         throw new Error('No connection selected');
     }
 
@@ -409,8 +441,10 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
         }
 
         // Attach listener for notices
+        // Attach listener for notices
         connection.on('notice', (msg: any) => {
-            outputChannel.appendLine(`NOTICE: ${msg.message}`);
+            if (outputChannel) outputChannel.appendLine(`NOTICE: ${msg.message}`);
+            if (logCallback) logCallback(`NOTICE: ${msg.message}`);
         });
 
 
@@ -423,13 +457,22 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
                 // ...
             } catch (schemaErr) { }
 
-            // Capture current session ID for DROP SESSION functionality
+            // Capture Netezza Session ID
             try {
-                // TODO: Update to usage of NzConnection if needed
-                // const sidCmd = connection.createCommand('SELECT CURRENT_SID');
-                // ...
+                // Execute scalar query to get Session ID
+                const sidCmd = connection.createCommand('SELECT CURRENT_SID');
+                const sidReader = await sidCmd.executeReader();
+                if (await sidReader.read()) {
+                    const sid = sidReader.getValue(0);
+                    if (sid !== undefined && logCallback) {
+                        logCallback(`Connected. Session ID: ${sid}`);
+                    }
+                }
+                // Important: Close reader to release connection lock (_executing flag)
+                await sidReader.close();
             } catch (sidErr) {
                 console.debug('Could not retrieve session ID:', sidErr);
+                if (logCallback) logCallback(`Connected.`);
             }
 
             const historyManager = new QueryHistoryManager(context);
@@ -438,7 +481,9 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
 
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i];
-                outputChannel.appendLine(`Executing query ${i + 1}/${queries.length}...`);
+                const msg = `Executing query ${i + 1}/${queries.length}...`;
+                if (outputChannel) outputChannel.appendLine(msg);
+                if (logCallback) logCallback(msg);
 
                 try {
                     // Parse @SET defaults and detect/resolve ${VAR} placeholders for this query
@@ -455,7 +500,10 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
                     const config = vscode.workspace.getConfiguration('netezza');
                     const queryTimeout = config.get<number>('queryTimeout', 1800);
 
-                    const result = await executeAndFetchWithLimit(connection, queryToExecute, 200000, queryTimeout);
+                    const startTime = Date.now();
+                    const { results: batchResults, error: batchError } = await executeAndFetchWithLimit(connection, queryToExecute, 200000, queryTimeout, documentUri);
+                    const durationMs = Date.now() - startTime;
+                    if (logCallback) logCallback(`Executed query ${i + 1}/${queries.length} in ${durationMs}ms`);
 
                     // Log to history (async, don't wait)
                     historyManager.addEntry(
@@ -468,34 +516,67 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
                         console.error('Failed to log query to history:', err);
                     });
 
-                    if (result && Array.isArray(result) && (result as any).columns) {
-                        const columns = (result as any).columns;
-                        allResults.push({
-                            columns: columns,
-                            data: result,
-                            rowsAffected: (result as any).count,
-                            limitReached: (result as any).limitReached,
-                            sql: queryToExecute
-                        });
-                    } else {
-                        allResults.push({
-                            columns: [],
-                            data: [],
-                            rowsAffected: (result as any)?.count,
-                            message: 'Query executed successfully',
-                            sql: queryToExecute
-                        });
+                    if (batchResults && batchResults.length > 0) {
+                        // Process all results (partial or full)
+                        for (const rs of batchResults) {
+                            if (rs && (rs as any).columns) {
+                                const columns = (rs as any).columns;
+                                allResults.push({
+                                    columns: columns,
+                                    data: rs,
+                                    rowsAffected: (rs as any).count,
+                                    limitReached: (rs as any).limitReached,
+                                    sql: queryToExecute
+                                });
+                            } else {
+                                allResults.push({
+                                    columns: [],
+                                    data: [],
+                                    rowsAffected: (rs as any)?.count,
+                                    message: 'Query executed successfully',
+                                    sql: queryToExecute
+                                });
+                            }
+                        }
+                    }
+
+                    // Progressive callback: send results immediately after each query
+                    if (resultCallback && batchResults && batchResults.length > 0) {
+                        const queryResults: QueryResult[] = [];
+                        for (const rs of batchResults) {
+                            if (rs && (rs as any).columns) {
+                                queryResults.push({
+                                    columns: (rs as any).columns,
+                                    data: rs,
+                                    rowsAffected: (rs as any).count,
+                                    limitReached: (rs as any).limitReached,
+                                    sql: queryToExecute
+                                });
+                            } else {
+                                queryResults.push({
+                                    columns: [],
+                                    data: [],
+                                    rowsAffected: (rs as any)?.count,
+                                    message: 'Query executed successfully',
+                                    sql: queryToExecute
+                                });
+                            }
+                        }
+                        resultCallback(queryResults);
+                    }
+
+                    if (batchError) {
+                        // Re-throw valid error to be caught by outer catch
+                        throw batchError;
                     }
                 } catch (err: any) {
                     const errorMsg = `Error: ${err.message}`;
-                    outputChannel.appendLine(`Error in query ${i + 1}: ${errorMsg}`);
+                    if (outputChannel) outputChannel.appendLine(`Error in query ${i + 1}: ${errorMsg}`);
                     throw new Error(errorMsg);
                 }
             }
-            outputChannel.appendLine('All queries completed.');
+            if (outputChannel) outputChannel.appendLine('All queries completed.');
         } finally {
-            // Clear session tracking
-            clearCurrentSession();
             // Close connection only if not using persistent connection
             if (shouldCloseConnection) {
                 await connection.close();
@@ -503,7 +584,8 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
         }
     } catch (error: any) {
         const errorMessage = `Error: ${error.message}`;
-        outputChannel.appendLine(errorMessage);
+        if (outputChannel) outputChannel.appendLine(errorMessage);
+        if (logCallback) logCallback(errorMessage);
         throw new Error(errorMessage);
     }
 
@@ -515,44 +597,79 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
 /**
  * Execute a query and fetch results up to a limit using NzConnection.
  */
-async function executeAndFetchWithLimit(connection: any, query: string, limit: number, timeoutSeconds?: number): Promise<any> {
+/**
+ * Execute a query and fetch results up to a limit using NzConnection.
+ */
+async function executeAndFetchWithLimit(connection: any, query: string, limit: number, timeoutSeconds?: number, documentUri?: string): Promise<{ results: any[], error?: Error }> {
     const cmd = connection.createCommand(query);
     if (timeoutSeconds && timeoutSeconds > 0) {
         cmd.commandTimeout = timeoutSeconds;
     }
 
-    const reader = await cmd.executeReader();
-    const columns: { name: string; type?: string }[] = [];
-    const allRows: any[] = [];
-    let fetchedCount = 0;
-
-    // Fetch loop
-    while (await reader.read()) {
-        // Initialize columns on first row
-        if (columns.length === 0) {
-            for (let i = 0; i < reader.fieldCount; i++) {
-                columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
-            }
-        }
-
-        const row: any[] = [];
-        for (let i = 0; i < reader.fieldCount; i++) {
-            row.push(reader.getValue(i));
-        }
-        allRows.push(row);
-        fetchedCount++;
-
-        if (fetchedCount >= limit) {
-            (allRows as any).limitReached = true;
-            break;
-        }
+    // Track command
+    if (documentUri) {
+        executingCommands.set(documentUri, cmd);
     }
 
-    // Attach columns metadata
-    if (columns.length > 0) {
-        (allRows as any).columns = columns;
-    }
-    // (allRows as any).count = ...; // Not easily available unless from CommandComplete
+    try {
+        const reader = await cmd.executeReader();
+        const results: any[] = [];
+        let hasMore = true;
+        let caughtError: Error | undefined;
 
-    return allRows;
+        try {
+            do {
+                const columns: { name: string; type?: string }[] = [];
+                const allRows: any[] = [];
+                let fetchedCount = 0;
+                let limitReached = false;
+
+                // Fetch loop
+                while (await reader.read()) {
+                    // Initialize columns on first row
+                    if (columns.length === 0) {
+                        for (let i = 0; i < reader.fieldCount; i++) {
+                            columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+                        }
+                    }
+
+                    if (fetchedCount < limit) {
+                        const row: any[] = [];
+                        for (let i = 0; i < reader.fieldCount; i++) {
+                            row.push(reader.getValue(i));
+                        }
+                        allRows.push(row);
+                        fetchedCount++;
+                    }
+
+                    if (fetchedCount >= limit) {
+                        limitReached = true;
+                        break;
+                    }
+                }
+
+                // Attach columns metadata
+                if (columns.length > 0) {
+                    (allRows as any).columns = columns;
+                }
+                if (limitReached) {
+                    (allRows as any).limitReached = true;
+                }
+
+                results.push(allRows);
+
+                hasMore = await reader.nextResult();
+
+            } while (hasMore);
+        } catch (readErr: any) {
+            caughtError = readErr;
+            // Don't throw loop error immediately, return what we have so far
+        }
+
+        return { results, error: caughtError };
+    } finally {
+        if (documentUri) {
+            executingCommands.delete(documentUri);
+        }
+    }
 }

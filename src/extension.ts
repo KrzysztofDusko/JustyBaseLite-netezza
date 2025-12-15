@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runQuery, runQueriesSequentially, getCurrentSessionId, getCurrentSessionConnectionName, clearCurrentSession } from './queryRunner';
+import { runQuery, runQueriesSequentially, cancelCurrentQuery } from './queryRunner';
 import { ConnectionManager } from './connectionManager';
 import { LoginPanel } from './loginPanel';
 import { SchemaProvider, SchemaItem } from './schemaProvider';
@@ -470,65 +470,10 @@ END_PROC;`;
                     : 'Keep connection open: DISABLED - connection will be closed after each query'
             );
         }),
-        vscode.commands.registerCommand('netezza.dropCurrentSession', async () => {
-            const sessionId = getCurrentSessionId();
-            const sessionConnectionName = getCurrentSessionConnectionName();
-
-            if (!sessionId) {
-                vscode.window.showWarningMessage('No active session to drop. Run a query first.');
-                return;
-            }
-
-            const confirmation = await vscode.window.showWarningMessage(
-                `Are you sure you want to drop session ${sessionId}? This will kill the current running query.`,
-                { modal: true },
-                'Yes, drop session',
-                'Cancel'
-            );
-
-            if (confirmation !== 'Yes, drop session') {
-                return;
-            }
-
-            try {
-                // Get connection string for the same connection (or active if not specified)
-                const details = await connectionManager.getConnection(sessionConnectionName!);
-                if (!details) {
-                    vscode.window.showErrorMessage('No connection available to execute DROP SESSION');
-                    return;
-                }
-
-                // IMPORTANT: Create a NEW connection, ignoring keepConnection setting
-                // This is necessary because the persistent connection is the one we want to kill
-                // const odbc = require('odbc');
-                // const freshConnection = await odbc.connect({ connectionString: connStr, fetchArray: true });
-
-                const NzConnection = require('../driver/src/NzConnection');
-                const config = {
-                    host: details.host,
-                    port: details.port || 5480,
-                    database: details.database,
-                    user: details.user,
-                    password: details.password
-                };
-                const freshConnection = new NzConnection(config);
-                await freshConnection.connect();
-
-                try {
-                    // await freshConnection.query(`DROP SESSION ${sessionId}`);
-                    const cmd = freshConnection.createCommand(`DROP SESSION ${sessionId}`);
-                    await cmd.execute();
-
-                    vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
-                    // Clear the session tracking
-                    clearCurrentSession();
-                } finally {
-                    await freshConnection.close();
-                }
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Failed to drop session: ${err.message}`);
-            }
+        vscode.commands.registerCommand('netezza.cancelQuery', async () => {
+            await cancelCurrentQuery();
         }),
+
         vscode.commands.registerCommand('netezza.selectActiveConnection', async () => {
             const connections = await connectionManager.getConnections();
             if (connections.length === 0) {
@@ -1611,17 +1556,25 @@ END_PROC;`;
         }
 
         try {
-            const results = await runQueriesSequentially(context, queries, connectionManager, sourceUri);
+            // Start logging for this tab
+            resultPanelProvider.startExecution(sourceUri);
 
-            // Transform results to match what ResultPanelView expects
-            // We need to pass columns and data separately or as a structured object
-            // Let's update ResultPanelView.updateResults to accept QueryResult[]
+            const results = await runQueriesSequentially(
+                context,
+                queries,
+                connectionManager,
+                sourceUri,
+                (msg) => resultPanelProvider.log(sourceUri, msg),
+                (queryResults) => resultPanelProvider.updateResults(queryResults, sourceUri, true)
+            );
 
-            // For now, let's assume we'll update ResultPanelView to accept QueryResult[]
-            resultPanelProvider.updateResults(results, sourceUri, false);
+            // Unpin auto-pinned results now that execution is complete
+            resultPanelProvider.finalizeExecution(sourceUri);
             vscode.commands.executeCommand('netezza.results.focus');
 
         } catch (err: any) {
+            resultPanelProvider.finalizeExecution(sourceUri);
+            resultPanelProvider.log(sourceUri, `Error: ${err.message}`);
             vscode.window.showErrorMessage(`Error executing query: ${err.message}`);
         }
     });
@@ -1682,16 +1635,26 @@ END_PROC;`;
         }
 
         try {
-            // Use runQueryRaw to get proper structure - sends everything as one batch (no splitting)
-            const { runQueryRaw } = await import('./queryRunner');
-            const result = await runQueryRaw(context, text, false, connectionManager, undefined, sourceUri);
+            // Start logging for this tab
+            resultPanelProvider.startExecution(sourceUri);
 
-            if (result) {
-                // Wrap in array to match QueryResult[] (one result set)
-                resultPanelProvider.updateResults([result], sourceUri, false);
-                vscode.commands.executeCommand('netezza.results.focus');
-            }
+            // Use runQueriesSequentially with single query (no splitting) to get proper multi-result support via nextResult()
+            // The query is passed as-is (one element array) so it executes as a single batch
+            const results = await runQueriesSequentially(
+                context,
+                [text], // Single batch - don't split
+                connectionManager,
+                sourceUri,
+                (msg) => resultPanelProvider.log(sourceUri, msg),
+                (queryResults) => resultPanelProvider.updateResults(queryResults, sourceUri, true)
+            );
+
+            // Unpin auto-pinned results now that execution is complete
+            resultPanelProvider.finalizeExecution(sourceUri);
+            vscode.commands.executeCommand('netezza.results.focus');
         } catch (err: any) {
+            resultPanelProvider.finalizeExecution(sourceUri);
+            resultPanelProvider.log(sourceUri, `Error: ${err.message}`);
             vscode.window.showErrorMessage(`Error executing query: ${err.message}`);
         }
     });
@@ -2261,11 +2224,35 @@ END_PROC;`;
     });
 
     // Export Current Result to XLSB and Open (for datagrid)
-    let disposableExportCurrentResultToXlsbAndOpen = vscode.commands.registerCommand('netezza.exportCurrentResultToXlsbAndOpen', async (csvContent: string, sql?: string) => {
+    let disposableExportCurrentResultToXlsbAndOpen = vscode.commands.registerCommand('netezza.exportCurrentResultToXlsbAndOpen', async (csvContent: string | any[], sql?: string) => {
         try {
-            if (!csvContent) {
+            if (!csvContent || (Array.isArray(csvContent) && csvContent.length === 0)) {
                 vscode.window.showErrorMessage('No data to export');
                 return;
+            }
+
+            let dataToExport = csvContent;
+
+            // Handle choice if multiple results
+            if (Array.isArray(csvContent) && csvContent.length > 1) {
+                const choice = await vscode.window.showQuickPick(
+                    ['Export All Results', 'Export Active Result Only'],
+                    { placeHolder: 'Multiple results available. What would you like to export?' }
+                );
+
+                if (!choice) return; // User cancelled
+
+                if (choice === 'Export Active Result Only') {
+                    // Filter for active item
+                    const activeItem = csvContent.find(item => item.isActive);
+                    if (activeItem) {
+                        dataToExport = [activeItem];
+                    } else {
+                        // Fallback if no active flag found (shouldn't happen with new logic)
+                        dataToExport = [csvContent[0]];
+                    }
+                }
+                // Else 'Export All Results' -> keep as is
             }
 
             // Generate temporary file path
@@ -2285,7 +2272,7 @@ END_PROC;`;
                 const { exportCsvToXlsb } = await import('./xlsbExporter');
 
                 const result = await exportCsvToXlsb(
-                    csvContent,
+                    dataToExport,
                     tempPath,
                     false, // Don't copy to clipboard
                     { source: 'Query Results Panel', sql: sql },
@@ -2313,11 +2300,34 @@ END_PROC;`;
     });
 
     // Copy Current Result to Clipboard as XLSB
-    let disposableCopyCurrentResultToXlsbClipboard = vscode.commands.registerCommand('netezza.copyCurrentResultToXlsbClipboard', async (csvContent: string, sql?: string) => {
+    let disposableCopyCurrentResultToXlsbClipboard = vscode.commands.registerCommand('netezza.copyCurrentResultToXlsbClipboard', async (csvContent: string | any[], sql?: string) => {
         try {
-            if (!csvContent) {
+            if (!csvContent || (Array.isArray(csvContent) && csvContent.length === 0)) {
                 vscode.window.showErrorMessage('No data to copy');
                 return;
+            }
+
+            let dataToExport = csvContent;
+
+            // Handle choice if multiple results
+            if (Array.isArray(csvContent) && csvContent.length > 1) {
+                const choice = await vscode.window.showQuickPick(
+                    ['Export All Results', 'Export Active Result Only'],
+                    { placeHolder: 'Multiple results available. What would you like to export?' }
+                );
+
+                if (!choice) return; // User cancelled
+
+                if (choice === 'Export Active Result Only') {
+                    // Filter for active item
+                    const activeItem = csvContent.find(item => item.isActive);
+                    if (activeItem) {
+                        dataToExport = [activeItem];
+                    } else {
+                        // Fallback
+                        dataToExport = [csvContent[0]];
+                    }
+                }
             }
 
             // Generate temporary file path
@@ -2335,33 +2345,38 @@ END_PROC;`;
                 const { exportCsvToXlsb } = await import('./xlsbExporter');
 
                 const result = await exportCsvToXlsb(
-                    csvContent,
+                    dataToExport,
                     tempPath,
-                    true, // Copy to clipboard IS true
+                    true, // Copy to clipboard
                     { source: 'Query Results Panel', sql: sql },
                     (message: string) => {
                         progress.report({ message: message });
-                        outputChannel.appendLine(`[CSV to Clipboard] ${message}`);
+                        outputChannel.appendLine(`[Clipboard XLSB] ${message}`);
                     }
                 );
 
                 if (!result.success) {
                     throw new Error(result.message);
                 }
-
-                if (!result.details?.clipboard_success) {
-                    throw new Error('Failed to copy file to clipboard');
-                }
             });
 
-            const duration = Date.now() - startTime;
-            outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] Copy Current Result to Clipboard completed in ${duration}ms`);
+            logExecutionTime('Copy Result as Excel', startTime);
 
-            // Show success message
-            vscode.window.showInformationMessage('Results copied to clipboard as Excel table! You can paste in Excel or Explorer.');
+            // Show success message with details
+            const action = await vscode.window.showInformationMessage(
+                'Excel file copied to clipboard! You can now paste it into Excel or Windows Explorer.',
+                'Show Temp Folder',
+                'OK'
+            );
+
+            if (action === 'Show Temp Folder') {
+                // Open temp directory
+                const tempDir = require('os').tmpdir();
+                await vscode.env.openExternal(vscode.Uri.file(tempDir));
+            }
 
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Error copying to clipboard: ${err.message}`);
+            vscode.window.showErrorMessage(`Error copying to Excel: ${err.message}`);
         }
     });
 

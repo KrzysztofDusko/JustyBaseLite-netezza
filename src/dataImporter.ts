@@ -76,8 +76,9 @@ export class ColumnTypeChooser {
     private decimalDelimInCsv: string = '.';
     private firstTime: boolean = true;
 
-    constructor() {
+    constructor(decimalDelimiter: string = '.') {
         this.currentType = new NetezzaDataType('BIGINT');
+        this.decimalDelimInCsv = decimalDelimiter;
     }
 
     private getType(strVal: string): NetezzaDataType {
@@ -91,10 +92,18 @@ export class ColumnTypeChooser {
         }
 
         // NUMERIC check
-        const decimalCnt = (strVal.match(new RegExp(`\\${this.decimalDelimInCsv}`, 'g')) || []).length;
+        // Escape delimiter for regex if it's a special char
+        const delim = this.decimalDelimInCsv === '.' ? '\\.' : this.decimalDelimInCsv;
+        const decimalCnt = (strVal.match(new RegExp(`${delim}`, 'g')) || []).length;
+
         if (['BIGINT', 'NUMERIC'].includes(currentDbType) && decimalCnt <= 1) {
             const strValClean = strVal.replace(this.decimalDelimInCsv, '');
-            if (/^\d+$/.test(strValClean) && strLen < 15 && (!strValClean.startsWith('0') || decimalCnt > 0)) {
+            // Also handle if some people use thousand separators? 
+            // For now, let's assume raw clipboard data usually just has the decimal sep if it's "12,5"
+            // If we want to be robust against "1.000,00", that's more complex. 
+            // The request specifically mentions "12,5 ; 37,5", suggesting simple locale decimal.
+
+            if (/^\d+$/.test(strValClean) && strLen < 15 && (!strValClean.startsWith('0') || decimalCnt > 0 || strValClean === '0')) {
                 this.firstTime = false;
                 return new NetezzaDataType('NUMERIC', 16, 6);
             }
@@ -136,6 +145,34 @@ export class ColumnTypeChooser {
                     }
                 } catch {
                     // Invalid datetime, continue
+                }
+            }
+        }
+
+        // DATETIME check (dd.mm.yyyy HH:mm)
+        // Also accepts dd.mm.yyyy without time, but that might be DATE?
+        // User requested: "dd.mm.yyyy hh24:mi jako datetime"
+        if ((currentDbType === 'DATETIME' || this.firstTime) && (strVal.match(/\./g) || []).length >= 2) {
+            const result = strVal.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+            if (result) {
+                try {
+                    const day = parseInt(result[1]);
+                    const month = parseInt(result[2]) - 1;
+                    const year = parseInt(result[3]);
+                    const hour = result[4] ? parseInt(result[4]) : 0;
+                    const min = result[5] ? parseInt(result[5]) : 0;
+                    const sec = result[6] ? parseInt(result[6]) : 0;
+
+                    // Validate day/month/year ranges roughly
+                    if (month >= 0 && month <= 11 && day >= 1 && day <= 31) {
+                        const date = new Date(year, month, day, hour, min, sec);
+                        if (!isNaN(date.getTime()) && date.getFullYear() === year && date.getMonth() === month && date.getDate() === day) {
+                            this.firstTime = false;
+                            return new NetezzaDataType('DATETIME');
+                        }
+                    }
+                } catch {
+                    // Invalid datetime
                 }
             }
         }

@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.11",
+  "version": "0.0.13",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -206,8 +206,8 @@
         "icon": "$(trash)"
       },
       {
-        "command": "netezza.dropCurrentSession",
-        "title": "Drop Current Session (Kill Query)",
+        "command": "netezza.cancelQuery",
+        "title": "Cancel Query",
         "icon": "$(debug-stop)"
       },
       {
@@ -250,7 +250,7 @@
           "group": "navigation@2"
         },
         {
-          "command": "netezza.dropCurrentSession",
+          "command": "netezza.cancelQuery",
           "when": "resourceLangId == sql",
           "group": "navigation@3"
         },
