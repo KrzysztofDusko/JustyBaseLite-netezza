@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runQuery, runQueriesSequentially, cancelCurrentQuery } from './queryRunner';
+import { runQuery, runQueriesSequentially, cancelCurrentQuery, runExplainQuery } from './queryRunner';
 import { ConnectionManager } from './connectionManager';
 import { LoginPanel } from './loginPanel';
 import { SchemaProvider, SchemaItem } from './schemaProvider';
@@ -12,6 +12,7 @@ import { NetezzaFoldingRangeProvider } from './foldingProvider';
 import { QueryHistoryView } from './queryHistoryView';
 import { EditDataProvider } from './editDataProvider';
 import { MetadataCache } from './metadataCache';
+import { format as formatSQL } from 'sql-formatter';
 import * as path from 'path';
 
 
@@ -1012,6 +1013,318 @@ END_PROC;`;
                 vscode.window.showErrorMessage(`Error generating DDL: ${err.message}`);
             }
         }),
+        vscode.commands.registerCommand('netezza.compareSchema', async (item: any) => {
+            try {
+                // Validate item has required properties
+                if (!item || !item.label || !item.dbName || !item.schema || !item.objType) {
+                    vscode.window.showErrorMessage('Invalid object selected for comparison');
+                    return;
+                }
+
+                // Get connection string
+                const connectionString = await connectionManager.getConnectionString();
+                if (!connectionString) {
+                    vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
+                    return;
+                }
+
+                const sourceType = item.objType;
+                const sourceFullName = `${item.dbName}.${item.schema}.${item.label}`;
+
+                // Build list of available objects of the same type for comparison
+                let targetObjects: { label: string; description: string; db: string; schema: string; name: string }[] = [];
+
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Loading ${sourceType}s for comparison...`,
+                    cancellable: false
+                }, async () => {
+                    // Get objects of the same type from the same database
+                    const typeFilter = sourceType === 'PROCEDURE'
+                        ? `OBJTYPE = 'PROCEDURE'`
+                        : sourceType === 'VIEW'
+                            ? `OBJTYPE = 'VIEW'`
+                            : `OBJTYPE = 'TABLE'`;
+
+                    const query = sourceType === 'PROCEDURE'
+                        ? `SELECT DISTINCT SCHEMA, PROCEDURESIGNATURE AS OBJNAME FROM ${item.dbName}.._V_PROCEDURE WHERE DATABASE = '${item.dbName.toUpperCase()}' ORDER BY SCHEMA, PROCEDURESIGNATURE`
+                        : `SELECT SCHEMA, OBJNAME FROM ${item.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${item.dbName.toUpperCase()}' AND ${typeFilter} ORDER BY SCHEMA, OBJNAME`;
+
+                    const result = await runQuery(context, query, true, item.connectionName, connectionManager);
+                    if (result && !result.startsWith('Query executed successfully')) {
+                        const objects = JSON.parse(result);
+                        for (const obj of objects) {
+                            const objName = obj.OBJNAME;
+                            const objSchema = obj.SCHEMA;
+                            const fullName = `${item.dbName}.${objSchema}.${objName}`;
+
+                            // Exclude the source object itself
+                            if (fullName.toUpperCase() !== sourceFullName.toUpperCase()) {
+                                targetObjects.push({
+                                    label: objName,
+                                    description: `${item.dbName}.${objSchema}`,
+                                    db: item.dbName,
+                                    schema: objSchema,
+                                    name: objName
+                                });
+                            }
+                        }
+                    }
+                });
+
+                if (targetObjects.length === 0) {
+                    vscode.window.showWarningMessage(`No other ${sourceType}s found to compare with.`);
+                    return;
+                }
+
+                // Show Quick Pick to select target object
+                const selected = await vscode.window.showQuickPick(targetObjects, {
+                    placeHolder: `Select ${sourceType} to compare with ${item.label}`,
+                    matchOnDescription: true
+                });
+
+                if (!selected) {
+                    return; // User cancelled
+                }
+
+                // Perform comparison
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Comparing ${item.label} with ${selected.label}...`,
+                    cancellable: false
+                }, async () => {
+                    if (sourceType === 'PROCEDURE') {
+                        const { compareProcedures } = await import('./schemaComparer');
+                        const { SchemaCompareView } = await import('./schemaCompareView');
+
+                        const result = await compareProcedures(
+                            connectionString,
+                            item.dbName,
+                            item.schema,
+                            item.label,
+                            selected.db,
+                            selected.schema,
+                            selected.name
+                        );
+
+                        SchemaCompareView.createOrShow(context.extensionUri, result, 'procedure');
+                    } else {
+                        // TABLE or VIEW
+                        const { compareTableStructures } = await import('./schemaComparer');
+                        const { SchemaCompareView } = await import('./schemaCompareView');
+
+                        const result = await compareTableStructures(
+                            connectionString,
+                            item.dbName,
+                            item.schema,
+                            item.label,
+                            selected.db,
+                            selected.schema,
+                            selected.name
+                        );
+
+                        SchemaCompareView.createOrShow(context.extensionUri, result, 'table');
+                    }
+                });
+
+                vscode.window.showInformationMessage(`Comparison complete: ${item.label} ↔ ${selected.label}`);
+
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Error comparing objects: ${err.message}`);
+            }
+        }),
+        vscode.commands.registerCommand('netezza.batchExportDDL', async (item: any) => {
+            try {
+                // Validate item - can be database or typeGroup
+                if (!item || !item.contextValue) {
+                    vscode.window.showErrorMessage('Invalid node selected for batch DDL export');
+                    return;
+                }
+
+                const isDatabase = item.contextValue === 'database';
+                const isTypeGroup = item.contextValue.startsWith('typeGroup:');
+
+                if (!isDatabase && !isTypeGroup) {
+                    vscode.window.showErrorMessage('Batch DDL export is only available on database or object type nodes');
+                    return;
+                }
+
+                // Get connection string
+                const connectionString = await connectionManager.getConnectionString(item.connectionName);
+                if (!connectionString) {
+                    vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
+                    return;
+                }
+
+                const database = item.dbName || item.label;
+                const objectTypes = isTypeGroup ? [item.objType || item.contextValue.replace('typeGroup:', '')] : undefined;
+
+                // Show progress while generating DDL
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: isDatabase
+                        ? `Exporting all DDL for database ${database}...`
+                        : `Exporting ${objectTypes?.[0]} DDL for ${database}...`,
+                    cancellable: false
+                }, async (progress) => {
+                    const { generateBatchDDL } = await import('./ddlGenerator');
+
+                    const result = await generateBatchDDL({
+                        connectionString,
+                        database,
+                        objectTypes
+                    });
+
+                    if (result.success && result.ddlCode) {
+                        // Ask user what to do with the DDL code
+                        const action = await vscode.window.showQuickPick([
+                            { label: 'Open in Editor', description: 'Open DDL code in a new editor', value: 'editor' },
+                            { label: 'Save to File', description: 'Save DDL code to a .sql file', value: 'file' },
+                            { label: 'Copy to Clipboard', description: 'Copy DDL code to clipboard', value: 'clipboard' }
+                        ], {
+                            placeHolder: `${result.objectCount} objects found. How would you like to access the DDL code?`
+                        });
+
+                        if (action) {
+                            if (action.value === 'editor') {
+                                const doc = await vscode.workspace.openTextDocument({
+                                    content: result.ddlCode,
+                                    language: 'sql'
+                                });
+                                await vscode.window.showTextDocument(doc);
+                                vscode.window.showInformationMessage(`DDL exported: ${result.objectCount} objects`);
+                            } else if (action.value === 'file') {
+                                const fileName = isDatabase
+                                    ? `${database}_all_ddl.sql`
+                                    : `${database}_${objectTypes?.[0]?.toLowerCase() || 'objects'}_ddl.sql`;
+
+                                const uri = await vscode.window.showSaveDialog({
+                                    defaultUri: vscode.Uri.file(fileName),
+                                    filters: { 'SQL Files': ['sql'] }
+                                });
+
+                                if (uri) {
+                                    await vscode.workspace.fs.writeFile(uri, Buffer.from(result.ddlCode, 'utf8'));
+                                    vscode.window.showInformationMessage(`DDL saved to ${uri.fsPath}`);
+                                }
+                            } else if (action.value === 'clipboard') {
+                                await vscode.env.clipboard.writeText(result.ddlCode);
+                                vscode.window.showInformationMessage(`DDL copied: ${result.objectCount} objects`);
+                            }
+                        }
+
+                        // Show warnings if there were errors
+                        if (result.errors.length > 0) {
+                            vscode.window.showWarningMessage(
+                                `Batch DDL completed with ${result.errors.length} error(s). Check the generated file for details.`
+                            );
+                        }
+                    } else {
+                        throw new Error(result.errors.join(', ') || 'Batch DDL generation failed');
+                    }
+                });
+
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Error exporting DDL: ${err.message}`);
+            }
+        }),
+        vscode.commands.registerCommand('netezza.showERD', async (item: any) => {
+            try {
+                // Validate item - should be typeGroup:TABLE node
+                if (!item || !item.contextValue || !item.contextValue.startsWith('typeGroup:')) {
+                    vscode.window.showErrorMessage('Please right-click on a TABLE type group to show ERD');
+                    return;
+                }
+
+                const database = item.dbName || item.label;
+                const connectionName = item.connectionName;
+
+                if (!connectionName) {
+                    vscode.window.showErrorMessage('No connection selected');
+                    return;
+                }
+
+                // We need to find schemas with tables - for now, we'll use ADMIN as default
+                // or prompt the user to select a schema
+                const schemaQuery = `SELECT DISTINCT SCHEMA FROM ${database}.._V_TABLE ORDER BY SCHEMA`;
+                const schemasJson = await runQuery(context, schemaQuery, true, connectionName, connectionManager);
+
+                if (!schemasJson) {
+                    vscode.window.showErrorMessage('Could not retrieve schemas');
+                    return;
+                }
+
+                const schemas = JSON.parse(schemasJson);
+                if (schemas.length === 0) {
+                    vscode.window.showWarningMessage('No tables found in this database');
+                    return;
+                }
+
+                // Let user select schema if there are multiple
+                let selectedSchema: string;
+                if (schemas.length === 1) {
+                    selectedSchema = schemas[0].SCHEMA;
+                } else {
+                    const schemaOptions: vscode.QuickPickItem[] = schemas.map((s: any) => ({
+                        label: s.SCHEMA as string,
+                        description: `${database}.${s.SCHEMA}`
+                    }));
+
+                    const selected = await vscode.window.showQuickPick(schemaOptions, {
+                        placeHolder: 'Select schema to show ERD for'
+                    });
+
+                    if (!selected) {
+                        return; // User cancelled
+                    }
+                    selectedSchema = selected.label;
+                }
+
+                // Show progress while building ERD
+                let tableCount = 0;
+                let relCount = 0;
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Building ERD for ${database}.${selectedSchema}...`,
+                    cancellable: false
+                }, async () => {
+                    const { buildERDData } = await import('./erdProvider');
+                    const { ERDView } = await import('./erdView');
+
+                    const erdData = await buildERDData(
+                        context,
+                        connectionManager,
+                        connectionName,
+                        database,
+                        selectedSchema
+                    );
+
+                    tableCount = erdData.tables.length;
+                    relCount = erdData.relationships.length;
+
+                    ERDView.createOrShow(context.extensionUri, erdData);
+                });
+
+                vscode.window.showInformationMessage(`ERD generated: ${tableCount} tables, ${relCount} relationships`);
+
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Error generating ERD: ${err.message}`);
+            }
+        }),
+        vscode.commands.registerCommand('netezza.showSessionMonitor', async () => {
+            try {
+                const connectionString = await connectionManager.getConnectionString();
+                if (!connectionString) {
+                    vscode.window.showErrorMessage('Please connect to a Netezza database first.');
+                    return;
+                }
+
+                const { SessionMonitorView } = await import('./sessionMonitorView');
+                SessionMonitorView.createOrShow(context.extensionUri, context, connectionManager);
+            } catch (err: any) {
+                vscode.window.showErrorMessage(`Error opening Session Monitor: ${err.message}`);
+            }
+        }),
         vscode.commands.registerCommand('netezza.recreateTable', async (item: any) => {
             try {
                 if (!item || !item.label || !item.dbName || !item.schema || !item.objType || item.objType !== 'TABLE') {
@@ -1660,6 +1973,164 @@ END_PROC;`;
     });
 
     context.subscriptions.push(disposableBatch);
+
+    // Explain Query Plan command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('netezza.explainQuery', async () => {
+            await executeExplainQuery(false);
+        }),
+        vscode.commands.registerCommand('netezza.explainQueryVerbose', async () => {
+            await executeExplainQuery(true);
+        })
+    );
+
+    // Format SQL command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('netezza.formatSQL', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showErrorMessage('No active editor');
+                return;
+            }
+
+            if (editor.document.languageId !== 'sql' && editor.document.languageId !== 'mssql') {
+                vscode.window.showWarningMessage('Format SQL is only available for SQL files');
+                return;
+            }
+
+            // Get configuration
+            const config = vscode.workspace.getConfiguration('netezza');
+            const tabWidth = config.get<number>('formatSQL.tabWidth', 4);
+            const keywordCase = config.get<'upper' | 'lower' | 'preserve'>('formatSQL.keywordCase', 'upper');
+
+            // Get text to format: selection or entire document
+            const selection = editor.selection;
+            let text = selection.isEmpty
+                ? editor.document.getText()
+                : editor.document.getText(selection);
+
+            try {
+                // Pre-process: Replace Netezza double-dot syntax (DATABASE..TABLE) with placeholder
+                // The sql-formatter doesn't understand Netezza's .. syntax
+                const doubleDotPlaceholder = '__NZ_DOUBLE_DOT__';
+                const preprocessed = text.replace(/\.\.(?=[a-zA-Z_])/g, `.${doubleDotPlaceholder}.`);
+
+                const formatted = formatSQL(preprocessed, {
+                    language: 'sql',
+                    tabWidth: tabWidth,
+                    keywordCase: keywordCase,
+                    linesBetweenQueries: 2
+                });
+
+                // Post-process: Restore Netezza double-dot syntax
+                const result = formatted.replace(new RegExp(`\\.\\s*${doubleDotPlaceholder}\\s*\\.`, 'g'), '..');
+
+                await editor.edit(editBuilder => {
+                    if (selection.isEmpty) {
+                        // Replace entire document
+                        const fullRange = new vscode.Range(
+                            editor.document.positionAt(0),
+                            editor.document.positionAt(editor.document.getText().length)
+                        );
+                        editBuilder.replace(fullRange, result);
+                    } else {
+                        // Replace selection only
+                        editBuilder.replace(selection, result);
+                    }
+                });
+
+                vscode.window.showInformationMessage('SQL formatted successfully');
+            } catch (err: any) {
+                // Provide more helpful error message for Netezza-specific issues
+                const errMsg = err.message || String(err);
+                if (errMsg.includes('Parse error')) {
+                    vscode.window.showErrorMessage(
+                        'SQL formatting failed: The SQL contains syntax not supported by the formatter. ' +
+                        'Try selecting a simpler portion of the SQL to format.'
+                    );
+                } else {
+                    vscode.window.showErrorMessage(`Format SQL failed: ${errMsg}`);
+                }
+            }
+        })
+    );
+
+    async function executeExplainQuery(verbose: boolean) {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage('No active editor found');
+            return;
+        }
+
+        const document = editor.document;
+        const selection = editor.selection;
+
+        // Get text to explain: selected text or current statement
+        let text: string;
+        if (!selection.isEmpty) {
+            text = document.getText(selection);
+        } else {
+            // Use SqlParser to get current statement
+            const position = editor.selection.active;
+            const offset = document.offsetAt(position);
+            const fullText = document.getText();
+            const stmt = SqlParser.getStatementAtPosition(fullText, offset);
+            if (stmt) {
+                text = fullText.substring(stmt.start, stmt.end);
+            } else {
+                text = document.getText();
+            }
+        }
+
+        if (!text.trim()) {
+            vscode.window.showWarningMessage('No SQL query to explain');
+            return;
+        }
+
+        // Remove any existing EXPLAIN prefix
+        let cleanQuery = text.trim();
+        if (cleanQuery.toUpperCase().startsWith('EXPLAIN')) {
+            cleanQuery = cleanQuery.replace(/^EXPLAIN\s+(?:VERBOSE\s+)?/i, '');
+        }
+
+        const explainQueryText = verbose
+            ? `EXPLAIN VERBOSE ${cleanQuery}`
+            : `EXPLAIN ${cleanQuery}`;
+
+        try {
+            const documentUri = document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            const connectionString = await connectionManager.getConnectionString(connectionName);
+
+            if (!connectionString) {
+                vscode.window.showErrorMessage('No database connection. Please connect first.');
+                return;
+            }
+
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Generating query plan...',
+                cancellable: false
+            }, async () => {
+                // Use runExplainQuery which captures NOTICE messages
+                const result = await runExplainQuery(context, explainQueryText, connectionName, connectionManager, documentUri);
+
+                if (result && result.trim()) {
+                    // Parse the explain output
+                    const { parseExplainOutput, ExplainPlanView } = await import('./explainPlanView');
+                    const parsed = parseExplainOutput(result);
+
+                    // Show the visualization
+                    ExplainPlanView.createOrShow(context.extensionUri, parsed, cleanQuery);
+                } else {
+                    vscode.window.showWarningMessage('No explain output received');
+                }
+            });
+        } catch (err: any) {
+            vscode.window.showErrorMessage(`Error generating query plan: ${err.message}`);
+        }
+    }
+
 
     // Output channel for logging
     const outputChannel = vscode.window.createOutputChannel('Netezza');

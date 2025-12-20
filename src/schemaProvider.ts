@@ -317,7 +317,8 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
                 const cachedCols = this.metadataCache.getColumns(element.connectionName, columnKey);
 
-                if (cachedCols) {
+                // Check if cache has isPk property (new format) - if not, refetch
+                if (cachedCols && cachedCols.length > 0 && cachedCols[0].isPk !== undefined) {
                     return cachedCols.map((col: any) => new SchemaItem(
                         col.detail ? `${col.label} (${col.detail})` : col.label, // Reconstruct label
                         vscode.TreeItemCollapsibleState.None,
@@ -328,9 +329,13 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         undefined,
                         col.documentation || '', // Assuming description stored in documentation or similar
                         element.connectionName,
-                        tableName // Parent (Table) Name
+                        tableName, // Parent (Table) Name
+                        undefined,
+                        col.isPk, // Retrieve isPk from cache
+                        col.isFk  // Retrieve isFk from cache
                     ));
                 }
+                // If cache is stale (no isPk), fall through to refetch
             }
 
             // If no cached columns, try to query (need connection)
@@ -339,41 +344,36 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             }
 
             try {
-                let query: string;
-                if (element.objId) {
-                    // Use objId for efficient lookup
-                    query = `SELECT 
-                            X.ATTNAME
-                            , X.FORMAT_TYPE
-                            , X.ATTNOTNULL::BOOL AS ATTNOTNULL
-                            , X.COLDEFAULT
-                            , COALESCE(X.DESCRIPTION, '') AS DESCRIPTION
-                        FROM
-                            ${dbName}.._V_RELATION_COLUMN X
-                        WHERE
-                            X.OBJID = ${element.objId}
-                        ORDER BY 
-                            X.ATTNUM`;
-                } else {
-                    // Fallback: lookup by table name (slower but works without objId)
-                    const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
-                    query = `SELECT 
-                            X.ATTNAME
-                            , X.FORMAT_TYPE
-                            , X.ATTNOTNULL::BOOL AS ATTNOTNULL
-                            , X.COLDEFAULT
-                            , COALESCE(X.DESCRIPTION, '') AS DESCRIPTION
-                        FROM
-                            ${dbName}.._V_RELATION_COLUMN X
-                        INNER JOIN
-                            ${dbName}.._V_OBJECT_DATA O ON X.OBJID = O.OBJID
-                        WHERE
-                            UPPER(O.OBJNAME) = UPPER('${tableName}')
-                            AND UPPER(O.DBNAME) = UPPER('${dbName}')
-                            ${schemaClause}
-                        ORDER BY 
-                            X.ATTNUM`;
-                }
+                // Use table name (RELATION) instead of OBJID for JOIN with _V_RELATION_KEYDATA
+                // Also need to match SCHEMA for proper scoping
+                const schemaClause = schemaName ? `AND UPPER(K.SCHEMA) = UPPER('${schemaName}')` : '';
+                const query = `SELECT 
+                        X.ATTNAME
+                        , X.FORMAT_TYPE
+                        , X.ATTNOTNULL::BOOL AS ATTNOTNULL
+                        , X.COLDEFAULT
+                        , COALESCE(X.DESCRIPTION, '') AS DESCRIPTION
+                        , MAX(CASE WHEN K.CONTYPE = 'p' THEN 1 ELSE 0 END) AS IS_PK
+                        , MAX(CASE WHEN K.CONTYPE = 'f' THEN 1 ELSE 0 END) AS IS_FK
+                    FROM
+                        ${dbName}.._V_RELATION_COLUMN X
+                    INNER JOIN
+                        ${dbName}.._V_OBJECT_DATA O ON X.OBJID = O.OBJID
+                    LEFT JOIN
+                        ${dbName}.._V_RELATION_KEYDATA K 
+                        ON UPPER(K.RELATION) = UPPER(O.OBJNAME) 
+                        AND UPPER(K.SCHEMA) = UPPER(O.SCHEMA)
+                        AND UPPER(K.ATTNAME) = UPPER(X.ATTNAME)
+                        AND K.CONTYPE IN ('p', 'f')
+                    WHERE
+                        UPPER(O.OBJNAME) = UPPER('${tableName}')
+                        AND UPPER(O.DBNAME) = UPPER('${dbName}')
+                        ${schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : ''}
+                    GROUP BY 
+                        X.ATTNAME, X.FORMAT_TYPE, X.ATTNOTNULL, X.COLDEFAULT, X.DESCRIPTION, X.ATTNUM
+                    ORDER BY 
+                        X.ATTNUM`;
+
                 const results = await runQuery(this.context, query, true, element.connectionName, this.connectionManager);
                 const columns = JSON.parse(results || '[]');
 
@@ -383,7 +383,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     label: col.ATTNAME,
                     kind: 5, // Field
                     detail: col.FORMAT_TYPE,
-                    documentation: col.DESCRIPTION
+                    documentation: col.DESCRIPTION,
+                    isPk: Number(col.IS_PK) === 1,
+                    isFk: Number(col.IS_FK) === 1
                 }));
                 this.metadataCache.setColumns(element.connectionName, columnKey, cacheItems);
 
@@ -397,7 +399,10 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     undefined,
                     col.DESCRIPTION,
                     element.connectionName,
-                    tableName // Parent (Table) Name
+                    tableName, // Parent (Table) Name
+                    undefined,
+                    Number(col.IS_PK) === 1,
+                    Number(col.IS_FK) === 1
                 ));
             } catch (e) {
                 vscode.window.showErrorMessage("Failed to load columns: " + e);
@@ -421,7 +426,9 @@ export class SchemaItem extends vscode.TreeItem {
         public readonly objectDescription?: string,
         public readonly connectionName?: string,
         public readonly parentName?: string, // Add parent (Table) name for stable ID
-        customIconPath?: vscode.Uri
+        customIconPath?: vscode.Uri,
+        public readonly isPk?: boolean,
+        public readonly isFk?: boolean
     ) {
         super(label, collapsibleState);
 
@@ -436,6 +443,10 @@ export class SchemaItem extends vscode.TreeItem {
         if (schema && contextValue.startsWith('netezza:')) {
             tooltipText += `\n\nSchema: ${schema}`;
         }
+
+        if (this.isPk) tooltipText += `\n🔑 Primary Key`;
+        if (this.isFk) tooltipText += `\n🔗 Foreign Key`;
+
         this.tooltip = tooltipText;
 
         this.description = schema ? `(${schema})` : '';
@@ -449,7 +460,8 @@ export class SchemaItem extends vscode.TreeItem {
             schema || '',
             objType || '',
             parentName || '',
-            label
+            label,
+            objId ? objId.toString() : ''
         ];
         this.id = parts.join('|');
 
@@ -464,7 +476,13 @@ export class SchemaItem extends vscode.TreeItem {
         } else if (contextValue.startsWith('netezza:')) {
             this.iconPath = this.getIconForType(objType);
         } else if (contextValue === 'column') {
-            this.iconPath = new vscode.ThemeIcon('symbol-field');
+            if (this.isPk) {
+                this.iconPath = new vscode.ThemeIcon('key', new vscode.ThemeColor('charts.yellow'));
+            } else if (this.isFk) {
+                this.iconPath = new vscode.ThemeIcon('link', new vscode.ThemeColor('charts.blue'));
+            } else {
+                this.iconPath = new vscode.ThemeIcon('symbol-field');
+            }
         }
     }
 

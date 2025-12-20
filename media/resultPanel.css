@@ -975,3 +975,61 @@ tfoot {
     background-color: var(--vscode-errorBackground, rgba(255, 0, 0, 0.1));
     color: var(--vscode-errorForeground);
 }
+
+/* Split Button Styles */
+.split-btn-container {
+    display: inline-flex;
+    position: relative;
+    vertical-align: middle;
+}
+
+.split-btn-main {
+    border-top-right-radius: 0 !important;
+    border-bottom-right-radius: 0 !important;
+    border-right: none !important;
+    margin-right: 0 !important;
+}
+
+.split-btn-arrow {
+    padding: 4px 2px !important;
+    border-top-left-radius: 0 !important;
+    border-bottom-left-radius: 0 !important;
+    border-left: 1px solid var(--vscode-button-border, rgba(255, 255, 255, 0.2)) !important;
+    min-width: 20px !important;
+}
+
+.split-btn-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    z-index: 1000;
+    background-color: var(--vscode-dropdown-background);
+    border: 1px solid var(--vscode-dropdown-border);
+    border-radius: 3px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.25);
+    padding: 4px 0;
+    min-width: 150px;
+    margin-top: 2px;
+}
+
+.split-btn-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    color: var(--vscode-dropdown-foreground);
+    font-size: 13px;
+    user-select: none;
+}
+
+.split-btn-menu-item:hover {
+    background-color: var(--vscode-list-hoverBackground);
+    color: var(--vscode-list-hoverForeground);
+}
+
+.split-btn-menu-item svg {
+    width: 16px;
+    height: 16px;
+    opacity: 0.8;
+}

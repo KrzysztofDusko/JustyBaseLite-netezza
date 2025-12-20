@@ -38,7 +38,7 @@ export async function exportToCsv(
         const config = parseConnectionString(connectionString);
         if (!config.port) config.port = 5480;
 
-        const NzConnection = require('../driver/src/NzConnection');
+        const NzConnection = require('../driver/dist/NzConnection');
         connection = new NzConnection(config);
         await connection.connect();
 

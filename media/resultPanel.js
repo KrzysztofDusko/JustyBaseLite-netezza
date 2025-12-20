@@ -2174,6 +2174,251 @@ function exportToCsv() {
     });
 }
 
+
+
+// Split Button Logic
+let currentExportFormat = 'excel'; // default
+
+function executeSplitExport() {
+    switch (currentExportFormat) {
+        case 'excel':
+            openInExcel();
+            break;
+        case 'csv':
+            exportToCsv();
+            break;
+        case 'json':
+            exportToJson();
+            break;
+        case 'xml':
+            exportToXml();
+            break;
+        case 'sql':
+            exportToSqlInsert();
+            break;
+        case 'markdown':
+            exportToMarkdown();
+            break;
+    }
+}
+
+function toggleExportMenu() {
+    const menu = document.getElementById('exportMenu');
+    if (menu.style.display === 'none') {
+        menu.style.display = 'block';
+    } else {
+        menu.style.display = 'none';
+    }
+}
+
+function selectExportFormat(format) {
+    currentExportFormat = format;
+
+    // Update main button UI
+    // We can copy innerHTML from the selected menu item (icon + text)
+    // We need to find the menu item that was clicked. 
+    // Since we pass format string, we can find the element by querying for onclick attribute manually or just iterating.
+
+    // Or easier: hardcode the mapping or use data-attributes. 
+    // Let's rely on finding the menu item by its onclick attribute content for simplicity in this context.
+    const items = document.querySelectorAll('.split-btn-menu-item');
+    let selectedItem = null;
+    items.forEach(item => {
+        if (item.getAttribute('onclick').includes(`'${format}'`)) {
+            selectedItem = item;
+        }
+    });
+
+    if (selectedItem) {
+        const btn = document.getElementById('exportMainBtn');
+        // Copy icon and text
+        // But we want to preserve "Excel" vs "Excel (XLSB)" distinction? 
+        // The menu item says "Excel (XLSB)", the button said "Excel".
+        // Let's just use what's in the menu item, it's fine.
+        btn.innerHTML = selectedItem.innerHTML;
+        // Maybe trim (XLSB) if we want shorter button?
+        if (format === 'excel') btn.innerHTML = btn.innerHTML.replace(' (XLSB)', '');
+    }
+
+    // Hide menu
+    document.getElementById('exportMenu').style.display = 'none';
+}
+
+// Close menu when clicking outside
+document.addEventListener('click', (e) => {
+    const container = document.querySelector('.split-btn-container');
+    const menu = document.getElementById('exportMenu');
+    if (container && menu && menu.style.display !== 'none') {
+        if (!container.contains(e.target)) {
+            menu.style.display = 'none';
+        }
+    }
+});
+
+function getValueForExport(row, columnId, resultSetColumns) {
+    // Helper to get raw value from row.original
+    // columnId is usually the index string "0", "1", etc.
+    const index = parseInt(columnId);
+    if (row.original) {
+        if (Array.isArray(row.original)) {
+            if (!isNaN(index) && index >= 0 && index < row.original.length) {
+                return row.original[index];
+            }
+        } else {
+            // Object based
+            // We need to know the key.
+            // If column definition has accessorKey, use it.
+            const colDef = resultSetColumns[index];
+            if (colDef && colDef.accessorKey) {
+                return row.original[colDef.accessorKey];
+            }
+            // Fallback to index if it's stored as "0", "1" etc in object
+            return row.original[columnId];
+        }
+    }
+    return null;
+}
+
+function exportToJson() {
+    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
+
+    const table = grids[activeGridIndex].tanTable;
+    const rows = table.getFilteredRowModel().rows;
+    const headers = table.getAllColumns().filter(col => col.getIsVisible());
+    const rsColumns = window.resultSets[activeGridIndex].columns;
+
+    const data = rows.map(row => {
+        const obj = {};
+        headers.forEach(header => {
+            const val = getValueForExport(row, header.id, rsColumns);
+            // Use header text as key
+            obj[header.columnDef.header] = val;
+        });
+        return obj;
+    });
+
+    vscode.postMessage({
+        command: 'exportJson',
+        data: JSON.stringify(data, null, 2)
+    });
+}
+
+function exportToXml() {
+    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
+
+    const table = grids[activeGridIndex].tanTable;
+    const rows = table.getFilteredRowModel().rows;
+    const headers = table.getAllColumns().filter(col => col.getIsVisible());
+    const rsColumns = window.resultSets[activeGridIndex].columns;
+
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<results>\n';
+
+    rows.forEach(row => {
+        xml += '  <row>\n';
+        headers.forEach(header => {
+            const val = getValueForExport(row, header.id, rsColumns);
+            const tagName = header.columnDef.header.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+            let content = '';
+            if (val !== null && val !== undefined) {
+                // simple XML escaping
+                content = String(val)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&apos;');
+            }
+
+            xml += `    <${tagName}>${content}</${tagName}>\n`;
+        });
+        xml += '  </row>\n';
+    });
+    xml += '</results>';
+
+    vscode.postMessage({
+        command: 'exportXml',
+        data: xml
+    });
+}
+
+function exportToSqlInsert() {
+    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
+
+    const table = grids[activeGridIndex].tanTable;
+    const rows = table.getFilteredRowModel().rows;
+    const headers = table.getAllColumns().filter(col => col.getIsVisible());
+    const rsColumns = window.resultSets[activeGridIndex].columns;
+
+    const tableName = 'EXPORT_TABLE';
+    const colNames = headers.map(h => h.columnDef.header.replace(/[^a-zA-Z0-9_]/g, '') || 'COL').join(', ');
+
+    let sql = '';
+
+    rows.forEach(row => {
+        const values = headers.map(header => {
+            const val = getValueForExport(row, header.id, rsColumns);
+
+            if (val === null || val === undefined) {
+                return 'NULL';
+            }
+
+            if (typeof val === 'number') {
+                return val;
+            }
+
+            if (typeof val === 'boolean') {
+                return val ? 'TRUE' : 'FALSE';
+            }
+
+            // Handle BigInt (might come as number or string depending on serialization)
+            // But typeof val would catch it if it was supported as primitive, assuming serialization handled it.
+
+            // String escaping for SQL
+            const str = String(val);
+            return `'${str.replace(/'/g, "''")}'`;
+        });
+
+        sql += `INSERT INTO ${tableName} (${colNames}) VALUES (${values.join(', ')});\n`;
+    });
+
+    vscode.postMessage({
+        command: 'exportSqlInsert',
+        data: sql
+    });
+}
+
+function exportToMarkdown() {
+    if (!grids[activeGridIndex] || !grids[activeGridIndex].tanTable) return;
+
+    const table = grids[activeGridIndex].tanTable;
+    const rows = table.getFilteredRowModel().rows;
+    const headers = table.getAllColumns().filter(col => col.getIsVisible());
+    const rsColumns = window.resultSets[activeGridIndex].columns;
+
+    // Header
+    let md = '| ' + headers.map(h => h.columnDef.header.replace(/\|/g, '\\|')).join(' | ') + ' |\n';
+
+    // Separator
+    md += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
+
+    // Rows
+    rows.forEach(row => {
+        const rowData = headers.map(header => {
+            const val = getValueForExport(row, header.id, rsColumns);
+            if (val === null || val === undefined) return '';
+            // Escape pipes and newlines
+            return String(val).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+        });
+        md += '| ' + rowData.join(' | ') + ' |\n';
+    });
+
+    vscode.postMessage({
+        command: 'exportMarkdown',
+        data: md
+    });
+}
+
 // Function to handle drag over events on grouping panel
 function onDragOverGroup(event) {
     event.preventDefault();

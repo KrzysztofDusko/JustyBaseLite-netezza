@@ -124,14 +124,8 @@ export class MetadataCache {
                     }
                 }
 
-                // Load columnCache
-                if (json.columnCache) {
-                    for (const [key, entry] of Object.entries(json.columnCache as Record<string, { data: any[], timestamp: number }>)) {
-                        if ((now - entry.timestamp) < this.CACHE_TTL) {
-                            this.columnCache.set(key, entry);
-                        }
-                    }
-                }
+                // columnCache is NOT loaded from disk - kept in memory only for performance
+                // This significantly reduces cache file size and load time for large schemas
             }
         } catch (e) {
             console.error('[MetadataCache] Error loading cache from disk:', e);
@@ -177,7 +171,7 @@ export class MetadataCache {
                 dbCache: exportMap(this.dbCache),
                 schemaCache: exportMap(this.schemaCache),
                 tableCache: exportMap(this.tableCache),
-                columnCache: exportMap(this.columnCache),
+                // columnCache is NOT persisted - kept in memory only for performance
                 tableIdMap: exportTableIdMap(this.tableIdMap)
             };
 

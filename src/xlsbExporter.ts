@@ -9,6 +9,36 @@ import XlsbWriter = require('../ExcelHelpers/XlsbWriter');
 // const odbc = require('odbc'); // Removed odbc dependency
 
 /**
+ * Convert a value to number if it's a numeric string (for proper Excel formatting).
+ * This handles numeric/decimal types that may be returned as strings for precision preservation.
+ * @param val - Value to potentially convert
+ * @returns The value as number if it's a numeric string, otherwise the original value
+ */
+function convertToNumberIfNumericString(val: any): any {
+    if (typeof val === 'string' && val.length > 0) {
+        // Check if it's a numeric string (including negatives and decimals)
+        // Match: optional minus, digits, optional decimal part
+        if (/^-?\d+(\.\d+)?$/.test(val)) {
+            const num = parseFloat(val);
+            // Only convert if it's a finite number
+            if (Number.isFinite(num)) {
+                return num;
+            }
+        }
+    }
+    return val;
+}
+
+/**
+ * Convert all numeric strings in a row to numbers for proper Excel export
+ * @param row - Array of values
+ * @returns New array with numeric strings converted to numbers
+ */
+function convertRowNumericStrings(row: any[]): any[] {
+    return row.map(convertToNumberIfNumericString);
+}
+
+/**
  * Progress callback function type
  */
 export type ProgressCallback = (message: string) => void;
@@ -73,7 +103,7 @@ export async function exportQueryToXlsb(
         const config = parseConnectionString(connectionString);
         if (!config.port) config.port = 5480;
 
-        const NzConnection = require('../driver/src/NzConnection');
+        const NzConnection = require('../driver/dist/NzConnection');
         connection = new NzConnection(config);
         await connection.connect();
 
@@ -118,7 +148,8 @@ export async function exportQueryToXlsb(
                     for (let i = 0; i < reader.fieldCount; i++) {
                         row.push(reader.getValue(i));
                     }
-                    rows.push(row);
+                    // Convert numeric strings to numbers for proper Excel formatting
+                    rows.push(convertRowNumericStrings(row));
                     rowCount++;
                 }
 
@@ -276,7 +307,8 @@ export async function exportCsvToXlsb(
                 if (index === 0) {
                     headers = fields;
                 } else {
-                    rows.push(fields);
+                    // Convert numeric strings to numbers for proper Excel formatting
+                    rows.push(convertRowNumericStrings(fields));
                     currentRowCount++;
                 }
             });

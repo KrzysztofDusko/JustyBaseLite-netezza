@@ -203,7 +203,7 @@ export async function runQueryRaw(context: vscode.ExtensionContext, query: strin
             shouldCloseConnection = false; // Don't close persistent connection
         } else {
             // Create new connection
-            const NzConnection = require('../driver/src/NzConnection');
+            const NzConnection = require('../driver/dist/NzConnection');
             const details = await connManager.getConnection(resolvedConnectionName);
             if (!details) {
                 throw new Error(`Connection '${resolvedConnectionName}' not found`);
@@ -387,6 +387,95 @@ export async function runQuery(context: vscode.ExtensionContext, query: string, 
     }
 }
 
+/**
+ * Run EXPLAIN query and capture NOTICE messages as the result.
+ * Netezza returns EXPLAIN output via NOTICE messages, not as regular query results.
+ */
+export async function runExplainQuery(context: vscode.ExtensionContext, query: string, connectionName?: string, connectionManager?: ConnectionManager, documentUri?: string): Promise<string> {
+    const connManager = connectionManager || new ConnectionManager(context);
+    const keepConnectionOpen = connManager.getKeepConnectionOpen();
+
+    // Collect all notices
+    const notices: string[] = [];
+
+    // Resolve connection name
+    let resolvedConnectionName = connectionName;
+    if (!resolvedConnectionName && documentUri) {
+        resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
+    }
+    if (!resolvedConnectionName) {
+        resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
+    }
+    if (!resolvedConnectionName) {
+        throw new Error('No connection selected');
+    }
+
+    let connection;
+    let shouldCloseConnection = true;
+
+    try {
+        if (keepConnectionOpen) {
+            connection = await connManager.getPersistentConnection(resolvedConnectionName);
+            shouldCloseConnection = false;
+        } else {
+            const NzConnection = require('../driver/dist/NzConnection');
+            const details = await connManager.getConnection(resolvedConnectionName);
+            if (!details) {
+                throw new Error(`Connection '${resolvedConnectionName}' not found`);
+            }
+            const config = {
+                host: details.host,
+                port: details.port || 5480,
+                database: details.database,
+                user: details.user,
+                password: details.password
+            };
+            connection = new NzConnection(config);
+            await connection.connect();
+        }
+
+        // Attach listener to capture notices
+        const noticeHandler = (msg: any) => {
+            notices.push(msg.message);
+        };
+        connection.on('notice', noticeHandler);
+
+        try {
+            const config = vscode.workspace.getConfiguration('netezza');
+            const queryTimeout = config.get<number>('queryTimeout', 1800);
+
+            const cmd = connection.createCommand(query);
+            cmd.commandTimeout = queryTimeout;
+
+            if (documentUri) {
+                executingCommands.set(documentUri, cmd);
+            }
+
+            try {
+                const reader = await cmd.executeReader();
+                // Consume any results (EXPLAIN usually doesn't return rows, just notices)
+                while (await reader.read()) {
+                    // Ignore actual rows, we only care about notices
+                }
+            } finally {
+                if (documentUri) {
+                    executingCommands.delete(documentUri);
+                }
+            }
+        } finally {
+            // Remove notice listener
+            connection.removeListener('notice', noticeHandler);
+        }
+    } finally {
+        if (shouldCloseConnection && connection) {
+            await connection.close();
+        }
+    }
+
+    // Return all captured notices as a single string
+    return notices.join('\n');
+}
+
 export async function runQueriesSequentially(context: vscode.ExtensionContext, queries: string[], connectionManager?: ConnectionManager, documentUri?: string, logCallback?: (msg: string) => void, resultCallback?: (results: QueryResult[]) => void): Promise<QueryResult[]> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
@@ -428,7 +517,7 @@ export async function runQueriesSequentially(context: vscode.ExtensionContext, q
             connection = await connManager.getPersistentConnection(resolvedConnectionName);
             shouldCloseConnection = false; // Don't close persistent connection
         } else {
-            const NzConnection = require('../driver/src/NzConnection');
+            const NzConnection = require('../driver/dist/NzConnection');
             const config = {
                 host: details.host,
                 port: details.port || 5480,

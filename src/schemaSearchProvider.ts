@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { runQuery } from './queryRunner';
 import { MetadataCache } from './metadataCache';
 import { ConnectionManager } from './connectionManager';
+import { searchInCode } from './sqlTextUtils';
 
 export class SchemaSearchProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.search';
@@ -32,6 +33,9 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             switch (data.type) {
                 case 'search':
                     await this.search(data.value);
+                    break;
+                case 'searchSource':
+                    await this.searchSourceCode(data.value);
                     break;
                 case 'navigate':
                     // Execute command to reveal item in schema tree
@@ -217,6 +221,117 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * Search in VIEW/PROCEDURE source code, excluding comments and string literals
+     */
+    private async searchSourceCode(term: string) {
+        if (!term || term.length < 2) {
+            return;
+        }
+
+        // Determine active connection
+        let connectionName: string | undefined;
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor && activeEditor.document.languageId === 'sql') {
+            connectionName = this.connectionManager.getConnectionForExecution(activeEditor.document.uri.toString());
+        }
+        if (!connectionName) {
+            connectionName = this.connectionManager.getActiveConnectionName() || undefined;
+        }
+        if (!connectionName) {
+            this._view?.webview.postMessage({ type: 'results', data: [], append: false });
+            return;
+        }
+
+        const searchId = ++this.currentSearchId;
+        const statusBarDisposable = vscode.window.setStatusBarMessage(`$(loading~spin) Searching in source code for "${term}"...`);
+
+        try {
+            // Clear previous results
+            if (this._view && searchId === this.currentSearchId) {
+                this._view.webview.postMessage({ type: 'results', data: [], append: false });
+            }
+
+            const safeTerm = term.toUpperCase();
+            const results: any[] = [];
+
+            // 1. Search in VIEW definitions
+            const viewQuery = `
+                SELECT VIEWNAME AS NAME, SCHEMA, DATABASE, DEFINITION AS SOURCE
+                FROM _V_VIEW
+            `;
+
+            try {
+                const viewResultJson = await runQuery(this.context, viewQuery, true, connectionName, this.connectionManager);
+                if (viewResultJson && searchId === this.currentSearchId) {
+                    if (!viewResultJson.startsWith('Query executed successfully')) {
+                        const views = JSON.parse(viewResultJson);
+                        for (const view of views) {
+                            if (view.SOURCE && searchInCode(view.SOURCE, safeTerm)) {
+                                results.push({
+                                    NAME: view.NAME,
+                                    SCHEMA: view.SCHEMA,
+                                    DATABASE: view.DATABASE,
+                                    TYPE: 'VIEW',
+                                    PARENT: '',
+                                    DESCRIPTION: 'Found in view source (excluding comments/strings)',
+                                    MATCH_TYPE: 'SOURCE_CODE',
+                                    connectionName
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Error searching views:', e);
+            }
+
+            // 2. Search in PROCEDURE sources
+            const procQuery = `
+                SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE
+                FROM _V_PROCEDURE
+            `;
+
+            try {
+                const procResultJson = await runQuery(this.context, procQuery, true, connectionName, this.connectionManager);
+                if (procResultJson && searchId === this.currentSearchId) {
+                    if (!procResultJson.startsWith('Query executed successfully')) {
+                        const procs = JSON.parse(procResultJson);
+                        for (const proc of procs) {
+                            if (proc.SOURCE && searchInCode(proc.SOURCE, safeTerm)) {
+                                results.push({
+                                    NAME: proc.NAME,
+                                    SCHEMA: proc.SCHEMA,
+                                    DATABASE: proc.DATABASE,
+                                    TYPE: 'PROCEDURE',
+                                    PARENT: '',
+                                    DESCRIPTION: 'Found in procedure source (excluding comments/strings)',
+                                    MATCH_TYPE: 'SOURCE_CODE',
+                                    connectionName
+                                });
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Error searching procedures:', e);
+            }
+
+            // Send results
+            if (this._view && searchId === this.currentSearchId) {
+                this._view.webview.postMessage({ type: 'results', data: results, append: false });
+            }
+
+        } catch (e: any) {
+            console.error('Source code search error:', e);
+            if (this._view && searchId === this.currentSearchId) {
+                this._view.webview.postMessage({ type: 'error', message: e.message });
+            }
+        } finally {
+            statusBarDisposable.dispose();
+        }
+    }
+
     private _getHtmlForWebview(webview: vscode.Webview) {
         return `<!DOCTYPE html>
     <html lang="en">
@@ -294,12 +409,36 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 0% { transform: rotate(0deg); }
                 100% { transform: rotate(360deg); }
             }
+            .options-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 5px 10px;
+                font-size: 12px;
+                border-bottom: 1px solid var(--vscode-panel-border);
+            }
+            .options-row label {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                cursor: pointer;
+            }
+            .options-row input[type="checkbox"] {
+                margin: 0;
+                cursor: pointer;
+            }
         </style>
     </head>
     <body>
         <div class="search-box">
             <input type="text" id="searchInput" placeholder="Search tables, columns, view definitions, procedure source..." />
             <button id="searchBtn" class="primary">Search</button>
+        </div>
+        <div class="options-row">
+            <label>
+                <input type="checkbox" id="sourceOnlyCheck" />
+                Source Code Only (exclude comments/strings)
+            </label>
         </div>
         <div id="status"></div>
         <ul class="results" id="resultsList"></ul>
@@ -309,6 +448,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             const vscode = acquireVsCodeApi();
             const searchInput = document.getElementById('searchInput');
             const searchBtn = document.getElementById('searchBtn');
+            const sourceOnlyCheck = document.getElementById('sourceOnlyCheck');
             const resultsList = document.getElementById('resultsList');
             const status = document.getElementById('status');
 
@@ -316,7 +456,8 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 const term = searchInput.value;
                 if (term) {
                     status.innerHTML = '<span class="spinner"></span> Searching...';
-                    vscode.postMessage({ type: 'search', value: term });
+                    const messageType = sourceOnlyCheck.checked ? 'searchSource' : 'search';
+                    vscode.postMessage({ type: messageType, value: term });
                 }
             });
 

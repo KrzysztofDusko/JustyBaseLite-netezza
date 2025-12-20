@@ -46,6 +46,18 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'copyAsExcel':
                     this.copyAsExcel(message.data, message.sql);
                     return;
+                case 'exportJson':
+                    this.exportJson(message.data);
+                    return;
+                case 'exportXml':
+                    this.exportXml(message.data);
+                    return;
+                case 'exportSqlInsert':
+                    this.exportSqlInsert(message.data);
+                    return;
+                case 'exportMarkdown':
+                    this.exportMarkdown(message.data);
+                    return;
                 case 'switchSource':
                     this._activeSourceUri = message.sourceUri;
                     this._updateWebview();
@@ -416,6 +428,50 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', data, sql);
     }
 
+    private async exportJson(content: string) {
+        const uri = await vscode.window.showSaveDialog({
+            filters: { 'JSON Files': ['json'] },
+            saveLabel: 'Export JSON'
+        });
+        if (uri) {
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+        }
+    }
+
+    private async exportXml(content: string) {
+        const uri = await vscode.window.showSaveDialog({
+            filters: { 'XML Files': ['xml'] },
+            saveLabel: 'Export XML'
+        });
+        if (uri) {
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+        }
+    }
+
+    private async exportSqlInsert(content: string) {
+        const uri = await vscode.window.showSaveDialog({
+            filters: { 'SQL Files': ['sql'] },
+            saveLabel: 'Export SQL'
+        });
+        if (uri) {
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+        }
+    }
+
+    private async exportMarkdown(content: string) {
+        const uri = await vscode.window.showSaveDialog({
+            filters: { 'Markdown Files': ['md'] },
+            saveLabel: 'Export Markdown'
+        });
+        if (uri) {
+            await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+        }
+    }
+
     private closeSource(sourceUri: string) {
         if (this._resultsMap.has(sourceUri)) {
             this._resultsMap.delete(sourceUri);
@@ -497,6 +553,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             excel: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6 3h8v10H6V3zm-1 0H3v10h2V3zm-2-1h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M6 6h8v1H6V6zm0 2h8v1H6V8zm0 2h8v1H6v-1z"/></svg>`,
             copy: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M4 4h7v2H4V4zm0 4h7v2H4V8zm0 4h7v2H4v-2zM2 1h12v14H2V1zm1 1v12h10V2H3z"/></svg>`,
             csv: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13 2H6L2 6v8a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zm-1 11H4V7h3V4h5v9z"/></svg>`,
+            json: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M5 2c0-1.1.9-2 2-2h2a2 2 0 0 1 2 2v2h-2V2H7v2H5V2zm0 12c0 1.1.9 2 2 2h2a2 2 0 0 0 2-2v-2h-2v2H7v-2H5v2zM2 7v2h2V7H2zm10 0v2h2V7h-2z"/></svg>`,
+            xml: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M11.5 1L7 15h2l4.5-14h-2zM4.5 1L0 15h2l4.5-14h-2z"/></svg>`,
+            sql: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 0C3.6 0 0 1.8 0 4v8c0 2.2 3.6 4 8 4s8-1.8 8-4V4c0-2.2-3.6-4-8-4zm0 2c3.3 0 6 1.3 6 3s-2.7 3-6 3-6-1.3-6-3 2.7-3 6-3zm0 12c-3.3 0-6-1.3-6-3V9c1.6 1.7 4.3 2 6 2s4.4-.3 6-2v2c0 1.7-2.7 3-6 3z"/></svg>`,
+            markdown: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14.5 2H1.5C.7 2 0 2.7 0 3.5v9C0 13.3.7 14 1.5 14h13c.8 0 1.5-.7 1.5-1.5v-9c0-.8-.7-1.5-1.5-1.5zM3 11V5l2 2 2-2v6H6V7l-1 1-1-1v4H3zm10 0h-2V9h-2v2H7V5h2v2h2V5h2v6z"/></svg>`,
+            export: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6 3h8v10H6V3zm-1 0H3v10h2V3zm-2-1h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M6 6h8v1H6V6zm0 2h8v1H6V8zm0 2h8v1H6v-1z"/><path d="M10 12L8 14L6 12" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>`, // Custom combo icon
             checkAll: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13.485 1.929l1.414 1.414-9.9 9.9-4.243-4.242 1.415-1.415 2.828 2.829z"/></svg>`,
             clear: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 7.293l4.146-4.147.708.708L8.707 8l4.147 4.146-.708.708L8 8.707l-4.146 4.147-.708-.708L7.293 8 3.146 3.854l.708-.708L8 7.293z"/></svg>`
         };
@@ -519,10 +580,42 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             <div class="controls">
                 <input type="text" id="globalFilter" placeholder="Filter..." onkeyup="onFilterChanged()" style="background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px;">
                 <button onclick="toggleRowView()" title="Toggle Row View">${icons.eye} Row View</button>
-                <button onclick="openInExcel()" title="Open results in Excel">${icons.excel} Excel</button>
+                
+                <!-- Split Button for Export -->
+                <div class="split-btn-container">
+                    <button id="exportMainBtn" class="split-btn-main" onclick="executeSplitExport()" title="Export results (Excel)">
+                        ${icons.excel} Excel
+                    </button>
+                    <button id="exportArrowBtn" class="split-btn-arrow" onclick="toggleExportMenu()" title="Select export format">
+                        <svg width="10" height="10" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+                            <path d="M8 11L3 6h10l-5 5z"/>
+                        </svg>
+                    </button>
+                    <div id="exportMenu" class="split-btn-menu" style="display:none;">
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('excel')">
+                            ${icons.excel} Excel (XLSB)
+                        </div>
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('csv')">
+                            ${icons.csv} CSV
+                        </div>
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('json')">
+                            ${icons.json} JSON
+                        </div>
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('xml')">
+                            ${icons.xml} XML
+                        </div>
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('sql')">
+                            ${icons.sql} SQL INSERT
+                        </div>
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('markdown')">
+                            ${icons.markdown} Markdown Table
+                        </div>
+                    </div>
+                </div>
+
+                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 2px;"></div>
                 <button onclick="copyAsExcel()" title="Copy results as Excel to clipboard">${icons.excel} Excel Copy</button>
-                <button onclick="exportToCsv()" title="Export results to CSV">${icons.csv} CSV</button>
-                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 4px;"></div>
+                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 2px;"></div>
                 <button onclick="selectAll()" title="Select all rows">${icons.checkAll} Select All</button>
                 <button onclick="copySelection(false)" title="Copy selected cells to clipboard">${icons.copy} Copy</button>
                 <button onclick="copySelection(true)" title="Copy selected cells with headers">${icons.copy} Copy w/ Headers</button>

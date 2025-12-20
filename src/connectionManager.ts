@@ -216,7 +216,7 @@ export class ConnectionManager {
             // existing = await odbc.connect({ connectionString: connString, fetchArray: true });
 
             // Use JsNzDriver
-            const NzConnection = require('../driver/src/NzConnection');
+            const NzConnection = require('../driver/dist/NzConnection');
             const details = this._connections[targetName];
 
             // Map details to config

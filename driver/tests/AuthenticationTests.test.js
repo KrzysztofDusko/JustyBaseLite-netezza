@@ -1,8 +1,8 @@
-const NzConnection = require('../src/NzConnection');
-const { NetezzaException } = require('../src/NzConnection'); // Check if exposed? Likely not. Just Check Error.
+const NzConnection = require('../dist/NzConnection');
+const { NetezzaException } = require('../dist/NzConnection'); // Check if exposed? Likely not. Just Check Error.
 
 const config = {
-    host: '192.168.0.102',
+    host: 'nps_hyperv.mshome.net',
     port: 5480,
     database: 'JUST_DATA',
     user: 'admin',

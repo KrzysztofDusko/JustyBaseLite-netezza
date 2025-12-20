@@ -1,9 +1,9 @@
-const NzConnection = require('../src/NzConnection');
+const NzConnection = require('../dist/NzConnection');
 const fs = require('fs');
 
 // Configuration
 const config = {
-    host: '192.168.0.102',
+    host: 'nps_hyperv.mshome.net',
     port: 5480,
     database: 'JUST_DATA',
     user: 'admin',

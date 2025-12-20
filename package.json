@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.13",
+  "version": "0.0.15",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -235,6 +235,41 @@
         "command": "netezza.createProcedure",
         "title": "Create New Procedure",
         "icon": "$(add)"
+      },
+      {
+        "command": "netezza.explainQuery",
+        "title": "Explain Query Plan",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "netezza.explainQueryVerbose",
+        "title": "Explain Query Plan (Verbose)",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "netezza.formatSQL",
+        "title": "Format SQL",
+        "icon": "$(symbol-color)"
+      },
+      {
+        "command": "netezza.compareSchema",
+        "title": "Compare With...",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "netezza.batchExportDDL",
+        "title": "Export All DDL",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "netezza.showERD",
+        "title": "Show Entity Relationship Diagram",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "netezza.showSessionMonitor",
+        "title": "Session Monitor Dashboard",
+        "icon": "$(dashboard)"
       }
     ],
     "menus": {
@@ -288,6 +323,16 @@
           "command": "netezza.importData",
           "when": "resourceLangId == sql",
           "group": "navigation@13"
+        },
+        {
+          "command": "netezza.explainQuery",
+          "when": "resourceLangId == sql",
+          "group": "navigation@7"
+        },
+        {
+          "command": "netezza.formatSQL",
+          "when": "resourceLangId == sql",
+          "group": "navigation@8"
         }
       ],
       "editor/context": [
@@ -330,6 +375,11 @@
           "command": "netezza.jumpToSchema",
           "when": "editorTextFocus && resourceLangId == sql",
           "group": "navigation"
+        },
+        {
+          "command": "netezza.formatSQL",
+          "when": "resourceLangId == sql",
+          "group": "1_modification"
         }
       ],
       "view/title": [
@@ -340,6 +390,11 @@
         },
         {
           "command": "netezza.refreshSchema",
+          "when": "view == netezza.schema",
+          "group": "navigation"
+        },
+        {
+          "command": "netezza.showSessionMonitor",
           "when": "view == netezza.schema",
           "group": "navigation"
         }
@@ -424,6 +479,26 @@
           "command": "netezza.createProcedure",
           "when": "view == netezza.schema && viewItem == typeGroup:PROCEDURE",
           "group": "0_create"
+        },
+        {
+          "command": "netezza.compareSchema",
+          "when": "view == netezza.schema && viewItem =~ /netezza:(TABLE|VIEW|PROCEDURE)/",
+          "group": "6_compare"
+        },
+        {
+          "command": "netezza.batchExportDDL",
+          "when": "view == netezza.schema && viewItem == database",
+          "group": "7_export"
+        },
+        {
+          "command": "netezza.batchExportDDL",
+          "when": "view == netezza.schema && viewItem =~ /typeGroup:(TABLE|VIEW|PROCEDURE|EXTERNAL TABLE|SYNONYM)/",
+          "group": "7_export"
+        },
+        {
+          "command": "netezza.showERD",
+          "when": "view == netezza.schema && viewItem == typeGroup:TABLE",
+          "group": "8_visualization"
         }
       ]
     },
@@ -434,6 +509,12 @@
         "injectTo": [
           "source.sql"
         ]
+      }
+    ],
+    "snippets": [
+      {
+        "language": "sql",
+        "path": "./snippets/netezza.code-snippets"
       }
     ],
     "configuration": {
@@ -459,6 +540,21 @@
           "type": "boolean",
           "default": true,
           "description": "Show warning when other SQL extensions (SQLTools, MS SQL, etc.) are detected that may cause conflicts."
+        },
+        "netezza.formatSQL.tabWidth": {
+          "type": "integer",
+          "default": 4,
+          "description": "Number of spaces for indentation in formatted SQL."
+        },
+        "netezza.formatSQL.keywordCase": {
+          "type": "string",
+          "default": "upper",
+          "enum": [
+            "upper",
+            "lower",
+            "preserve"
+          ],
+          "description": "Keyword case in formatted SQL."
         }
       }
     },
@@ -489,6 +585,18 @@
         "key": "ctrl+shift+v",
         "mac": "cmd+shift+v",
         "when": "editorTextFocus && (editorLangId == sql || editorLangId == mssql)"
+      },
+      {
+        "command": "netezza.explainQuery",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorLangId == sql || editorLangId == mssql"
+      },
+      {
+        "command": "netezza.formatSQL",
+        "key": "shift+alt+f",
+        "mac": "shift+option+f",
+        "when": "editorLangId == sql"
       }
     ]
   },
@@ -503,6 +611,7 @@
     "@types/node": "^16.0.0",
     "@types/vscode": "^1.80.0",
     "esbuild": "^0.27.1",
+    "sql-formatter": "^15.4.2",
     "typescript": "^5.9.3",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
