@@ -8,6 +8,14 @@
     --row-even: var(--vscode-editor-background);
     --row-odd: var(--vscode-list-oddRowBackground, rgba(255, 255, 255, 0.02));
     --cell-fg: var(--vscode-editor-foreground);
+    --input-bg: var(--vscode-input-background);
+    --input-fg: var(--vscode-input-foreground);
+    --input-border: var(--vscode-input-border);
+    --tab-inactive-bg: var(--vscode-editorGroupHeader-tabsBackground);
+    --tab-active-bg: var(--vscode-editor-background);
+    --tab-border: var(--vscode-contrastBorder, transparent);
+    --tab-active-fg: var(--vscode-tab-activeForeground);
+    --tab-inactive-fg: var(--vscode-tab-inactiveForeground);
 }
 
 html,
@@ -22,7 +30,39 @@ body {
     font-size: 13px;
 }
 
-/* Toolbar - matches controls from resultPanel */
+/* Tabs Container */
+.tabs-header {
+    display: flex;
+    background-color: var(--tab-inactive-bg);
+    border-bottom: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.tab {
+    padding: 8px 16px;
+    cursor: pointer;
+    color: var(--tab-inactive-fg);
+    border-right: 1px solid var(--border-color);
+    border-top: 1px solid transparent;
+    /* Highlight line placeholder */
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+}
+
+.tab:hover {
+    background-color: var(--row-hover);
+}
+
+.tab.active {
+    background-color: var(--tab-active-bg);
+    color: var(--tab-active-fg);
+    border-top-color: var(--vscode-tab-activeBorderTop, var(--vscode-activityBar-activeBorder));
+}
+
+
+/* Toolbar */
 .toolbar {
     padding: 8px;
     background-color: var(--vscode-editor-background);
@@ -41,6 +81,8 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 300px;
+    display: none;
+    /* Hidden in tabs view often, or kept? Let's hide if usage of tabs makes it clear */
 }
 
 .status {
@@ -55,8 +97,8 @@ body {
     gap: 6px;
 }
 
-/* Button Styles - matching resultPanel exactly */
-.actions button {
+/* Button Styles */
+button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -75,28 +117,166 @@ body {
     white-space: nowrap;
 }
 
-.actions button:hover {
+button:hover {
     background-color: var(--vscode-button-secondaryHoverBackground);
 }
 
-.actions button:active {
+button:active {
     transform: translateY(1px);
 }
 
-.actions button.primary {
+button.primary {
     background-color: var(--vscode-button-background);
     color: var(--vscode-button-foreground);
     border-color: var(--vscode-button-border, transparent);
 }
 
-.actions button.primary:hover {
+button.primary:hover {
     background-color: var(--vscode-button-hoverBackground);
 }
 
-.actions button:disabled {
+button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
     transform: none;
+}
+
+/* Main Layout */
+.main-layout {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+/* Metadata Panel (Tab Content) */
+.tab-content {
+    display: none;
+    flex: 1;
+    overflow: hidden;
+    flex-direction: column;
+}
+
+.tab-content.active {
+    display: flex;
+}
+
+.metadata-content {
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* Table Comment Section */
+.comment-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.section-label {
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    opacity: 0.8;
+    margin-bottom: 4px;
+}
+
+textarea.comment-box {
+    background-color: var(--input-bg);
+    color: var(--input-fg);
+    border: 1px solid var(--input-border);
+    padding: 8px;
+    font-family: var(--vscode-font-family);
+    font-size: 12px;
+    resize: vertical;
+    min-height: 60px;
+    outline: none;
+}
+
+textarea.comment-box:focus {
+    border-color: var(--vscode-focusBorder);
+}
+
+/* Metadata Grid inside Panel */
+.metadata-grid-container {
+    border: 1px solid var(--border-color);
+    overflow: auto;
+    max-height: 400px;
+}
+
+.metadata-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.metadata-table th,
+.metadata-table td {
+    border: 1px solid var(--border-color);
+    padding: 6px 10px;
+    text-align: left;
+}
+
+.metadata-table th {
+    background-color: var(--header-bg);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.metadata-table input.inline-edit {
+    width: 100%;
+    background: transparent;
+    border: 1px solid transparent;
+    color: inherit;
+    padding: 4px;
+}
+
+.metadata-table input.inline-edit:focus {
+    background-color: var(--input-bg);
+    border-color: var(--vscode-focusBorder);
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    color: var(--vscode-icon-foreground);
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 4px;
+}
+
+.icon-btn:hover {
+    opacity: 1;
+    color: var(--vscode-errorForeground);
+    /* Red for delete */
+}
+
+/* Add Column Form */
+.add-column-form {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    background-color: var(--vscode-editorWidget-background);
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    flex-wrap: wrap;
+    align-self: flex-start;
+}
+
+.form-input {
+    background-color: var(--input-bg);
+    color: var(--input-fg);
+    border: 1px solid var(--input-border);
+    padding: 6px;
+    font-size: 12px;
+}
+
+.form-input:focus {
+    border-color: var(--vscode-focusBorder);
 }
 
 /* Grid Container */
@@ -105,6 +285,8 @@ body {
     width: 100%;
     position: relative;
     overflow: auto;
+    display: flex;
+    flex-direction: column;
 }
 
 /* Table Styles - matching resultPanel exactly */
@@ -165,7 +347,6 @@ th:first-child {
     min-width: 40px;
     max-width: 40px;
     text-align: center;
-    padding: 4px;
 }
 
 .delete-btn {
@@ -205,7 +386,7 @@ td input:focus {
     border-radius: 1px;
 }
 
-/* Readonly Columns (ROWID) - like null-value style */
+/* Readonly Columns (ROWID) */
 td.readonly {
     background-color: rgba(0, 0, 0, 0.05);
 }
@@ -216,16 +397,11 @@ td.readonly {
     opacity: 0.7;
 }
 
-/* ========================================
-   EDITING STATE HIGHLIGHTS
-   ======================================== */
-
-/* Modified Cell - Yellow highlight */
+/* Editing State Highlights */
 .cell-modified {
     background-color: rgba(255, 200, 0, 0.15) !important;
 }
 
-/* New Row - Green highlight */
 .row-new {
     background-color: rgba(80, 200, 80, 0.12) !important;
 }
@@ -234,7 +410,6 @@ td.readonly {
     border-left: 3px solid rgba(80, 200, 80, 0.8);
 }
 
-/* Deleted Row - Red highlight with strikethrough */
 .row-deleted {
     background-color: rgba(255, 80, 80, 0.12) !important;
 }
@@ -248,12 +423,6 @@ td.readonly {
     pointer-events: none;
 }
 
-.row-deleted .delete-btn {
-    color: var(--vscode-foreground);
-    opacity: 0.4;
-}
-
-/* Empty state */
 .empty-state {
     display: flex;
     align-items: center;

@@ -805,6 +805,43 @@ END_PROC;`;
                 }
             }
         }),
+        vscode.commands.registerCommand('netezza.addColumnComment', async (item: any) => {
+            // item here is a SchemaItem for a column
+            // item.label is "COLNAME (TYPE)", item.parentName is the table name, item.dbName, item.schema
+            if (item && item.label && item.dbName && item.parentName) {
+                // Extract column name from label (e.g. "DATEKEY (INTEGER(4))" -> "DATEKEY")
+                const colName = item.label.split(' ')[0];
+                const tableName = item.parentName;
+                const schemaName = item.schema || 'ADMIN';
+                const fullColumnRef = `${item.dbName}.${schemaName}.${tableName}.${colName}`;
+
+                const comment = await vscode.window.showInputBox({
+                    prompt: `Enter comment for column "${colName}"`,
+                    placeHolder: 'e.g. Customer ID from CRM',
+                    value: item.objectDescription || ''
+                });
+
+                if (comment === undefined) {
+                    return;
+                }
+
+                const sql = `COMMENT ON COLUMN ${fullColumnRef} IS '${comment.replace(/'/g, "''")}';`;
+
+                try {
+                    const connectionString = await connectionManager.getConnectionString();
+                    if (!connectionString) {
+                        vscode.window.showErrorMessage('No database connection');
+                        return;
+                    }
+
+                    await runQuery(context, sql, true, item.connectionName, connectionManager);
+                    vscode.window.showInformationMessage(`Comment added to column: ${colName}`);
+                    schemaProvider.refresh();
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(`Error adding comment: ${err.message}`);
+                }
+            }
+        }),
         vscode.commands.registerCommand('netezza.generateStatistics', async (item: any) => {
             if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {
                 const fullName = `${item.dbName}.${item.schema}.${item.label}`;

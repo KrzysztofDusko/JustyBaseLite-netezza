@@ -2,14 +2,14 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
     "url": "https://www.linkedin.com/in/krzysztof-du%C5%9Bko-124b48195/"
   },
   "license": "MIT",
-  "icon": "Icon.png",
+  "icon": "IconSanta.png",
   "galleryBanner": {
     "color": "#0066CC",
     "theme": "dark"
@@ -147,6 +147,10 @@
       {
         "command": "netezza.addTableComment",
         "title": "Add/Edit Comment"
+      },
+      {
+        "command": "netezza.addColumnComment",
+        "title": "Add/Edit Column Comment"
       },
       {
         "command": "netezza.generateStatistics",
@@ -429,6 +433,11 @@
           "command": "netezza.addTableComment",
           "when": "view == netezza.schema && viewItem == netezza:TABLE",
           "group": "3_maintenance"
+        },
+        {
+          "command": "netezza.addColumnComment",
+          "when": "view == netezza.schema && viewItem == column",
+          "group": "1_actions"
         },
         {
           "command": "netezza.generateStatistics",

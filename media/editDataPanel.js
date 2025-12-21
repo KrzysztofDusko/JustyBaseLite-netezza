@@ -2,21 +2,20 @@ const vscode = acquireVsCodeApi();
 
 // State
 let tableData = {
-    original: [], // Original data for reference
-    working: [],  // Current working data (including edits)
-    columns: []
+    original: [],
+    working: [],
+    columns: [],
+    metadata: null
 };
 
 // Tracking Changes
 let changes = {
-    updates: {}, // Map<rowId, { col: newValue }>
-    deletes: new Set(), // Set<rowId>
-    inserts: [] // Array<newRowObj>
+    updates: {},
+    deletes: new Set(),
+    inserts: []
 };
 
-// Insert Counter for temporary IDs
 let nextInsertId = -1;
-
 let tanTable = null;
 let rowVirtualizer = null;
 
@@ -25,10 +24,10 @@ window.addEventListener('message', event => {
     const message = event.data;
     switch (message.command) {
         case 'setData':
-            initData(message.data, message.columns);
+            initData(message.data, message.columns, message.metadata);
             break;
         case 'setLoading':
-            setLoading(message.loading);
+            setLoading(message.loading, message.message);
             break;
         case 'setError':
             showError(message.text);
@@ -37,6 +36,7 @@ window.addEventListener('message', event => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Top Toolbar
     document.getElementById('refreshBtn').onclick = () => {
         if (hasUnsavedChanges() && !confirm('You have unsaved changes. Discard them?')) {
             return;
@@ -51,27 +51,55 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('addRowBtn').onclick = () => {
         addNewRow();
     };
+
+    // Tab Switching
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.onclick = () => {
+            const targetId = tab.dataset.target;
+            setActiveTab(targetId);
+        };
+    });
 });
 
-function setLoading(isLoading) {
-    const status = document.getElementById('status');
-    status.textContent = isLoading ? 'Loading...' : `${tableData.working.length} rows`;
+function setActiveTab(tabId) {
+    document.querySelectorAll('.tab').forEach(t => {
+        if (t.dataset.target === tabId) t.classList.add('active');
+        else t.classList.remove('active');
+    });
 
-    // Disable buttons while loading
-    document.getElementById('saveBtn').disabled = isLoading;
-    document.getElementById('refreshBtn').disabled = isLoading;
+    document.querySelectorAll('.tab-content').forEach(c => {
+        if (c.id === tabId) c.classList.add('active');
+        else c.classList.remove('active');
+    });
+}
+
+function setLoading(isLoading, message) {
+    const status = document.getElementById('status');
+    if (message) {
+        status.textContent = message;
+    } else {
+        status.textContent = isLoading ? 'Loading...' : (tableData.working ? `${tableData.working.length} rows` : '');
+    }
+
+    const btns = document.querySelectorAll('button');
+    btns.forEach(b => b.disabled = isLoading);
 }
 
 function showError(msg) {
     const container = document.getElementById('gridContainer');
-    container.innerHTML = `<div style="color: red; padding: 20px;">Error: ${msg}</div>`;
+    if (container) {
+        container.innerHTML = `<div style="color: var(--vscode-errorForeground); padding: 20px;">Error: ${msg}</div>`;
+    }
 }
 
-function initData(data, columns) {
-    // Reset state
-    tableData.original = JSON.parse(JSON.stringify(data)); // Deep copy
-    tableData.working = JSON.parse(JSON.stringify(data));  // Deep copy
+function initData(data, columns, metadata) {
+    console.log('[editDataPanel] initData received:', { dataRows: data ? data.length : 0, columns: columns ? columns.length : 0, metadata: !!metadata });
+    console.log('[editDataPanel] Sample data (first row):', data && data[0] ? JSON.stringify(data[0]).substring(0, 200) : 'none');
+
+    tableData.original = JSON.parse(JSON.stringify(data));
+    tableData.working = JSON.parse(JSON.stringify(data));
     tableData.columns = columns;
+    tableData.metadata = metadata;
 
     changes = {
         updates: {},
@@ -80,6 +108,7 @@ function initData(data, columns) {
     };
     nextInsertId = -1;
 
+    renderMetadataPanel();
     renderTable();
     setLoading(false);
 }
@@ -90,34 +119,165 @@ function hasUnsavedChanges() {
         changes.inserts.length > 0;
 }
 
+// --- Metadata Panel ---
+function renderMetadataPanel() {
+    const container = document.getElementById('metadataContent');
+    if (!container) return;
+
+    container.innerHTML = '';
+
+    if (!tableData.metadata) {
+        container.innerHTML = '<i>No metadata available</i>';
+        return;
+    }
+
+    const { tableComment, columns } = tableData.metadata;
+
+    // 1. Table Comment Section
+    const commentSection = document.createElement('div');
+    commentSection.className = 'comment-section';
+    commentSection.innerHTML = `
+        <div class="section-actions" style="display:flex; justify-content:space-between; align-items:flex-end;">
+            <span class="section-label">Table Comment</span>
+            <button id="saveTableCommentBtn" class="small-btn">Update Comment</button>
+        </div>
+        <textarea id="tableCommentBox" class="comment-box" placeholder="No description">${tableComment || ''}</textarea>
+    `;
+    container.appendChild(commentSection);
+
+    document.getElementById('saveTableCommentBtn').onclick = () => {
+        const newComment = document.getElementById('tableCommentBox').value;
+        vscode.postMessage({ command: 'updateTableComment', comment: newComment });
+    };
+
+    // 2. Columns Metadata Grid
+    const gridSection = document.createElement('div');
+    gridSection.className = 'column-list-section';
+
+    const tableHtml = `
+        <div class="metadata-grid-container">
+            <table class="metadata-table">
+                <thead>
+                    <tr>
+                        <th style="width:30px"></th>
+                        <th>Column Name</th>
+                        <th>Type</th>
+                        <th>Not Null?</th> 
+                        <th>Default</th>
+                        <th>Comment</th>
+                        <th style="width:30px"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${columns.map(col => `
+                        <tr>
+                            <td style="text-align:center;">
+                                ${col.IS_PK == 1 ? '🔑' : ''}
+                                ${col.IS_FK == 1 ? '🔗' : ''}
+                            </td>
+                            <td>${col.ATTNAME}</td>
+                            <td>${col.FORMAT_TYPE}</td>
+                            <td style="text-align:center;">${col.IS_NOT_NULL == 1 ? 'YES' : 'NO'}</td>
+                            <td>${col.COLDEFAULT || ''}</td>
+                            <td style="padding:0;">
+                                <input type="text" 
+                                    class="inline-edit col-comment" 
+                                    data-col="${col.ATTNAME}" 
+                                    value="${(col.DESCRIPTION || '').replace(/"/g, '&quot;')}" 
+                                    placeholder="Add comment..."
+                                >
+                            </td>
+                            <td style="text-align:center;">
+                                <button class="icon-btn delete-col-btn" data-col="${col.ATTNAME}" title="Drop Column">×</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+    gridSection.innerHTML = `<div class="section-label" style="margin-bottom:5px;">Columns</div>` + tableHtml;
+    container.appendChild(gridSection);
+
+    // Bind Metadata Events - Comment updates
+    container.querySelectorAll('.col-comment').forEach(input => {
+        input.onblur = (e) => {
+            const colName = e.target.dataset.col;
+            const newComment = e.target.value;
+            const original = columns.find(c => c.ATTNAME === colName);
+            if (original && (original.DESCRIPTION || '') !== newComment) {
+                vscode.postMessage({ command: 'updateColumnComment', column: colName, comment: newComment });
+            }
+        };
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') e.target.blur();
+        };
+    });
+
+    // Delete column buttons
+    container.querySelectorAll('.delete-col-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            const colName = e.target.dataset.col;
+            if (confirm(`Are you sure you want to DROP column "${colName}"? This cannot be undone.`)) {
+                vscode.postMessage({ command: 'dropColumn', column: colName });
+            }
+        };
+    });
+
+    // 3. Add Column Form
+    const addSection = document.createElement('div');
+    addSection.className = 'add-column-form';
+    addSection.innerHTML = `
+        <span style="font-weight:600; font-size:11px;">ADD COLUMN:</span>
+        <input type="text" id="newColName" class="form-input" placeholder="Name" style="width:120px;">
+        <input type="text" id="newColType" class="form-input" placeholder="Type (e.g. INTEGER)" style="width:140px;">
+        <button id="addColBtn">Add</button>
+    `;
+    container.appendChild(addSection);
+
+    document.getElementById('addColBtn').onclick = () => {
+        const name = document.getElementById('newColName').value;
+        const type = document.getElementById('newColType').value;
+        if (!name || !type) {
+            showError("Column Name and Type are required.");
+            return;
+        }
+        vscode.postMessage({ command: 'addColumn', name, type });
+    };
+}
+
+
+// --- Main Data Table ---
+
 function renderTable() {
+    console.log('[editDataPanel] renderTable called. tableData.working:', tableData.working ? tableData.working.length : 'null');
+    console.log('[editDataPanel] tableData.columns:', tableData.columns);
+
     const container = document.getElementById('gridContainer');
+    console.log('[editDataPanel] gridContainer found:', !!container);
     container.innerHTML = '';
 
     if (!tableData.working || tableData.working.length === 0) {
-        container.innerHTML = '<div style="padding: 20px;">No data</div>';
+        container.innerHTML = '<div class="empty-state">No data in table or loading failed</div>';
+        console.log('[editDataPanel] renderTable: No working data, showing empty state');
         return;
     }
 
-    if (!TableCore || !VirtualCore) {
+    if (typeof TableCore === 'undefined' || typeof VirtualCore === 'undefined') {
         container.innerHTML = 'Error: Libraries not loaded';
+        console.log('[editDataPanel] renderTable: Libraries not loaded');
         return;
     }
 
-    // Column Definitions
+    console.log('[editDataPanel] renderTable: Libraries loaded, building table...');
+
     const columnDefs = [
-        // Action Column
         {
             id: '__actions',
             header: '',
             size: 40,
             cell: info => {
                 const row = info.row.original;
-                const rowId = row.ROWID || row.__tempId;
-
-                // If deleted, show undo? Or just nothing (since it's styled deleted)
-                // Let's rely on row click or context menu, but a delete button is explicit.
-
                 const btn = document.createElement('span');
                 btn.className = 'delete-btn';
                 btn.textContent = '×';
@@ -142,21 +302,15 @@ function renderTable() {
                     return `<span class="readonly-val">${value !== null ? value : 'NULL'}</span>`;
                 }
 
-                // Create Input
                 const input = document.createElement('input');
                 input.value = value !== null ? value : '';
                 input.placeholder = 'NULL';
 
-                // Track Changes
                 input.onblur = () => {
                     if (isReadOnly) return;
                     const newValue = input.value;
                     updateCell(rowId, col, newValue, value);
-                    // Check if value changed from original to highlight
-                    // But we used working data to render, so we need to check if it differs from what's in updates
-                    // Or compare with original if found.
 
-                    // Re-render handled by state update usually, but for performance we might just toggle class
                     const parentTd = input.parentElement;
                     if (isModified(rowId, col)) {
                         parentTd.classList.add('cell-modified');
@@ -164,40 +318,34 @@ function renderTable() {
                         parentTd.classList.remove('cell-modified');
                     }
                 };
-
                 return input;
             }
         }))
     ];
 
-    // Create Table Instance
-    tanTable = TableCore.createTable({
-        data: tableData.working,
-        columns: columnDefs,
-        defaultColumn: {
-            size: 150,
-            minSize: 50,
-            maxSize: 500
-        },
-        state: {
-            columnPinning: { left: [], right: [] },
-            columnSizing: { __actions: 40 },
-            sorting: [],
-            columnVisibility: {},
-            rowSelection: {}
-        },
-        onColumnPinningChange: () => { },
-        onSortingChange: () => { },
-        onColumnVisibilityChange: () => { },
-        onColumnSizingChange: () => { },
+    try {
+        tanTable = TableCore.createTable({
+            data: tableData.working,
+            columns: columnDefs,
+            defaultColumn: {
+                size: 150,
+                minSize: 50,
+                maxSize: 500
+            },
+            state: {
+                columnPinning: { left: [], right: [] },
+                columnSizing: { __actions: 40 },
+            },
+            getCoreRowModel: TableCore.getCoreRowModel(),
+            getSortedRowModel: TableCore.getSortedRowModel(),
+        });
+        console.log('[editDataPanel] TanStack Table created successfully');
+    } catch (e) {
+        console.error('[editDataPanel] Error creating TanStack Table:', e);
+        container.innerHTML = '<div class="empty-state">Error creating table: ' + e.message + '</div>';
+        return;
+    }
 
-        getCoreRowModel: TableCore.getCoreRowModel(),
-        getSortedRowModel: TableCore.getSortedRowModel(),
-        getFilteredRowModel: TableCore.getFilteredRowModel(),
-        getExpandedRowModel: TableCore.getExpandedRowModel(),
-    });
-
-    // Virtualizer
     const wrapper = document.createElement('div');
     wrapper.style.height = '100%';
     wrapper.style.overflow = 'auto';
@@ -211,120 +359,125 @@ function renderTable() {
     tableEl.appendChild(tbody);
     wrapper.appendChild(tableEl);
 
-    // Header
+    // Render header
     tanTable.getHeaderGroups().forEach(headerGroup => {
         const tr = document.createElement('tr');
         headerGroup.headers.forEach(header => {
             const th = document.createElement('th');
             th.textContent = header.column.columnDef.header;
             th.style.width = `${header.getSize()}px`;
+
+            if (tableData.metadata) {
+                const colMeta = tableData.metadata.columns.find(c => c.ATTNAME === header.column.id);
+                if (colMeta) {
+                    if (colMeta.IS_PK == 1) th.textContent = '🔑 ' + th.textContent;
+                    if (colMeta.IS_FK == 1) th.textContent = '🔗 ' + th.textContent;
+                    th.title = colMeta.DESCRIPTION || '';
+                }
+            }
             tr.appendChild(th);
         });
         thead.appendChild(tr);
     });
+    console.log('[editDataPanel] Header rendered');
 
-    // Virtualizer Logic
     const { rows } = tanTable.getRowModel();
+    console.log('[editDataPanel] Row model rows:', rows.length);
 
-    rowVirtualizer = new VirtualCore.Virtualizer({
-        count: rows.length,
-        getScrollElement: () => wrapper,
-        estimateSize: () => 35, // Row height
-        overscan: 10,
-        scrollToFn: VirtualCore.elementScroll,
-        observeElementRect: VirtualCore.observeElementRect,
-        observeElementOffset: VirtualCore.observeElementOffset,
-        onChange: () => {
-            renderRows();
-        }
-    });
+    // Simple non-virtualized render for now to debug
+    // If more than 500 rows, just show first 500 to test
+    const maxRowsToShow = Math.min(rows.length, 500);
+    console.log('[editDataPanel] Rendering', maxRowsToShow, 'rows (non-virtualized for debug)');
 
-    const renderRows = () => {
-        tbody.innerHTML = '';
-        const virtualRows = rowVirtualizer.getVirtualItems();
+    for (let i = 0; i < maxRowsToShow; i++) {
+        const row = rows[i];
+        const tr = document.createElement('tr');
+        const rowData = row.original;
+        const rowId = rowData.ROWID || rowData.__tempId;
 
-        // Spacer top
-        const padTop = virtualRows.length > 0 ? virtualRows[0].start : 0;
-        // Spacer bottom
-        const totalHeight = rowVirtualizer.getTotalSize();
-        const padBottom = totalHeight - (virtualRows.length > 0 ? virtualRows[virtualRows.length - 1].end : 0);
+        if (changes.deletes.has(rowId)) tr.classList.add('row-deleted');
+        if (!rowData.ROWID) tr.classList.add('row-new');
 
-        if (padTop > 0) {
-            const tr = document.createElement('tr');
-            tr.style.height = `${padTop}px`;
-            tbody.appendChild(tr);
-        }
+        row.getVisibleCells().forEach(cell => {
+            const td = document.createElement('td');
+            if (isModified(rowId, cell.column.id)) td.classList.add('cell-modified');
+            if (cell.column.id === 'ROWID') td.classList.add('readonly');
 
-        virtualRows.forEach(virtualRow => {
-            const row = rows[virtualRow.index];
-            const tr = document.createElement('tr');
-            tr.dataset.index = virtualRow.index;
-
-            // Row Styles (Deleted/New)
-            const rowData = row.original;
-            const rowId = rowData.ROWID || rowData.__tempId;
-
-            if (changes.deletes.has(rowId)) {
-                tr.classList.add('row-deleted');
+            const content = cell.column.columnDef.cell(cell.getContext());
+            if (content instanceof Node) {
+                td.appendChild(content);
+            } else {
+                td.innerHTML = content;
             }
-            if (!rowData.ROWID) {
-                tr.classList.add('row-new');
-            }
-
-            row.getVisibleCells().forEach(cell => {
-                const td = document.createElement('td');
-                // Check modified
-                if (isModified(rowId, cell.column.id)) {
-                    td.classList.add('cell-modified');
-                }
-                if (cell.column.id === 'ROWID') {
-                    td.classList.add('readonly');
-                }
-
-                // Render content
-                const content = cell.column.columnDef.cell(cell.getContext());
-                if (content instanceof Node) {
-                    td.appendChild(content);
-                } else {
-                    td.innerHTML = content;
-                }
-                tr.appendChild(td);
-            });
-            tbody.appendChild(tr);
+            tr.appendChild(td);
         });
+        tbody.appendChild(tr);
+    }
+    console.log('[editDataPanel] Rows rendered to tbody');
+}
 
-        if (padBottom > 0) {
-            const tr = document.createElement('tr');
-            tr.style.height = `${padBottom}px`;
-            tbody.appendChild(tr);
-        }
-    };
+function renderRows(tbody, rows) {
+    if (!rowVirtualizer) return;
 
-    // Initial Render & Scroll listener
-    rowVirtualizer._willUpdate();
-    renderRows();
+    tbody.innerHTML = '';
 
-    wrapper.addEventListener('scroll', () => {
-        // rowVirtualizer.scrollToFn ... handled by Virtualizer instance usually via observe?
-        // VirtualCore vanilla adapter needs manual trigger on scroll or using the observer setup in 3.0?
-        // Let's use the pattern from resultPanel.js if needed or standard.
-        renderRows();
+    const virtualRows = rowVirtualizer.getVirtualItems();
+    if (virtualRows.length === 0) return;
+
+    const padTop = virtualRows[0].start;
+    const totalHeight = rowVirtualizer.getTotalSize();
+    const padBottom = totalHeight - virtualRows[virtualRows.length - 1].end;
+
+    if (padTop > 0) {
+        const tr = document.createElement('tr');
+        tr.style.height = `${padTop}px`;
+        tbody.appendChild(tr);
+    }
+
+    virtualRows.forEach(virtualRow => {
+        const row = rows[virtualRow.index];
+        const tr = document.createElement('tr');
+        tr.dataset.index = virtualRow.index;
+        tr.style.height = `${virtualRow.size}px`;
+
+        const rowData = row.original;
+        const rowId = rowData.ROWID || rowData.__tempId;
+
+        if (changes.deletes.has(rowId)) tr.classList.add('row-deleted');
+        if (!rowData.ROWID) tr.classList.add('row-new');
+
+        row.getVisibleCells().forEach(cell => {
+            const td = document.createElement('td');
+            if (isModified(rowId, cell.column.id)) td.classList.add('cell-modified');
+            if (cell.column.id === 'ROWID') td.classList.add('readonly');
+
+            const content = cell.column.columnDef.cell(cell.getContext());
+            if (content instanceof Node) {
+                td.appendChild(content);
+            } else {
+                td.innerHTML = content;
+            }
+            tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
     });
+
+    if (padBottom > 0) {
+        const tr = document.createElement('tr');
+        tr.style.height = `${padBottom}px`;
+        tbody.appendChild(tr);
+    }
 }
 
 function updateCell(rowId, col, newValue, originalValue) {
     if (col === 'ROWID' || col === '__actions') return;
 
-    // Update in working data
     const row = tableData.working.find(r => (r.ROWID || r.__tempId) == rowId);
     if (row) {
         row[col] = newValue;
     }
 
-    // Is it a temp row?
     if (!row.ROWID) {
-        // Just update in inserts map logic
-        // We find the insert obj
         const insertObj = changes.inserts.find(i => i.__tempId == rowId);
         if (insertObj) {
             insertObj[col] = newValue;
@@ -332,20 +485,22 @@ function updateCell(rowId, col, newValue, originalValue) {
         return;
     }
 
-    // Existing row - track in updates
     if (!changes.updates[rowId]) {
         changes.updates[rowId] = { rowId, changes: {} };
     }
 
-    // Check against original
     const originalRow = tableData.original.find(r => r.ROWID == rowId);
     const origVal = originalRow ? originalRow[col] : null;
 
-    // Loose equality for numbers/strings overlap
-    if (String(newValue) !== String(origVal)) {
+    const valEq = (a, b) => {
+        if (a === b) return true;
+        if ((a === null || a === '') && (b === null || b === '')) return true;
+        return String(a) === String(b);
+    };
+
+    if (!valEq(newValue, origVal)) {
         changes.updates[rowId].changes[col] = newValue;
     } else {
-        // Reverted to original
         delete changes.updates[rowId].changes[col];
         if (Object.keys(changes.updates[rowId].changes).length === 0) {
             delete changes.updates[rowId];
@@ -354,7 +509,7 @@ function updateCell(rowId, col, newValue, originalValue) {
 }
 
 function isModified(rowId, col) {
-    if (!rowId) return false; // new row logic handled by row class
+    if (!rowId) return false;
     if (changes.updates[rowId] && changes.updates[rowId].changes[col] !== undefined) {
         return true;
     }
@@ -364,52 +519,36 @@ function isModified(rowId, col) {
 function toggleDeleteRow(row) {
     const rowId = row.ROWID || row.__tempId;
 
-    // If it's a new row (temp), just remove it completely from working & inserts
     if (!row.ROWID) {
         const idx = tableData.working.findIndex(r => r.__tempId == rowId);
         if (idx !== -1) tableData.working.splice(idx, 1);
-
         const insIdx = changes.inserts.findIndex(i => i.__tempId == rowId);
         if (insIdx !== -1) changes.inserts.splice(insIdx, 1);
-
-        // Re-render fully to update virtualizer count
-        initData(tableData.working, tableData.columns); // naive re-init, preserves edits in 'working' but resets 'changes'?? 
-        // WAIT: re-init wipes changes. We shouldn't do that.
-        // We should just re-render table.
-        // But tableData.working is modified.
-        // We need to keep 'changes' intact.
-        // Let's just create new Table instance with current working data.
         renderTable();
         return;
     }
 
-    // Existing row
     if (changes.deletes.has(rowId)) {
         changes.deletes.delete(rowId);
     } else {
         changes.deletes.add(rowId);
     }
-    // Re-render rows to update style
     renderTable();
 }
 
 function addNewRow() {
     const tempId = nextInsertId--;
     const newRow = { __tempId: tempId };
-
-    // Init columns with null
     tableData.columns.forEach(c => {
         if (c !== 'ROWID') newRow[c] = null;
     });
 
-    tableData.working.unshift(newRow); // Add to top
+    tableData.working.unshift(newRow);
     changes.inserts.push(newRow);
-
-    renderTable(); // Re-create table to catch new data
+    renderTable();
 }
 
 function saveChanges() {
-    // Collect changes
     const payload = {
         updates: Object.values(changes.updates),
         deletes: Array.from(changes.deletes),
