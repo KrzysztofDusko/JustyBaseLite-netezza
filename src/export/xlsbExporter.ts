@@ -2,8 +2,12 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawn } from 'child_process';
-// @ts-expect-error - XlsbWriter is a JavaScript module without type definitions
-import XlsbWriter = require('../../ExcelHelpers/XlsbWriter');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const XlsbWriter = require('../../ExcelHelpersTs/XlsbWriter').default as new (filePath: string) => {
+    addSheet(sheetName: string, hidden?: boolean): void;
+    writeSheet(rows: any[][], headers: string[] | null, doAutofilter?: boolean): void;
+    finalize(): Promise<void>;
+};
 
 // const odbc = require('odbc'); // Removed odbc dependency
 

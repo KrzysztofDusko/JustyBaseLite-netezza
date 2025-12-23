@@ -9,7 +9,7 @@ export default tseslint.config(
             'dist/**',
             'driver/**',
             'node_modules/**',
-            'ExcelHelpers/**',
+            'ExcelHelpersTs/**',
             '**/*.js',
             'src/__tests__/__mocks__/**'
         ]

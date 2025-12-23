@@ -8,12 +8,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 // XLSX import for Excel file support
-// Custom Excel Reader from ExcelHelpers
+// Custom Excel Reader from ExcelHelpersTs
 let ReaderFactory: any;
 try {
-    ReaderFactory = require('../../ExcelHelpers/ReaderFactory');
+    const readerModule = require('../../ExcelHelpersTs/ReaderFactory');
+    // Handle both ES module default export and named export
+    ReaderFactory = readerModule.default || readerModule.ReaderFactory || readerModule;
 } catch (e) {
-    console.error('ExcelHelpers/ReaderFactory module not available', e);
+    console.error('ExcelHelpersTs/ReaderFactory module not available', e);
 }
 
 // ODBC import
