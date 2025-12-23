@@ -5,7 +5,7 @@
 # JustyBaseLite - Netezza / PureData System for Analytics
 
 A powerful, **Zero Config** VS Code extension for working with IBM Netezza / PureData System for Analytics databases.
-Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based Netezza driver**, eliminating the need to install or configure IBM ODBC drivers. Just install and connect!
+Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based Netezza driver** (a TypeScript reimplementation of [JustyBase.NetezzaDriver](https://github.com/KrzysztofDusko/JustyBase.NetezzaDriver)), eliminating the need to install or configure IBM ODBC drivers. Just install and connect!
 
 ## Features
 
