@@ -127,77 +127,101 @@ function renderMetadataPanel() {
     container.innerHTML = '';
 
     if (!tableData.metadata) {
-        container.innerHTML = '<i>No metadata available</i>';
+        container.innerHTML = `
+            <div class="empty-state">
+                <span style="font-size: 32px; margin-bottom: 12px;">📋</span>
+                <span>No metadata available</span>
+            </div>
+        `;
         return;
     }
 
     const { tableComment, columns } = tableData.metadata;
 
-    // 1. Table Comment Section
-    const commentSection = document.createElement('div');
-    commentSection.className = 'comment-section';
-    commentSection.innerHTML = `
-        <div class="section-actions" style="display:flex; justify-content:space-between; align-items:flex-end;">
-            <span class="section-label">Table Comment</span>
-            <button id="saveTableCommentBtn" class="small-btn">Update Comment</button>
+    // 1. Table Comment Card
+    const commentCard = document.createElement('div');
+    commentCard.className = 'metadata-card';
+    commentCard.innerHTML = `
+        <div class="metadata-card-header">
+            <h3><span class="icon">💬</span> Table Description</h3>
+            <button id="saveTableCommentBtn" class="small-btn primary">Save</button>
         </div>
-        <textarea id="tableCommentBox" class="comment-box" placeholder="No description">${tableComment || ''}</textarea>
+        <div class="metadata-card-body">
+            <textarea id="tableCommentBox" class="comment-box" placeholder="Add a description for this table...">${tableComment || ''}</textarea>
+        </div>
     `;
-    container.appendChild(commentSection);
+    container.appendChild(commentCard);
 
     document.getElementById('saveTableCommentBtn').onclick = () => {
         const newComment = document.getElementById('tableCommentBox').value;
         vscode.postMessage({ command: 'updateTableComment', comment: newComment });
     };
 
-    // 2. Columns Metadata Grid
-    const gridSection = document.createElement('div');
-    gridSection.className = 'column-list-section';
+    // 2. Columns Card
+    const columnsCard = document.createElement('div');
+    columnsCard.className = 'metadata-card';
 
-    const tableHtml = `
+    const columnRows = columns.map(col => {
+        const keyIndicators = [];
+        if (col.IS_PK == 1) keyIndicators.push('<span class="key-indicator pk" title="Primary Key">🔑</span>');
+        if (col.IS_FK == 1) keyIndicators.push('<span class="key-indicator fk" title="Foreign Key">🔗</span>');
+        const keyCell = keyIndicators.length > 0 ? keyIndicators.join(' ') : '<span style="opacity:0.3">—</span>';
+
+        const nullIndicator = col.IS_NOT_NULL == 1
+            ? '<span class="null-indicator required" title="NOT NULL">✓</span>'
+            : '<span class="null-indicator nullable" title="Nullable">○</span>';
+
+        const defaultVal = col.COLDEFAULT
+            ? `<span class="default-value">${escapeHtml(col.COLDEFAULT)}</span>`
+            : '<span class="no-default">—</span>';
+
+        return `
+            <tr>
+                <td style="text-align:center; width:50px;">${keyCell}</td>
+                <td style="font-weight:500;">${escapeHtml(col.ATTNAME)}</td>
+                <td><span class="type-badge">${escapeHtml(col.FORMAT_TYPE)}</span></td>
+                <td style="text-align:center; width:60px;">${nullIndicator}</td>
+                <td>${defaultVal}</td>
+                <td style="padding:4px;">
+                    <input type="text" 
+                        class="inline-edit col-comment" 
+                        data-col="${escapeHtml(col.ATTNAME)}" 
+                        value="${escapeHtml(col.DESCRIPTION || '')}" 
+                        placeholder="Add comment..."
+                    >
+                </td>
+                <td style="text-align:center; width:40px;">
+                    <button class="icon-btn delete-col-btn" data-col="${escapeHtml(col.ATTNAME)}" title="Drop Column">×</button>
+                </td>
+            </tr>
+        `;
+    }).join('');
+
+    columnsCard.innerHTML = `
+        <div class="metadata-card-header">
+            <h3><span class="icon">📊</span> Columns <span style="opacity:0.6; font-weight:400; margin-left:8px;">(${columns.length})</span></h3>
+        </div>
         <div class="metadata-grid-container">
             <table class="metadata-table">
                 <thead>
                     <tr>
-                        <th style="width:30px"></th>
-                        <th>Column Name</th>
-                        <th>Type</th>
-                        <th>Not Null?</th> 
-                        <th>Default</th>
-                        <th>Comment</th>
-                        <th style="width:30px"></th>
+                        <th style="width:60px; text-align:center;">Key</th>
+                        <th style="width:180px;">Column Name</th>
+                        <th style="width:140px;">Type</th>
+                        <th style="width:50px; text-align:center;">NN</th>
+                        <th style="width:120px;">Default</th>
+                        <th style="min-width:200px;">Comment</th>
+                        <th style="width:40px;"></th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${columns.map(col => `
-                        <tr>
-                            <td style="text-align:center;">
-                                ${col.IS_PK == 1 ? '🔑' : ''}
-                                ${col.IS_FK == 1 ? '🔗' : ''}
-                            </td>
-                            <td>${col.ATTNAME}</td>
-                            <td>${col.FORMAT_TYPE}</td>
-                            <td style="text-align:center;">${col.IS_NOT_NULL == 1 ? 'YES' : 'NO'}</td>
-                            <td>${col.COLDEFAULT || ''}</td>
-                            <td style="padding:0;">
-                                <input type="text" 
-                                    class="inline-edit col-comment" 
-                                    data-col="${col.ATTNAME}" 
-                                    value="${(col.DESCRIPTION || '').replace(/"/g, '&quot;')}" 
-                                    placeholder="Add comment..."
-                                >
-                            </td>
-                            <td style="text-align:center;">
-                                <button class="icon-btn delete-col-btn" data-col="${col.ATTNAME}" title="Drop Column">×</button>
-                            </td>
-                        </tr>
-                    `).join('')}
+                    ${columnRows}
                 </tbody>
             </table>
         </div>
     `;
-    gridSection.innerHTML = `<div class="section-label" style="margin-bottom:5px;">Columns</div>` + tableHtml;
-    container.appendChild(gridSection);
+
+    container.appendChild(columnsCard);
 
     // Bind Metadata Events - Comment updates
     container.querySelectorAll('.col-comment').forEach(input => {
@@ -224,16 +248,16 @@ function renderMetadataPanel() {
         };
     });
 
-    // 3. Add Column Form
-    const addSection = document.createElement('div');
-    addSection.className = 'add-column-form';
-    addSection.innerHTML = `
-        <span style="font-weight:600; font-size:11px;">ADD COLUMN:</span>
-        <input type="text" id="newColName" class="form-input" placeholder="Name" style="width:120px;">
-        <input type="text" id="newColType" class="form-input" placeholder="Type (e.g. INTEGER)" style="width:140px;">
-        <button id="addColBtn">Add</button>
+    // 3. Add Column Card
+    const addCard = document.createElement('div');
+    addCard.className = 'add-column-form';
+    addCard.innerHTML = `
+        <span class="form-label"><span class="icon">➕</span> Add Column</span>
+        <input type="text" id="newColName" class="form-input" placeholder="Column name" style="width:140px;">
+        <input type="text" id="newColType" class="form-input" placeholder="Type (e.g. INTEGER)" style="width:160px;">
+        <button id="addColBtn" class="primary">Add Column</button>
     `;
-    container.appendChild(addSection);
+    container.appendChild(addCard);
 
     document.getElementById('addColBtn').onclick = () => {
         const name = document.getElementById('newColName').value;
@@ -244,6 +268,14 @@ function renderMetadataPanel() {
         }
         vscode.postMessage({ command: 'addColumn', name, type });
     };
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 

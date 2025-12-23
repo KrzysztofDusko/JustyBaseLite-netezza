@@ -2,7 +2,7 @@ const NzConnection = require('../dist/NzConnection');
 const { NetezzaException } = require('../dist/NzConnection'); // Check if exposed? Likely not. Just Check Error.
 
 const config = {
-    host: 'nps_hyperv.mshome.net',
+    host: 'nps-proxmox.local',
     port: 5480,
     database: 'JUST_DATA',
     user: 'admin',

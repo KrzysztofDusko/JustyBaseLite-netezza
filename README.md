@@ -78,6 +78,13 @@ Right-click on objects in the Schema Browser for powerful context actions:
 - **Column Details**: View column names, data types, and key indicators directly in the diagram.
 - **Access**: Right-click on a schema in the Schema Browser → **Generate ERD**.
 
+### 🔍 SQL Linter
+- **Real-time Feedback**: Get instant warnings and errors as you type SQL.
+- **10 Built-in Rules**: Detect common anti-patterns like `SELECT *`, `DELETE` without `WHERE`, `CROSS JOIN`, and more.
+- **Configurable Severity**: Set each rule to `error`, `warning`, `hint`, or disable with `off`.
+- **Smart Detection**: Ignores patterns inside strings and comments.
+- 📖 **[SQL Linter Reference](docs/SQL_LINTER.md)**
+
 ### ✂️ SQL Snippets
 - **55+ Code Snippets**: Type `nz` followed by a keyword to quickly insert SQL templates.
 - **Categories**: Basic SQL, DDL, Netezza-specific (GROOM, GENERATE STATISTICS), NZPLSQL procedures, query patterns.

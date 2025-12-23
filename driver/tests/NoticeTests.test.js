@@ -1,7 +1,7 @@
 const NzConnection = require('../dist/NzConnection');
 
 const config = {
-    host: 'nps_hyperv.mshome.net',
+    host: 'nps-proxmox.local',
     port: 5480,
     database: 'JUST_DATA',
     user: 'admin',

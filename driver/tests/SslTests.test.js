@@ -3,7 +3,7 @@ const fs = require('fs');
 
 // Configuration
 const config = {
-    host: 'nps_hyperv.mshome.net',
+    host: 'nps-proxmox.local',
     port: 5480,
     database: 'JUST_DATA',
     user: 'admin',

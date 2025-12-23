@@ -22,6 +22,7 @@ interface NzConnectionConfig {
     securityLevel?: string;
     sslCerFilePath?: string;
     rejectUnauthorized?: boolean;
+    connectionTimeout?: number; // Connection timeout in seconds (default: 30)
 }
 
 interface ColumnInfo {
@@ -56,41 +57,75 @@ class NzConnection extends EventEmitter {
     private _intBufEnd: number = 0;
 
     commandTimeout: number = 30;
+    connectionTimeout: number = 30; // Default 30 seconds for connection timeout
     private _executing: boolean = false;
     private _exportStream: fs.WriteStream | null = null;
 
     constructor(config: NzConnectionConfig) {
         super();
         this.config = config;
+        // Apply connection timeout from config
+        if (config.connectionTimeout !== undefined) {
+            this.connectionTimeout = config.connectionTimeout;
+        }
     }
 
     async connect(): Promise<void> {
         return new Promise((resolve, reject) => {
             if (!this.config.host) return reject(new Error("Host is required"));
+
+            let connectionTimedOut = false;
+            let connectionTimer: NodeJS.Timeout | undefined;
+
+            // Set up connection timeout
+            if (this.connectionTimeout > 0) {
+                connectionTimer = setTimeout(() => {
+                    connectionTimedOut = true;
+                    debug('Connection timeout triggered after', this.connectionTimeout, 'seconds');
+                    if (this._socket) {
+                        this._socket.destroy();
+                    }
+                    reject(new Error(`Connection timeout after ${this.connectionTimeout} seconds`));
+                }, this.connectionTimeout * 1000);
+            }
+
+            const clearConnectionTimeout = () => {
+                if (connectionTimer) {
+                    clearTimeout(connectionTimer);
+                    connectionTimer = undefined;
+                }
+            };
+
             this._socket = new net.Socket();
             this._socket.connect(this.config.port || 5480, this.config.host, async () => {
+                if (connectionTimedOut) return; // Already timed out
                 debug('Socket connected');
                 this._socket!.setNoDelay(true);
                 this._stream = this._socket!;
                 const handshake = new Handshake(this._socket!, this._stream, this.config.host, this.config as any);
                 try {
                     this._stream = await handshake.startup(this.config.database, this.config.user, this.config.password);
+                    if (connectionTimedOut) return; // Check again after async handshake
+                    clearConnectionTimeout();
                     this._connected = true;
                     this._backendProcessId = handshake.backendProcessId;
                     this._backendSecretKey = handshake.backendSecretKey;
                     resolve();
                 } catch (err) {
+                    clearConnectionTimeout();
                     this._socket!.destroy();
                     reject(err);
                 }
             });
             this._socket.on('error', (err) => {
                 debug('Socket error', err);
+                clearConnectionTimeout();
                 if (!this._connected) reject(err);
                 else this.emit('error', err);
             });
             this._socket.on('close', () => {
                 debug('Socket closed');
+                clearConnectionTimeout();
                 this._connected = false;
                 this.emit('close');
             });

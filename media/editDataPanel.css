@@ -163,11 +163,49 @@ button:disabled {
 }
 
 .metadata-content {
-    padding: 20px;
+    padding: 24px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 24px;
+    background: linear-gradient(180deg, var(--vscode-editor-background) 0%, rgba(0, 0, 0, 0.02) 100%);
+}
+
+/* Card Base Style */
+.metadata-card {
+    background-color: var(--vscode-editorWidget-background);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    overflow: visible;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.metadata-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, var(--header-bg) 0%, rgba(0, 0, 0, 0.03) 100%);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.metadata-card-header h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--header-fg);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.metadata-card-header h3 .icon {
+    font-size: 16px;
+}
+
+.metadata-card-body {
+    padding: 16px;
 }
 
 /* Table Comment Section */
@@ -179,52 +217,158 @@ button:disabled {
 
 .section-label {
     font-weight: 600;
-    font-size: 12px;
+    font-size: 11px;
     text-transform: uppercase;
-    opacity: 0.8;
-    margin-bottom: 4px;
+    letter-spacing: 0.5px;
+    color: var(--vscode-descriptionForeground);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.section-label .icon {
+    font-size: 14px;
 }
 
 textarea.comment-box {
     background-color: var(--input-bg);
     color: var(--input-fg);
     border: 1px solid var(--input-border);
-    padding: 8px;
+    padding: 12px;
     font-family: var(--vscode-font-family);
-    font-size: 12px;
+    font-size: 13px;
     resize: vertical;
-    min-height: 60px;
+    min-height: 80px;
+    border-radius: 4px;
     outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 textarea.comment-box:focus {
     border-color: var(--vscode-focusBorder);
+    box-shadow: 0 0 0 2px rgba(0, 127, 255, 0.15);
+}
+
+textarea.comment-box::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+    font-style: italic;
 }
 
 /* Metadata Grid inside Panel */
 .metadata-grid-container {
+    border-radius: 4px;
+    overflow-x: auto;
+    overflow-y: visible;
     border: 1px solid var(--border-color);
-    overflow: auto;
-    max-height: 400px;
+    max-height: 50vh;
 }
 
 .metadata-table {
     width: 100%;
+    min-width: 750px;
     border-collapse: collapse;
+    font-size: 12px;
 }
+
 
 .metadata-table th,
 .metadata-table td {
-    border: 1px solid var(--border-color);
-    padding: 6px 10px;
+    padding: 10px 14px;
     text-align: left;
+    border-bottom: 1px solid var(--border-color);
 }
 
 .metadata-table th {
-    background-color: var(--header-bg);
+    background: linear-gradient(180deg, var(--header-bg) 0%, rgba(0, 0, 0, 0.02) 100%);
     position: sticky;
     top: 0;
     z-index: 1;
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--vscode-descriptionForeground);
+}
+
+.metadata-table tbody tr {
+    transition: background-color 0.1s;
+}
+
+.metadata-table tbody tr:hover {
+    background-color: var(--row-hover);
+}
+
+.metadata-table tbody tr:nth-child(even) {
+    background-color: rgba(0, 0, 0, 0.02);
+}
+
+/* Column key indicators */
+.key-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.key-indicator.pk {
+    background-color: rgba(241, 196, 15, 0.15);
+}
+
+.key-indicator.fk {
+    background-color: rgba(52, 152, 219, 0.15);
+}
+
+/* Column type badge */
+.type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-family: var(--vscode-editor-font-family, monospace);
+    background-color: rgba(102, 178, 255, 0.1);
+    color: var(--vscode-textLink-foreground);
+    border: 1px solid rgba(102, 178, 255, 0.2);
+}
+
+/* Not null indicator */
+.null-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.null-indicator.required {
+    background-color: rgba(231, 76, 60, 0.15);
+    color: var(--vscode-errorForeground);
+}
+
+.null-indicator.nullable {
+    background-color: rgba(127, 140, 141, 0.15);
+    color: var(--vscode-descriptionForeground);
+}
+
+/* Default value */
+.default-value {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px;
+    padding: 2px 6px;
+    background-color: rgba(0, 0, 0, 0.05);
+    border-radius: 3px;
+    color: var(--vscode-debugTokenExpression-string);
+}
+
+.no-default {
+    color: var(--vscode-descriptionForeground);
+    font-style: italic;
+    opacity: 0.6;
 }
 
 .metadata-table input.inline-edit {
@@ -232,12 +376,24 @@ textarea.comment-box:focus {
     background: transparent;
     border: 1px solid transparent;
     color: inherit;
-    padding: 4px;
+    padding: 6px 8px;
+    border-radius: 3px;
+    transition: all 0.15s;
+}
+
+.metadata-table input.inline-edit:hover {
+    background-color: rgba(0, 0, 0, 0.03);
 }
 
 .metadata-table input.inline-edit:focus {
     background-color: var(--input-bg);
     border-color: var(--vscode-focusBorder);
+    box-shadow: 0 0 0 2px rgba(0, 127, 255, 0.1);
+}
+
+.metadata-table input.inline-edit::placeholder {
+    font-style: italic;
+    color: var(--vscode-input-placeholderForeground);
 }
 
 .icon-btn {
@@ -245,39 +401,71 @@ textarea.comment-box:focus {
     border: none;
     color: var(--vscode-icon-foreground);
     cursor: pointer;
-    opacity: 0.7;
-    padding: 4px;
+    opacity: 0.5;
+    padding: 6px;
+    border-radius: 4px;
+    transition: all 0.15s;
+    font-size: 16px;
 }
 
 .icon-btn:hover {
     opacity: 1;
+    background-color: rgba(255, 80, 80, 0.1);
     color: var(--vscode-errorForeground);
-    /* Red for delete */
 }
 
 /* Add Column Form */
 .add-column-form {
     display: flex;
-    gap: 10px;
+    gap: 12px;
     align-items: center;
     background-color: var(--vscode-editorWidget-background);
-    padding: 12px;
-    border: 1px solid var(--border-color);
+    padding: 16px;
+    border: 1px dashed var(--border-color);
+    border-radius: 6px;
     flex-wrap: wrap;
-    align-self: flex-start;
+}
+
+.add-column-form .form-label {
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--vscode-descriptionForeground);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.add-column-form .form-label .icon {
+    font-size: 16px;
+    color: var(--vscode-charts-green);
 }
 
 .form-input {
     background-color: var(--input-bg);
     color: var(--input-fg);
     border: 1px solid var(--input-border);
-    padding: 6px;
+    padding: 8px 12px;
     font-size: 12px;
+    border-radius: 4px;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .form-input:focus {
     border-color: var(--vscode-focusBorder);
+    box-shadow: 0 0 0 2px rgba(0, 127, 255, 0.1);
+    outline: none;
 }
+
+.form-input::placeholder {
+    color: var(--vscode-input-placeholderForeground);
+}
+
+/* Small button variant */
+button.small-btn {
+    padding: 6px 12px;
+    font-size: 11px;
+}
+
 
 /* Grid Container */
 .grid-container {

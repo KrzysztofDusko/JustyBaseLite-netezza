@@ -2,13 +2,13 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
     "url": "https://www.linkedin.com/in/krzysztof-du%C5%9Bko-124b48195/"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "icon": "IconSanta.png",
   "galleryBanner": {
     "color": "#0066CC",
@@ -564,6 +564,28 @@
             "preserve"
           ],
           "description": "Keyword case in formatted SQL."
+        },
+        "netezza.linter.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable SQL linting for Netezza files."
+        },
+        "netezza.linter.rules": {
+          "type": "object",
+          "default": {
+            "NZ001": "warning",
+            "NZ002": "error",
+            "NZ003": "error",
+            "NZ004": "warning",
+            "NZ005": "hint",
+            "NZ006": "information",
+            "NZ007": "information",
+            "NZ008": "warning",
+            "NZ009": "hint",
+            "NZ010": "information",
+            "NZ011": "warning"
+          },
+          "description": "Configure SQL linter rules severity. Available rules: NZ001 (SELECT *), NZ002 (DELETE without WHERE), NZ003 (UPDATE without WHERE), NZ004 (CROSS JOIN), NZ005 (Leading wildcard LIKE), NZ006 (ORDER BY without LIMIT), NZ007 (Inconsistent keyword case), NZ008 (TRUNCATE), NZ009 (Multiple OR), NZ010 (Missing table alias), NZ011 (CTAS missing DISTRIBUTE ON). Values: error, warning, information, hint, off."
         }
       }
     },
@@ -614,17 +636,34 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "package": "node esbuild.js --production",
-    "package-vsix": "npm install && npm run package && npm prune --production && vsce package"
+    "package-vsix": "npm install && npm run package && npm prune --production && vsce package",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/jest": "^29.5.14",
     "@types/node": "^16.0.0",
     "@types/vscode": "^1.80.0",
-    "esbuild": "^0.27.1",
-    "sql-formatter": "^15.4.2",
-    "typescript": "^5.9.3",
+    "@typescript-eslint/eslint-plugin": "^8.50.0",
+    "@typescript-eslint/parser": "^8.50.0",
     "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "debug": "^4.4.3",
+    "esbuild": "^0.27.1",
+    "eslint": "^9.39.2",
+    "jest": "^29.7.0",
+    "prettier": "^3.7.4",
+    "sql-formatter": "^15.4.2",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.50.0",
     "yauzl": "^3.2.0"
   },
   "preview": true
