@@ -65641,8 +65641,14 @@ function registerImportCommands(deps) {
         );
         logExecutionTime2(outputChannel, "Import Clipboard Data", startTime);
         vscode30.window.showInformationMessage(
-          `Clipboard data imported successfully to table: ${finalTableName}`
-        );
+          `Clipboard data imported successfully to table: ${finalTableName}`,
+          "Copy Table Name"
+        ).then((action) => {
+          if (action === "Copy Table Name") {
+            vscode30.env.clipboard.writeText(finalTableName);
+            vscode30.window.showInformationMessage("Table name copied to clipboard");
+          }
+        });
       } catch (err) {
         vscode30.window.showErrorMessage(`Error importing clipboard data: ${err.message}`);
       }
@@ -65741,7 +65747,15 @@ function registerImportCommands(deps) {
           }
         );
         logExecutionTime2(outputChannel, "Import Data", startTime);
-        vscode30.window.showInformationMessage(`Data imported successfully to table: ${finalTableName}`);
+        vscode30.window.showInformationMessage(
+          `Data imported successfully to table: ${finalTableName}`,
+          "Copy Table Name"
+        ).then((action) => {
+          if (action === "Copy Table Name") {
+            vscode30.env.clipboard.writeText(finalTableName);
+            vscode30.window.showInformationMessage("Table name copied to clipboard");
+          }
+        });
       } catch (err) {
         vscode30.window.showErrorMessage(`Error importing data: ${err.message}`);
       }

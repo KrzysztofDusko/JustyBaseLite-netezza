@@ -216,9 +216,6 @@ export class ConnectionManager {
         // For now, simpler: just check if exists. ODBS driver connection object doesn't show connection string easily?
 
         if (!existing) {
-            // const odbc = require('odbc');
-            // existing = await odbc.connect({ connectionString: connString, fetchArray: true });
-
             // Use JsNzDriver
             const NzConnection = require('../../driver/dist/NzConnection');
             const details = this._connections[targetName];

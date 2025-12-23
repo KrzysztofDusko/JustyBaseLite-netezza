@@ -166,8 +166,14 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
 
                 logExecutionTime(outputChannel, 'Import Clipboard Data', startTime);
                 vscode.window.showInformationMessage(
-                    `Clipboard data imported successfully to table: ${finalTableName}`
-                );
+                    `Clipboard data imported successfully to table: ${finalTableName}`,
+                    'Copy Table Name'
+                ).then(action => {
+                    if (action === 'Copy Table Name') {
+                        vscode.env.clipboard.writeText(finalTableName);
+                        vscode.window.showInformationMessage('Table name copied to clipboard');
+                    }
+                });
             } catch (err: any) {
                 vscode.window.showErrorMessage(`Error importing clipboard data: ${err.message}`);
             }
@@ -284,7 +290,15 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                 );
 
                 logExecutionTime(outputChannel, 'Import Data', startTime);
-                vscode.window.showInformationMessage(`Data imported successfully to table: ${finalTableName}`);
+                vscode.window.showInformationMessage(
+                    `Data imported successfully to table: ${finalTableName}`,
+                    'Copy Table Name'
+                ).then(action => {
+                    if (action === 'Copy Table Name') {
+                        vscode.env.clipboard.writeText(finalTableName);
+                        vscode.window.showInformationMessage('Table name copied to clipboard');
+                    }
+                });
             } catch (err: any) {
                 vscode.window.showErrorMessage(`Error importing data: ${err.message}`);
             }

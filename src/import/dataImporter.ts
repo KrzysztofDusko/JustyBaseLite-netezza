@@ -18,14 +18,6 @@ try {
     console.error('ExcelHelpersTs/ReaderFactory module not available', e);
 }
 
-// ODBC import
-// let odbc: any;
-// try {
-//     odbc = require('odbc');
-// } catch (e) {
-//     console.error('ODBC module not available');
-// }
-
 function parseConnectionString(connStr: string): any {
     const parts = connStr.split(';');
     const config: any = {};

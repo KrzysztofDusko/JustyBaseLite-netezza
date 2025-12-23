@@ -9,13 +9,6 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { ColumnTypeChooser, ProgressCallback, ImportResult } from './dataImporter';
 
-// ODBC import
-// let odbc: any;
-// try {
-//     odbc = require('odbc');
-// } catch (e) {
-//     console.error('ODBC module not available');
-// }
 
 function parseConnectionString(connStr: string): any {
     const parts = connStr.split(';');
