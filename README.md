@@ -28,7 +28,7 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 ### 📊 Results & Export
 - **Data Grid**: Full-featured grid with filtering, sorting, and cell selection.
 - **Multi-Grid Export**:
-    - **Excel (XLSB)**: Export all result sets to a single Excel file with multiple sheets.
+    - **Excel (XLSB)**: Export all result sets to a single Excel file with multiple sheets. (Support for XLSX/XLSB is a reimplementation of [SpreadSheetTasks](https://github.com/KrzysztofDusko/SpreadSheetTasks))
     - **CSV, JSON, XML, SQL INSERT, Markdown**: Multiple export format options.
     - **Open Immediately**: Option to open Excel files automatically after export.
 - 📖 **[Full Export/Import Reference](docs/EXPORT_IMPORT.md)**
