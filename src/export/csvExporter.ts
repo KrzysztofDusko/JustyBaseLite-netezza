@@ -12,7 +12,8 @@ export async function exportToCsv(
     connectionDetails: ConnectionDetails,
     query: string,
     filePath: string,
-    progress?: vscode.Progress<{ message?: string; increment?: number }>
+    progress?: vscode.Progress<{ message?: string; increment?: number }>,
+    timeout?: number
 ): Promise<void> {
     let connection: NzConnection | null = null;
 
@@ -39,6 +40,9 @@ export async function exportToCsv(
 
         // executeReader returns a reader that allows streaming rows
         const cmd = connection!.createCommand(query);
+        if (timeout) {
+            cmd.commandTimeout = timeout;
+        }
         const reader = await cmd.executeReader();
 
         if (progress) {

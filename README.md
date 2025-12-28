@@ -78,6 +78,20 @@ Right-click on objects in the Schema Browser for powerful context actions:
 - **Column Details**: View column names, data types, and key indicators directly in the diagram.
 - **Access**: Right-click on a schema in the Schema Browser → **Generate ERD**.
 
+### 🔄 ETL Designer
+- **Visual Workflow Designer**: Create data workflows with drag-and-drop nodes on a canvas.
+- **Task Types**:
+    - **SQL Task**: Execute SQL queries against the connected Netezza database.
+    - **Python Script**: Run Python scripts (inline or from file).
+    - **Export Task**: Export query results to CSV or XLSB files.
+    - **Import Task**: Import data from CSV/XLSB files into tables.
+    - **Container Task**: Group multiple tasks for organized workflows.
+- **Connections**: Draw arrows between tasks to define execution order.
+- **Parallel Execution**: Unconnected tasks run in parallel; connected tasks run sequentially.
+- **Project Management**: Save and load ETL projects as `.etl.json` files.
+- **Access**: Command Palette → **Netezza: Open ETL Designer** or Schema Browser toolbar.
+- 📖 **[ETL Designer Guide](docs/ETL_DESIGNER.md)**
+
 ### 🔍 SQL Linter
 - **Real-time Feedback**: Get instant warnings and errors as you type SQL.
 - **10 Built-in Rules**: Detect common anti-patterns like `SELECT *`, `DELETE` without `WHERE`, `CROSS JOIN`, and more.

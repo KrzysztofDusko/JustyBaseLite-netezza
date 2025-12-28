@@ -21,6 +21,8 @@ import { EditDataProvider, EditDataItem } from './views/editDataProvider';
 import { MetadataCache } from './metadataCache';
 import { activateSqlLinter } from './providers/sqlLinterProvider';
 import { NetezzaLinterCodeActionProvider } from './providers/linterCodeActions';
+import { EtlDesignerView } from './views/etlDesignerView';
+import { EtlProjectManager } from './etl/etlProjectManager';
 
 // Import modular command registrations
 import { registerSchemaCommands } from './commands/schemaCommands';
@@ -452,6 +454,57 @@ END_PROC;`;
 
         vscode.commands.registerCommand('netezza.copySelection', () => {
             resultPanelProvider.triggerCopySelection();
+        }),
+
+        // ETL Designer Commands
+        vscode.commands.registerCommand('netezza.openEtlDesigner', () => {
+            EtlDesignerView.setConnectionManager(connectionManager);
+            EtlDesignerView.createOrShow(context);
+        }),
+
+        vscode.commands.registerCommand('netezza.newEtlProject', async () => {
+            const name = await vscode.window.showInputBox({
+                prompt: 'Enter ETL project name',
+                value: 'New ETL Project'
+            });
+            if (name) {
+                const projectManager = EtlProjectManager.getInstance();
+                projectManager.createProject(name);
+                EtlDesignerView.setConnectionManager(connectionManager);
+                EtlDesignerView.createOrShow(context);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.openEtlProject', async () => {
+            const files = await vscode.window.showOpenDialog({
+                filters: { 'ETL Project': ['etl.json'] },
+                canSelectMany: false
+            });
+            if (files && files[0]) {
+                try {
+                    const projectManager = EtlProjectManager.getInstance();
+                    const project = await projectManager.loadProject(files[0].fsPath);
+                    EtlDesignerView.setConnectionManager(connectionManager);
+                    EtlDesignerView.createOrShow(context, project);
+                    vscode.window.showInformationMessage(`ETL project loaded: ${project.name}`);
+                } catch (error) {
+                    vscode.window.showErrorMessage(`Failed to load ETL project: ${error}`);
+                }
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.runEtlProject', async () => {
+            const projectManager = EtlProjectManager.getInstance();
+            const project = projectManager.getCurrentProject();
+            if (!project) {
+                vscode.window.showWarningMessage('No ETL project is currently open. Please open or create a project first.');
+                return;
+            }
+            // Open the designer and trigger run
+            EtlDesignerView.setConnectionManager(connectionManager);
+            EtlDesignerView.createOrShow(context, project);
+            // The designer will handle the run command via its webview
+            vscode.window.showInformationMessage('ETL project opened. Use the Run button in the designer to execute.');
         })
     );
 

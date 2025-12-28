@@ -80,7 +80,8 @@ export async function exportQueryToXlsb(
     query: string,
     outputPath: string,
     copyToClipboard: boolean = false,
-    progressCallback?: ProgressCallback
+    progressCallback?: ProgressCallback,
+    timeout?: number
 ): Promise<ExportResult> {
     let connection: NzConnection | null = null;
 
@@ -124,6 +125,9 @@ export async function exportQueryToXlsb(
 
             try {
                 const cmd = connection!.createCommand(currentQuery);
+                if (timeout) {
+                    cmd.commandTimeout = timeout;
+                }
                 const reader = await cmd.executeReader();
 
                 // Prepare headers for XLSB

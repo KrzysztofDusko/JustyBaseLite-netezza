@@ -737,7 +737,8 @@ export async function importDataToNetezza(
     filePath: string,
     targetTable: string,
     connectionDetails: ConnectionDetails,
-    progressCallback?: ProgressCallback
+    progressCallback?: ProgressCallback,
+    timeout?: number
 ): Promise<ImportResult> {
     const startTime = Date.now();
     let connection: NzConnection | null = null;
@@ -832,8 +833,8 @@ export async function importDataToNetezza(
             // NzConnection should handle the external table protocol automatically
             const cmd = connection!.createCommand(createSql);
 
-            // Set 60-minute timeout for large file imports
-            cmd.commandTimeout = 3600;
+            // Set timeout (default to 60 minutes for large file imports if not specified)
+            cmd.commandTimeout = timeout || 3600;
 
             // Listen for import progress events
             const totalRows = importer.getRowsCount();
