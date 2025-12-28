@@ -35,7 +35,7 @@ async function generateAutoTableName(
         const currentDbResult = await runQuery(context, currentDbQuery, true, connectionName, connectionManager);
 
         if (currentDbResult) {
-            const dbInfo = JSON.parse(currentDbResult);
+            const dbInfo = JSON.parse(currentDbResult) as { CURRENT_CATALOG?: string; CURRENT_SCHEMA?: string }[];
             if (dbInfo && dbInfo.length > 0) {
                 const database = dbInfo[0].CURRENT_CATALOG || 'SYSTEM';
                 const schema = dbInfo[0].CURRENT_SCHEMA || 'ADMIN';
@@ -49,8 +49,8 @@ async function generateAutoTableName(
                 return `${database}.${schema}.IMPORT_${dateStr}_${random}`;
             }
         }
-    } catch (err: any) {
-        vscode.window.showErrorMessage(`Error getting current database/schema: ${err.message}`);
+    } catch (err: unknown) {
+        vscode.window.showErrorMessage(`Error getting current database/schema: ${err instanceof Error ? err.message : String(err)}`);
     }
     return null;
 }
@@ -68,8 +68,8 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                 const editor = vscode.window.activeTextEditor;
                 const documentUri = editor?.document?.uri?.toString();
                 const connectionName = connectionManager.getConnectionForExecution(documentUri);
-                const connectionString = await connectionManager.getConnectionString(connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionName || '');
+                if (!connectionDetails) {
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
@@ -141,7 +141,7 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
 
                         const result = await importClipboardDataToNetezza(
                             finalTableName,
-                            connectionString,
+                            connectionDetails,
                             formatOptions.value,
                             {},
                             (message: string) => {
@@ -174,19 +174,18 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                         vscode.window.showInformationMessage('Table name copied to clipboard');
                     }
                 });
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Error importing clipboard data: ${err.message}`);
+            } catch (err: unknown) {
+                vscode.window.showErrorMessage(`Error importing clipboard data: ${err instanceof Error ? err.message : String(err)}`);
             }
         }),
 
-        // Import Data from File
         vscode.commands.registerCommand('netezza.importData', async () => {
             try {
                 const editor = vscode.window.activeTextEditor;
                 const documentUri = editor?.document?.uri?.toString();
                 const connectionName = connectionManager.getConnectionForExecution(documentUri);
-                const connectionString = await connectionManager.getConnectionString(connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionName || '');
+                if (!connectionDetails) {
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
@@ -270,7 +269,7 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                         const result = await importDataToNetezza(
                             sourceFile,
                             finalTableName,
-                            connectionString,
+                            connectionDetails,
                             (message: string) => {
                                 progress.report({ message });
                                 outputChannel.appendLine(`[Import] ${message}`);
@@ -299,8 +298,9 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                         vscode.window.showInformationMessage('Table name copied to clipboard');
                     }
                 });
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Error importing data: ${err.message}`);
+
+            } catch (err: unknown) {
+                vscode.window.showErrorMessage(`Error importing data: ${err instanceof Error ? err.message : String(err)}`);
             }
         }),
 
@@ -361,8 +361,8 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                         editBuilder.replace(selection, clipboardContent);
                     });
                 }
-            } catch (error: any) {
-                vscode.window.showErrorMessage(`Error during paste: ${error.message}`);
+            } catch (error: unknown) {
+                vscode.window.showErrorMessage(`Error during paste: ${error instanceof Error ? error.message : String(error)}`);
             }
         })
     ];

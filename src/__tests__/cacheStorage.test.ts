@@ -3,6 +3,7 @@
  */
 
 import { CacheStorage } from '../metadata/cacheStorage';
+import { TableMetadata } from '../metadata/types';
 
 describe('metadata/cacheStorage', () => {
     let storage: CacheStorage;
@@ -17,17 +18,17 @@ describe('metadata/cacheStorage', () => {
         });
 
         it('should store and retrieve databases', () => {
-            const dbs = [{ label: 'TESTDB' }, { label: 'PRODDB' }];
+            const dbs = [{ label: 'TESTDB', DATABASE: 'TESTDB' }, { label: 'PRODDB', DATABASE: 'PRODDB' }];
             storage.setDatabases('conn1', dbs);
             expect(storage.getDatabases('conn1')).toEqual(dbs);
         });
 
         it('should isolate databases by connection', () => {
-            storage.setDatabases('conn1', [{ label: 'DB1' }]);
-            storage.setDatabases('conn2', [{ label: 'DB2' }]);
+            storage.setDatabases('conn1', [{ label: 'DB1', DATABASE: 'DB1' }]);
+            storage.setDatabases('conn2', [{ label: 'DB2', DATABASE: 'DB2' }]);
 
-            expect(storage.getDatabases('conn1')).toEqual([{ label: 'DB1' }]);
-            expect(storage.getDatabases('conn2')).toEqual([{ label: 'DB2' }]);
+            expect(storage.getDatabases('conn1')).toEqual([{ label: 'DB1', DATABASE: 'DB1' }]);
+            expect(storage.getDatabases('conn2')).toEqual([{ label: 'DB2', DATABASE: 'DB2' }]);
         });
     });
 
@@ -37,19 +38,19 @@ describe('metadata/cacheStorage', () => {
         });
 
         it('should store and retrieve schemas', () => {
-            const schemas = [{ label: 'ADMIN' }, { label: 'PUBLIC' }];
+            const schemas = [{ label: 'ADMIN', SCHEMA: 'ADMIN' }, { label: 'PUBLIC', SCHEMA: 'PUBLIC' }];
             storage.setSchemas('conn1', 'MYDB', schemas);
             expect(storage.getSchemas('conn1', 'MYDB')).toEqual(schemas);
         });
 
         it('should isolate schemas by connection and database', () => {
-            storage.setSchemas('conn1', 'DB1', [{ label: 'SCHEMA1' }]);
-            storage.setSchemas('conn1', 'DB2', [{ label: 'SCHEMA2' }]);
-            storage.setSchemas('conn2', 'DB1', [{ label: 'SCHEMA3' }]);
+            storage.setSchemas('conn1', 'DB1', [{ label: 'SCHEMA1', SCHEMA: 'SCHEMA1' }]);
+            storage.setSchemas('conn1', 'DB2', [{ label: 'SCHEMA2', SCHEMA: 'SCHEMA2' }]);
+            storage.setSchemas('conn2', 'DB1', [{ label: 'SCHEMA3', SCHEMA: 'SCHEMA3' }]);
 
-            expect(storage.getSchemas('conn1', 'DB1')).toEqual([{ label: 'SCHEMA1' }]);
-            expect(storage.getSchemas('conn1', 'DB2')).toEqual([{ label: 'SCHEMA2' }]);
-            expect(storage.getSchemas('conn2', 'DB1')).toEqual([{ label: 'SCHEMA3' }]);
+            expect(storage.getSchemas('conn1', 'DB1')).toEqual([{ label: 'SCHEMA1', SCHEMA: 'SCHEMA1' }]);
+            expect(storage.getSchemas('conn1', 'DB2')).toEqual([{ label: 'SCHEMA2', SCHEMA: 'SCHEMA2' }]);
+            expect(storage.getSchemas('conn2', 'DB1')).toEqual([{ label: 'SCHEMA3', SCHEMA: 'SCHEMA3' }]);
         });
     });
 
@@ -91,8 +92,8 @@ describe('metadata/cacheStorage', () => {
 
             const result = storage.getTablesAllSchemas('conn1', 'MYDB');
             expect(result).toHaveLength(2);
-            expect(result!.map((t: any) => t.label)).toContain('TABLE1');
-            expect(result!.map((t: any) => t.label)).toContain('TABLE2');
+            expect(result!.map((t: TableMetadata) => (typeof t.label === 'string' ? t.label : t.label?.label))).toContain('TABLE1');
+            expect(result!.map((t: TableMetadata) => (typeof t.label === 'string' ? t.label : t.label?.label))).toContain('TABLE2');
         });
 
         it('should deduplicate tables by name (case-insensitive)', () => {
@@ -115,8 +116,8 @@ describe('metadata/cacheStorage', () => {
 
         it('should store and retrieve columns', () => {
             const columns = [
-                { label: 'ID', detail: 'INTEGER' },
-                { label: 'NAME', detail: 'VARCHAR(100)' }
+                { label: 'ID', detail: 'INTEGER', ATTNAME: 'ID', FORMAT_TYPE: 'INTEGER' },
+                { label: 'NAME', detail: 'VARCHAR(100)', ATTNAME: 'NAME', FORMAT_TYPE: 'VARCHAR(100)' }
             ];
             storage.setColumns('conn1', 'MYDB.MYSCHEMA.MYTABLE', columns);
             expect(storage.getColumns('conn1', 'MYDB.MYSCHEMA.MYTABLE')).toEqual(columns);
@@ -237,10 +238,10 @@ describe('metadata/cacheStorage', () => {
 
     describe('clearAll', () => {
         it('should clear all caches', () => {
-            storage.setDatabases('conn1', [{ label: 'DB1' }]);
-            storage.setSchemas('conn1', 'DB1', [{ label: 'SCHEMA1' }]);
+            storage.setDatabases('conn1', [{ label: 'DB1', DATABASE: 'DB1' }]);
+            storage.setSchemas('conn1', 'DB1', [{ label: 'SCHEMA1', SCHEMA: 'SCHEMA1' }]);
             storage.setTables('conn1', 'DB1.SCHEMA1', [{ label: 'TABLE1' }], new Map());
-            storage.setColumns('conn1', 'DB1.SCHEMA1.TABLE1', [{ label: 'COL1' }]);
+            storage.setColumns('conn1', 'DB1.SCHEMA1.TABLE1', [{ label: 'COL1', ATTNAME: 'COL1', FORMAT_TYPE: 'UNKNOWN' }]);
             storage.setTypeGroups('conn1', 'DB1', ['TABLE']);
 
             storage.clearAll();

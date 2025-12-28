@@ -2,6 +2,56 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from '../core/connectionManager';
 import { runQuery } from '../core/queryRunner';
 
+interface Session {
+    ID: number;
+    PID: number;
+    USERNAME: string;
+    DBNAME: string;
+    TYPE: string;
+    CONNTIME: string;
+    STATUS: string;
+    IPADDR: string;
+    COMMAND: string;
+    PRIORITY: number;
+    CID: number;
+    CLIENT_OS_USERNAME: string;
+}
+
+interface QueryInfo {
+    QS_SESSIONID: number;
+    QS_PLANID: number;
+    QS_CLIENTID: number;
+    QS_CLIIPADDR: string;
+    QS_SQL: string;
+    QS_STATE: string;
+    QS_TSUBMIT: string;
+    QS_TSTART: string;
+    QS_PRIORITY: number;
+    QS_PRITXT: string;
+    QS_ESTCOST: number;
+    QS_ESTDISK: number;
+    QS_ESTMEM: number;
+    QS_SNIPPETS: number;
+    QS_CURSNIPT: number;
+    QS_RESROWS: number;
+    QS_RESBYTES: number;
+}
+
+interface StorageInfo {
+    DATABASE: string;
+    SCHEMA: string;
+    ALLOC_MB: number;
+    USED_MB: number;
+    AVG_SKEW: number;
+    TABLE_COUNT: number;
+}
+
+interface ResourceData {
+    gra: unknown[];
+    systemUtil: unknown[];
+    sysUtilSummary: unknown;
+}
+
 export class SessionMonitorView {
     public static readonly viewType = 'netezza.sessionMonitor';
     private static currentPanel: SessionMonitorView | undefined;
@@ -123,8 +173,8 @@ export class SessionMonitorView {
 
             // Refresh data
             await this._fetchAndSendData();
-        } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to kill session: ${err.message}`);
+        } catch (err: unknown) {
+            vscode.window.showErrorMessage(`Failed to kill session: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
 
@@ -143,17 +193,17 @@ export class SessionMonitorView {
                 command: 'updateData',
                 data: { sessions, queries, storage, resources }
             });
-        } catch (err: any) {
+        } catch (err: unknown) {
             this._panel.webview.postMessage({
                 command: 'error',
-                text: `Failed to fetch data: ${err.message}`
+                text: `Failed to fetch data: ${err instanceof Error ? err.message : String(err)}`
             });
         } finally {
             this._panel.webview.postMessage({ command: 'setLoading', loading: false });
         }
     }
 
-    private async _fetchSessions(): Promise<any[]> {
+    private async _fetchSessions(): Promise<Session[]> {
         const sql = `
             SELECT ID, PID, USERNAME, DBNAME, TYPE, CONNTIME, STATUS, 
                    SUBSTR(COMMAND, 1, 200) AS COMMAND, PRIORITY, CID, IPADDR, CLIENT_OS_USERNAME
@@ -165,14 +215,14 @@ export class SessionMonitorView {
             if (!result || result.startsWith('Query executed')) {
                 return [];
             }
-            return JSON.parse(result);
+            return JSON.parse(result) as Session[];
         } catch (e) {
             console.error('Error fetching sessions:', e);
             return [];
         }
     }
 
-    private async _fetchQueries(): Promise<any[]> {
+    private async _fetchQueries(): Promise<QueryInfo[]> {
         const sql = `
             SELECT QS_SESSIONID, QS_PLANID, QS_CLIENTID, QS_CLIIPADDR,
                    SUBSTR(QS_SQL, 1, 300) AS QS_SQL, 
@@ -189,14 +239,14 @@ export class SessionMonitorView {
             if (!result || result.startsWith('Query executed')) {
                 return [];
             }
-            return JSON.parse(result);
+            return JSON.parse(result) as QueryInfo[];
         } catch (e) {
             console.error('Error fetching queries:', e);
             return [];
         }
     }
 
-    private async _fetchStorage(): Promise<any[]> {
+    private async _fetchStorage(): Promise<StorageInfo[]> {
         const sql = `
             SELECT O.DBNAME AS DATABASE, TS.SCHEMA, 
                    ROUND(SUM(TS.ALLOCATED_BYTES) / 1024.0 / 1024.0, 2) AS ALLOC_MB,
@@ -213,18 +263,18 @@ export class SessionMonitorView {
             if (!result || result.startsWith('Query executed')) {
                 return [];
             }
-            return JSON.parse(result);
+            return JSON.parse(result) as StorageInfo[];
         } catch (e) {
             console.error('Error fetching storage:', e);
             return [];
         }
     }
 
-    private async _fetchResources(): Promise<any> {
+    private async _fetchResources(): Promise<ResourceData> {
         // Try multiple resource views
-        let graData: any[] = [];
-        let sysUtil: any[] = [];
-        let sysUtilSummary: any = null;
+        let graData: unknown[] = [];
+        let sysUtil: unknown[] = [];
+        let sysUtilSummary: unknown = null;
 
         try {
             const graResult = await runQuery(

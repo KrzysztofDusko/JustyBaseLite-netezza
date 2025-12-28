@@ -14,7 +14,7 @@ import { CacheStorage } from './metadata/cacheStorage';
 import { CachePersistence } from './metadata/persistence';
 import { CachePrefetcher, QueryRunnerFn } from './metadata/prefetch';
 import { searchCache } from './metadata/search';
-import { PerKeyEntry, CacheType, SearchResult, CachedObjectInfo, ObjectWithSchema } from './metadata/types';
+import { PerKeyEntry, CacheType, SearchResult, CachedObjectInfo, ObjectWithSchema, DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from './metadata/types';
 
 // Re-export types for external use
 export { PerKeyEntry, CacheType } from './metadata/types';
@@ -61,35 +61,35 @@ export class MetadataCache {
 
     // ========== Database Operations ==========
 
-    getDatabases(connectionName: string): any[] | undefined {
+    getDatabases(connectionName: string): DatabaseMetadata[] | undefined {
         return this.storage.getDatabases(connectionName);
     }
 
-    setDatabases(connectionName: string, data: any[]): void {
+    setDatabases(connectionName: string, data: DatabaseMetadata[]): void {
         this.storage.setDatabases(connectionName, data);
     }
 
     // ========== Schema Operations ==========
 
-    getSchemas(connectionName: string, dbName: string): any[] | undefined {
+    getSchemas(connectionName: string, dbName: string): SchemaMetadata[] | undefined {
         return this.storage.getSchemas(connectionName, dbName);
     }
 
-    setSchemas(connectionName: string, dbName: string, data: any[]): void {
+    setSchemas(connectionName: string, dbName: string, data: SchemaMetadata[]): void {
         this.storage.setSchemas(connectionName, dbName, data);
     }
 
     // ========== Table Operations ==========
 
-    getTables(connectionName: string, key: string): any[] | undefined {
+    getTables(connectionName: string, key: string): TableMetadata[] | undefined {
         return this.storage.getTables(connectionName, key);
     }
 
-    getTablesAllSchemas(connectionName: string, dbName: string): any[] | undefined {
+    getTablesAllSchemas(connectionName: string, dbName: string): TableMetadata[] | undefined {
         return this.storage.getTablesAllSchemas(connectionName, dbName);
     }
 
-    setTables(connectionName: string, key: string, data: any[], idMap: Map<string, number>): void {
+    setTables(connectionName: string, key: string, data: TableMetadata[], idMap: Map<string, number>): void {
         this.storage.setTables(connectionName, key, data, idMap);
     }
 
@@ -99,11 +99,11 @@ export class MetadataCache {
 
     // ========== Column Operations ==========
 
-    getColumns(connectionName: string, key: string): any[] | undefined {
+    getColumns(connectionName: string, key: string): ColumnMetadata[] | undefined {
         return this.storage.getColumns(connectionName, key);
     }
 
-    setColumns(connectionName: string, key: string, data: any[]): void {
+    setColumns(connectionName: string, key: string, data: ColumnMetadata[]): void {
         this.storage.setColumns(connectionName, key, data);
     }
 
@@ -176,15 +176,15 @@ export class MetadataCache {
     // ========== Legacy Compatibility ==========
     // Expose internal caches for backward compatibility with providers
 
-    get schemaCache(): Map<string, PerKeyEntry<any[]>> {
+    get schemaCache(): Map<string, PerKeyEntry<SchemaMetadata[]>> {
         return this.storage.schemaCache;
     }
 
-    get tableCache(): Map<string, PerKeyEntry<any[]>> {
+    get tableCache(): Map<string, PerKeyEntry<TableMetadata[]>> {
         return this.storage.tableCache;
     }
 
-    get columnCache(): Map<string, PerKeyEntry<any[]>> {
+    get columnCache(): Map<string, PerKeyEntry<ColumnMetadata[]>> {
         return this.storage.columnCache;
     }
 

@@ -1,4 +1,4 @@
-const XlsxWriter = require('./ExcelHelpersTs/XlsxWriter');
+const XlsxWriter = require('./libs/ExcelHelpersTs/XlsxWriter');
 const path = require('path');
 
 async function test() {

@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { runQuery } from '../../core/queryRunner';
 import { SchemaCommandsDependencies, SchemaItemData } from './types';
-import { requireConnection, executeWithProgress } from './helpers';
+import { executeWithProgress } from './helpers';
 
 /**
  * Register DDL-related commands
@@ -23,8 +23,8 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                     return;
                 }
 
-                const connectionString = await connectionManager.getConnectionString();
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionManager.getActiveConnectionName() || '');
+                if (!connectionDetails) {
                     vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
                     return;
                 }
@@ -35,7 +35,7 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                         const { generateDDL } = await import('../../ddlGenerator');
 
                         const result = await generateDDL(
-                            connectionString,
+                            connectionDetails,
                             item.dbName!,
                             item.schema!,
                             item.label!,
@@ -95,8 +95,8 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                     return;
                 }
 
-                const connectionString = await connectionManager.getConnectionString();
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionManager.getActiveConnectionName() || '');
+                if (!connectionDetails) {
                     vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
                     return;
                 }
@@ -169,7 +169,7 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                             const { SchemaCompareView } = await import('../../views/schemaCompareView');
 
                             const result = await compareProcedures(
-                                connectionString,
+                                connectionDetails,
                                 item.dbName!,
                                 item.schema!,
                                 item.label!,
@@ -184,7 +184,7 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                             const { SchemaCompareView } = await import('../../views/schemaCompareView');
 
                             const result = await compareTableStructures(
-                                connectionString,
+                                connectionDetails,
                                 item.dbName!,
                                 item.schema!,
                                 item.label!,
@@ -223,8 +223,8 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                     return;
                 }
 
-                const connectionString = await requireConnection(connectionManager, item.connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionManager.getActiveConnectionName() || '');
+                if (!connectionDetails) {
                     vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
                     return;
                 }
@@ -242,7 +242,7 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                         const { generateBatchDDL } = await import('../../ddlGenerator');
 
                         const result = await generateBatchDDL({
-                            connectionString,
+                            connectionDetails,
                             database: database!,
                             objectTypes
                         });

@@ -161,15 +161,182 @@ export class ERDView {
         `;
     }
 
-    private _generateTableBoxes(tables: TableNode[], _relationships: RelationshipEdge[]): string {
-        const columns = 4; // Grid columns
+    private _generateTableBoxes(tables: TableNode[], relationships: RelationshipEdge[]): string {
+        // Build relationship graph for intelligent layout
+        const tableConnections: Map<string, Set<string>> = new Map();
+        const outgoingFKCount: Map<string, number> = new Map();
+        const incomingFKCount: Map<string, number> = new Map();
 
+        // Initialize all tables
+        tables.forEach(t => {
+            const shortName = t.tableName;
+            tableConnections.set(shortName, new Set());
+            outgoingFKCount.set(shortName, 0);
+            incomingFKCount.set(shortName, 0);
+        });
+
+        // Build connections from relationships
+        relationships.forEach(rel => {
+            const fromShort = rel.fromTable.includes('.') ? rel.fromTable.split('.').pop()! : rel.fromTable;
+            const toShort = rel.toTable.includes('.') ? rel.toTable.split('.').pop()! : rel.toTable;
+
+            if (tableConnections.has(fromShort)) {
+                tableConnections.get(fromShort)!.add(toShort);
+                outgoingFKCount.set(fromShort, (outgoingFKCount.get(fromShort) || 0) + 1);
+            }
+            if (tableConnections.has(toShort)) {
+                tableConnections.get(toShort)!.add(fromShort);
+                incomingFKCount.set(toShort, (incomingFKCount.get(toShort) || 0) + 1);
+            }
+        });
+
+        // Categorize tables: FACT tables have outgoing FKs, DIMENSION tables have incoming FKs
+        const factTables: TableNode[] = [];
+        const dimensionTables: TableNode[] = [];
+        const orphanTables: TableNode[] = [];
+
+        tables.forEach(t => {
+            const outgoing = outgoingFKCount.get(t.tableName) || 0;
+            const connections = tableConnections.get(t.tableName)?.size || 0;
+
+            if (connections === 0) {
+                orphanTables.push(t);
+            } else if (outgoing > 0) {
+                factTables.push(t);
+            } else {
+                dimensionTables.push(t);
+            }
+        });
+
+        // Sort fact tables by number of connections (most connected first)
+        factTables.sort((a, b) => {
+            const connA = outgoingFKCount.get(a.tableName) || 0;
+            const connB = outgoingFKCount.get(b.tableName) || 0;
+            return connB - connA;
+        });
+
+        // Position calculation - Star Schema Layout
+        const positions: Map<string, { x: number; y: number }> = new Map();
+        const occupiedCells: Set<string> = new Set(); // Track occupied grid cells
+
+        const TableWidth = 260;
+        const TableHeight = 240;
+        const HGap = 50;
+        const VGap = 40;
+        const ColWidth = TableWidth + HGap;
+        const RowHeight = TableHeight + VGap;
+
+        // Helper to track cell occupancy
+        const cellKey = (col: number, row: number) => `${col},${row}`;
+        const occupyCell = (col: number, row: number) => occupiedCells.add(cellKey(col, row));
+        const isCellOccupied = (col: number, row: number) => occupiedCells.has(cellKey(col, row));
+
+        // Find first available cell in a column
+        const findFreeRowInColumn = (col: number, startRow: number = 0): number => {
+            let row = startRow;
+            while (isCellOccupied(col, row)) {
+                row++;
+            }
+            return row;
+        };
+
+        // Layout: 3-column structure
+        // Column 0: Left dimensions
+        // Column 1: Fact tables (center)
+        // Column 2: Right dimensions
+
+        const LEFT_COL = 0;
+        const CENTER_COL = 1;
+        const RIGHT_COL = 2;
+
+        const colX = (col: number) => 20 + col * ColWidth;
+        const rowY = (row: number) => 20 + row * RowHeight;
+
+        // 1. Place fact tables in center column
+        factTables.forEach((table) => {
+            const row = findFreeRowInColumn(CENTER_COL);
+            occupyCell(CENTER_COL, row);
+            positions.set(table.tableName, { x: colX(CENTER_COL), y: rowY(row) });
+        });
+
+        // 2. Place dimensions around their connected facts
+        // Group dimensions by which fact they connect to
+        const factConnectedDims: Map<string, TableNode[]> = new Map();
+        const unconnectedDims: TableNode[] = [];
+
+        dimensionTables.forEach(dim => {
+            const connections = tableConnections.get(dim.tableName) || new Set();
+            let connectedFact: string | null = null;
+
+            for (const conn of connections) {
+                if (factTables.some(f => f.tableName === conn)) {
+                    connectedFact = conn;
+                    break;
+                }
+            }
+
+            if (connectedFact) {
+                if (!factConnectedDims.has(connectedFact)) {
+                    factConnectedDims.set(connectedFact, []);
+                }
+                factConnectedDims.get(connectedFact)!.push(dim);
+            } else {
+                unconnectedDims.push(dim);
+            }
+        });
+
+        // Place dimensions alternating left/right near their fact tables
+        factConnectedDims.forEach((dims, factName) => {
+            const factPos = positions.get(factName);
+            if (!factPos) return;
+
+            // Find which row the fact is in
+            const factRow = Math.round((factPos.y - 20) / RowHeight);
+
+            dims.forEach((dim, idx) => {
+                // Alternate between left and right columns
+                const targetCol = idx % 2 === 0 ? LEFT_COL : RIGHT_COL;
+
+                // Try to place near the fact's row first
+                let targetRow = factRow + Math.floor(idx / 2);
+
+                // Find first available cell starting from target row
+                while (isCellOccupied(targetCol, targetRow)) {
+                    targetRow++;
+                }
+
+                occupyCell(targetCol, targetRow);
+                positions.set(dim.tableName, { x: colX(targetCol), y: rowY(targetRow) });
+            });
+        });
+
+        // 3. Place unconnected dimensions in available spots
+        unconnectedDims.forEach(dim => {
+            // Try left column first, then right
+            let placed = false;
+            for (const col of [LEFT_COL, RIGHT_COL]) {
+                const row = findFreeRowInColumn(col);
+                if (!placed) {
+                    occupyCell(col, row);
+                    positions.set(dim.tableName, { x: colX(col), y: rowY(row) });
+                    placed = true;
+                }
+            }
+        });
+
+        // 4. Place orphan tables in a fourth column or below
+        if (orphanTables.length > 0) {
+            const ORPHAN_COL = 3; // Far right column for orphans
+            orphanTables.forEach((table, idx) => {
+                const row = idx;
+                positions.set(table.tableName, { x: colX(ORPHAN_COL), y: rowY(row) });
+            });
+        }
+
+        // Generate HTML with calculated positions
         return tables
-            .map((table, index) => {
-                const row = Math.floor(index / columns);
-                const col = index % columns;
-                const x = 20 + col * 280;
-                const y = 20 + row * 250;
+            .map((table) => {
+                const pos = positions.get(table.tableName) || { x: 20, y: 20 };
 
                 const columnsHtml = table.columns
                     .slice(0, 10)
@@ -197,7 +364,7 @@ export class ERDView {
                 return `
                 <div class="table-box" id="table-${table.tableName}" 
                      data-table="${table.fullName}"
-                     style="left: ${x}px; top: ${y}px;">
+                     style="left: ${pos.x}px; top: ${pos.y}px;">
                     <div class="table-header">${table.tableName}</div>
                     <div class="table-columns">
                         ${columnsHtml}

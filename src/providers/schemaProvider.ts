@@ -3,6 +3,7 @@ import { runQuery } from '../core/queryRunner';
 import { ConnectionManager } from '../core/connectionManager';
 import { MetadataCache } from '../metadataCache';
 import { buildColumnMetadataQuery, parseColumnMetadata } from './tableMetadataProvider';
+import { DatabaseMetadata, TableMetadata, ColumnMetadata } from '../metadata/types';
 
 export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<SchemaItem | undefined | null | void> = new vscode.EventEmitter<
@@ -34,7 +35,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             this.metadataCache.triggerConnectionPrefetch(connectionName, async query => {
                 try {
                     return await runQuery(this.context, query, true, connectionName, this.connectionManager);
-                } catch (e) {
+                } catch (e: unknown) {
                     console.error('[SchemaProvider] Prefetch query error:', e);
                     return undefined;
                 }
@@ -123,7 +124,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             const cachedDbs = this.metadataCache.getDatabases(element.connectionName);
             if (cachedDbs) {
                 return cachedDbs.map(
-                    (db: any) =>
+                    (db: DatabaseMetadata) =>
                         new SchemaItem(
                             db.label || db.DATABASE, // simplified, dependent on what's stored
                             vscode.TreeItemCollapsibleState.Collapsed,
@@ -152,7 +153,8 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 const databases = JSON.parse(results);
 
                 // Update Cache
-                const cacheItems = databases.map((row: any) => ({
+                const cacheItems: DatabaseMetadata[] = databases.map((row: { DATABASE: string }) => ({
+                    DATABASE: row.DATABASE,
                     label: row.DATABASE,
                     kind: 9, // Module
                     detail: 'Database'
@@ -160,7 +162,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 this.metadataCache.setDatabases(element.connectionName, cacheItems);
 
                 return databases.map(
-                    (db: any) =>
+                    (db: { DATABASE: string }) =>
                         new SchemaItem(
                             db.DATABASE,
                             vscode.TreeItemCollapsibleState.Collapsed,
@@ -173,8 +175,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                             element.connectionName
                         )
                 );
-            } catch (e) {
-                vscode.window.showErrorMessage(`Failed to load databases for ${element.connectionName}: ${e}`);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Failed to load databases for ${element.connectionName}: ${errorMsg}`);
                 return [];
             }
         } else if (element.contextValue === 'database') {
@@ -217,12 +220,12 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
 
                 // Cache the type groups
                 if (element.connectionName && element.dbName) {
-                    const typeList = types.map((t: any) => t.OBJTYPE);
+                    const typeList = types.map((t: { OBJTYPE: string }) => t.OBJTYPE);
                     this.metadataCache.setTypeGroups(element.connectionName, element.dbName, typeList);
                 }
 
                 return types.map(
-                    (t: any) =>
+                    (t: { OBJTYPE: string }) =>
                         new SchemaItem(
                             t.OBJTYPE,
                             vscode.TreeItemCollapsibleState.Collapsed,
@@ -235,8 +238,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                             element.connectionName
                         )
                 );
-            } catch (e) {
-                vscode.window.showErrorMessage('Failed to load object types: ' + e);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage('Failed to load object types: ' + errorMsg);
                 return [];
             }
         } else if (element.contextValue.startsWith('typeGroup')) {
@@ -256,7 +260,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
 
                     // Filter items matching the type
                     const filtered = cachedObjects.filter(obj => {
-                        const item = obj.item;
+                        const item = obj.item as { objType?: string; kind?: number; detail?: string };
                         // Check objType if available (preferred)
                         if (item.objType) {
                             return item.objType === targetType;
@@ -270,22 +274,22 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     });
 
                     if (filtered.length > 0) {
-                        return filtered.map(
-                            obj =>
-                                new SchemaItem(
-                                    typeof obj.item.label === 'string'
-                                        ? obj.item.label
-                                        : obj.item.label?.label || 'unknown',
-                                    vscode.TreeItemCollapsibleState.Collapsed,
-                                    `netezza:${element.objType}`,
-                                    element.dbName,
-                                    element.objType,
-                                    obj.schema,
-                                    obj.objId, // Now includes objId from cache
-                                    undefined,
-                                    element.connectionName
-                                )
-                        );
+                        return filtered.map(obj => {
+                            const it = obj.item as { label?: string | { label: string } };
+                            return new SchemaItem(
+                                typeof it.label === 'string'
+                                    ? it.label
+                                    : it.label?.label || 'unknown',
+                                vscode.TreeItemCollapsibleState.Collapsed,
+                                `netezza:${element.objType}`,
+                                element.dbName,
+                                element.objType,
+                                obj.schema,
+                                obj.objId, // Now includes objId from cache
+                                undefined,
+                                element.connectionName
+                            );
+                        });
                     }
                 }
             }
@@ -314,7 +318,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     element.dbName &&
                     (element.objType === 'TABLE' || element.objType === 'VIEW')
                 ) {
-                    const objectsBySchema = new Map<string, { tables: any[]; idMap: Map<string, number> }>();
+                    const objectsBySchema = new Map<string, { tables: TableMetadata[]; idMap: Map<string, number> }>();
 
                     for (const obj of objects) {
                         const schemaKey = obj.SCHEMA ? `${element.dbName}.${obj.SCHEMA}` : `${element.dbName}..`;
@@ -337,7 +341,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     }
                 }
 
-                return objects.map((obj: any) => {
+                return objects.map((obj: { OBJNAME: string; SCHEMA?: string; OBJID?: number; DESCRIPTION?: string }) => {
                     const expandableTypes = ['TABLE', 'VIEW', 'EXTERNAL TABLE', 'SYSTEM VIEW', 'SYSTEM TABLE'];
                     const isExpandable = expandableTypes.includes(element.objType || '');
                     return new SchemaItem(
@@ -352,8 +356,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         element.connectionName
                     );
                 });
-            } catch (e) {
-                vscode.window.showErrorMessage('Failed to load objects: ' + e);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage('Failed to load objects: ' + errorMsg);
                 return [];
             }
         } else if (element.contextValue.startsWith('netezza:')) {
@@ -370,9 +375,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 // Check if cache has isPk property (new format) - if not, refetch
                 if (cachedCols && cachedCols.length > 0 && cachedCols[0].isPk !== undefined) {
                     return cachedCols.map(
-                        (col: any) =>
+                        (col: ColumnMetadata) =>
                             new SchemaItem(
-                                col.detail ? `${col.label} (${col.detail})` : col.label, // Reconstruct label
+                                col.detail ? `${col.label || col.ATTNAME} (${col.detail})` : (col.label || col.ATTNAME), // Reconstruct label
                                 vscode.TreeItemCollapsibleState.None,
                                 'column',
                                 element.dbName,
@@ -412,6 +417,8 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 // Cache the results
                 const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
                 const cacheItems = parsedColumns.map(col => ({
+                    ATTNAME: col.attname,
+                    FORMAT_TYPE: col.formatType,
                     label: col.attname,
                     kind: 5, // Field
                     detail: col.formatType,
@@ -439,8 +446,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                             col.isFk
                         )
                 );
-            } catch (e) {
-                vscode.window.showErrorMessage('Failed to load columns: ' + e);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage('Failed to load columns: ' + errorMsg);
                 return [];
             }
         }

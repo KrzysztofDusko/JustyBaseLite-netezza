@@ -5,12 +5,13 @@
 
 import { ColumnInfo, KeyInfo } from './types';
 import { executeQueryHelper } from './helpers';
+import { NzConnection } from '../types';
 
 /**
  * Get table column information from Netezza system views
  */
 export async function getColumns(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -36,7 +37,16 @@ export async function getColumns(
             X.OBJID, X.ATTNUM
     `;
 
-    const result = await executeQueryHelper(connection, sql);
+    interface ColumnRow {
+        OBJID: number;
+        ATTNAME: string;
+        DESCRIPTION: string;
+        FULL_TYPE: string;
+        ATTNOTNULL: boolean | number | string;
+        COLDEFAULT: string;
+        ATTNUM: number;
+    }
+    const result = await executeQueryHelper<ColumnRow>(connection, sql);
     const columns: ColumnInfo[] = [];
 
     for (const row of result) {
@@ -68,7 +78,7 @@ export async function getColumns(
  * Get table distribution information
  */
 export async function getDistributionInfo(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -82,7 +92,7 @@ export async function getDistributionInfo(
             ORDER BY DISTSEQNO
         `;
 
-        const result = await executeQueryHelper(connection, sql);
+        const result = await executeQueryHelper<{ ATTNAME: string }>(connection, sql);
         return result.map(row => row.ATTNAME);
     } catch {
         // Distribution info may not be available in all Netezza versions
@@ -94,7 +104,7 @@ export async function getDistributionInfo(
  * Get table organization information
  */
 export async function getOrganizeInfo(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -108,7 +118,7 @@ export async function getOrganizeInfo(
             ORDER BY ORGSEQNO
         `;
 
-        const result = await executeQueryHelper(connection, sql);
+        const result = await executeQueryHelper<{ ATTNAME: string }>(connection, sql);
         return result.map(row => row.ATTNAME);
     } catch {
         // Organization info may not be available in all Netezza versions
@@ -120,7 +130,7 @@ export async function getOrganizeInfo(
  * Get table keys information (primary key, foreign key, unique)
  */
 export async function getKeysInfo(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -151,7 +161,18 @@ export async function getKeysInfo(
     const keysInfo = new Map<string, KeyInfo>();
 
     try {
-        const result = await executeQueryHelper(connection, sql);
+        interface KeyRow {
+            CONSTRAINTNAME: string;
+            CONTYPE: string;
+            ATTNAME: string;
+            PKDATABASE?: string;
+            PKSCHEMA?: string;
+            PKRELATION?: string;
+            PKATTNAME?: string;
+            UPDT_TYPE?: string;
+            DEL_TYPE?: string;
+        }
+        const result = await executeQueryHelper<KeyRow>(connection, sql);
 
         for (const row of result) {
             const keyName = row.CONSTRAINTNAME;
@@ -193,7 +214,7 @@ export async function getKeysInfo(
  * Get table comment from metadata
  */
 export async function getTableComment(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -207,7 +228,7 @@ export async function getTableComment(
                 AND OBJTYPE = 'TABLE'
         `;
 
-        const result = await executeQueryHelper(connection, sql);
+        const result = await executeQueryHelper<{ DESCRIPTION: string }>(connection, sql);
         if (result.length > 0 && result[0].DESCRIPTION) {
             return result[0].DESCRIPTION;
         }
@@ -221,7 +242,7 @@ export async function getTableComment(
                     AND OBJNAME = '${tableName.toUpperCase()}'
             `;
 
-            const result = await executeQueryHelper(connection, sql);
+            const result = await executeQueryHelper<{ DESCRIPTION: string }>(connection, sql);
             if (result.length > 0 && result[0].DESCRIPTION) {
                 return result[0].DESCRIPTION;
             }
@@ -237,7 +258,7 @@ export async function getTableComment(
  * Get table owner
  */
 export async function getTableOwner(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -250,7 +271,7 @@ export async function getTableOwner(
                 AND TABLENAME = '${tableName.toUpperCase()}'
         `;
 
-        const result = await executeQueryHelper(connection, sql);
+        const result = await executeQueryHelper<{ OWNER: string }>(connection, sql);
         if (result.length > 0 && result[0].OWNER) {
             return result[0].OWNER;
         }

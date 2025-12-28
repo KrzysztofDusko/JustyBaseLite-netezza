@@ -1,12 +1,8 @@
 const esbuild = require('esbuild');
-const { execSync } = require('child_process');
 
 const production = process.argv.includes('--production');
 
-// Build driver TypeScript before bundling
-console.log('Building driver...');
-execSync('npm run build', { cwd: './driver', stdio: 'inherit' });
-console.log('Driver built successfully.');
+// Driver TypeScript is now bundled directly by esbuild
 
 async function main() {
   const ctx = await esbuild.context({

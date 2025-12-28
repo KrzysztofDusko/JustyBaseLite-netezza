@@ -4,6 +4,17 @@ import { MetadataCache } from '../metadataCache';
 import { ConnectionManager } from '../core/connectionManager';
 import { searchInCode } from '../sql/sqlTextUtils';
 
+interface SearchResultItem {
+    NAME: string;
+    SCHEMA: string;
+    DATABASE: string;
+    TYPE: string;
+    PARENT: string;
+    DESCRIPTION: string;
+    MATCH_TYPE: string;
+    connectionName: string;
+}
+
 export class SchemaSearchProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.search';
     private _view?: vscode.WebviewView;
@@ -80,7 +91,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         if (this._view) {
             const cachedResults = this.metadataCache.search(term, connectionName);
             if (cachedResults.length > 0) {
-                const mappedResults: any[] = [];
+                const mappedResults: SearchResultItem[] = [];
 
                 cachedResults.forEach(item => {
                     // Generate ID to deduplicate later - normalized
@@ -90,13 +101,13 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                         sentIds.add(key);
                         mappedResults.push({
                             NAME: item.name,
-                            SCHEMA: item.schema,
-                            DATABASE: item.database,
+                            SCHEMA: item.schema || '',
+                            DATABASE: item.database || '',
                             TYPE: item.type,
                             PARENT: item.parent || '',
                             DESCRIPTION: 'Result from Cache',
                             MATCH_TYPE: 'NAME', // Cache mostly matches by name
-                            connectionName // Pass connection name for Reveal
+                            connectionName: connectionName! // Pass connection name for Reveal
                         });
                     }
                 });
@@ -183,18 +194,24 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             }
 
             if (resultJson) {
-                let results: any[] = [];
+                let results: unknown[] = [];
                 if (
                     resultJson === 'Query executed successfully (no results).' ||
                     resultJson.startsWith('Query executed successfully')
                 ) {
                     results = [];
                 } else {
-                    results = JSON.parse(resultJson);
+                    // Start of Modification: explicit cast
+                    results = JSON.parse(resultJson) as unknown[];
+                    // SearchResultItem here refers to the final shape, but results from DB might be raw.
+                    // Actually the query returns columns matching SearchResultItem except connectionName.
+                    // So we can case to Partial<SearchResultItem> or similar.
+                    // But for now, unknown[] is safer than any[].
                 }
-                const mappedResults: any[] = [];
+                const mappedResults: SearchResultItem[] = [];
 
-                results.forEach((item: any) => {
+                results.forEach((i) => {
+                    const item = i as SearchResultItem;
                     const key = `${item.NAME.toUpperCase().trim()}|${item.TYPE.toUpperCase().trim()}|${(item.PARENT || '').toUpperCase().trim()}`;
 
                     if (!sentIds.has(key)) {
@@ -206,7 +223,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                             PARENT: item.PARENT,
                             DESCRIPTION: item.DESCRIPTION,
                             MATCH_TYPE: item.MATCH_TYPE,
-                            connectionName // Pass connection name
+                            connectionName: connectionName! // Pass connection name
                         });
                         sentIds.add(key);
                     }
@@ -218,10 +235,10 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     this._view.webview.postMessage({ type: 'results', data: mappedResults, append: true });
                 }
             }
-        } catch (e: any) {
+        } catch (e: unknown) {
             console.error('Search error:', e);
             if (this._view && searchId === this.currentSearchId) {
-                this._view.webview.postMessage({ type: 'error', message: e.message });
+                this._view.webview.postMessage({ type: 'error', message: e instanceof Error ? e.message : String(e) });
             }
         } finally {
             statusBarDisposable.dispose();
@@ -262,7 +279,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             }
 
             const safeTerm = term.toUpperCase();
-            const results: any[] = [];
+            const results: SearchResultItem[] = [];
 
             // 1. Search in VIEW definitions
             const viewQuery = `
@@ -342,10 +359,10 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             if (this._view && searchId === this.currentSearchId) {
                 this._view.webview.postMessage({ type: 'results', data: results, append: false });
             }
-        } catch (e: any) {
+        } catch (e: unknown) {
             console.error('Source code search error:', e);
             if (this._view && searchId === this.currentSearchId) {
-                this._view.webview.postMessage({ type: 'error', message: e.message });
+                this._view.webview.postMessage({ type: 'error', message: e instanceof Error ? e.message : String(e) });
             }
         } finally {
             statusBarDisposable.dispose();

@@ -64,7 +64,31 @@ describe('SqlParser', () => {
             // This test documents current behavior
             expect(result.length).toBeGreaterThan(0);
         });
+
+        it('should handle escaped single quotes in strings', () => {
+            const sql = "SELECT 'it''s a test'; SELECT 2;";
+            const result = SqlParser.splitStatements(sql);
+            expect(result).toEqual(["SELECT 'it''s a test'", 'SELECT 2']);
+        });
+
+        it('should handle multiple consecutive semicolons', () => {
+            const sql = 'SELECT 1;;; SELECT 2;';
+            const result = SqlParser.splitStatements(sql);
+            expect(result).toEqual(['SELECT 1', 'SELECT 2']);
+        });
+
+        it('should handle multiline SQL', () => {
+            const sql = `SELECT 
+                id,
+                name
+            FROM 
+                users;
+            SELECT * FROM orders;`;
+            const result = SqlParser.splitStatements(sql);
+            expect(result.length).toBe(2);
+        });
     });
+
 
     describe('getStatementAtPosition', () => {
         it('should find statement at cursor position', () => {

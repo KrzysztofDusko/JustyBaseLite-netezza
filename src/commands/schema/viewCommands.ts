@@ -95,8 +95,7 @@ export function registerViewCommands(deps: SchemaCommandsDependencies): vscode.D
         // Show Session Monitor
         vscode.commands.registerCommand('netezza.showSessionMonitor', async () => {
             try {
-                const connectionString = await requireConnection(connectionManager);
-                if (!connectionString) {
+                if (!await requireConnection(connectionManager)) {
                     vscode.window.showErrorMessage('Please connect to a Netezza database first.');
                     return;
                 }

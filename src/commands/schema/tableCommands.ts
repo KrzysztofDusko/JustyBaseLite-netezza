@@ -63,8 +63,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 );
 
                 if (confirmation === 'Yes, execute') {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     try {
                         await executeWithProgress(
@@ -101,8 +100,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 const sql = `COMMENT ON TABLE ${fullName} IS '${escapeSqlString(comment)}';`;
 
                 try {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     await runQuery(context, sql, true, item.connectionName, connectionManager);
                     vscode.window.showInformationMessage(`Comment added to table: ${fullName}`);
@@ -133,8 +131,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 const sql = `COMMENT ON COLUMN ${fullColumnRef} IS '${escapeSqlString(comment)}';`;
 
                 try {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     await runQuery(context, sql, true, item.connectionName, connectionManager);
                     vscode.window.showInformationMessage(`Comment added to column: ${colName}`);
@@ -160,8 +157,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 );
 
                 if (confirmation === 'Yes, delete all data') {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     try {
                         await executeWithProgress(
@@ -229,8 +225,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 );
 
                 if (confirmation === 'Yes, add') {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     try {
                         await executeWithProgress(
@@ -267,8 +262,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 const sql = `ALTER TABLE ${fullName} OWNER TO ${newOwner.trim()};`;
 
                 try {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     await runQuery(context, sql, true, item.connectionName, connectionManager);
                     vscode.window.showInformationMessage(`Owner changed to ${newOwner} for ${fullName}`);
@@ -298,8 +292,7 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
                 const sql = `ALTER TABLE ${fullName} RENAME TO ${newName.trim()};`;
 
                 try {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    if (!await requireConnection(connectionManager)) return;
 
                     await runQuery(context, sql, true, item.connectionName, connectionManager);
                     vscode.window.showInformationMessage(`Table renamed to ${newName}`);

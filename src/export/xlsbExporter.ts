@@ -2,11 +2,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawn } from 'child_process';
-const XlsbWriter = require('../../ExcelHelpersTs/XlsbWriter').default as new (filePath: string) => {
+const XlsbWriter = require('../../libs/ExcelHelpersTs/XlsbWriter').default as new (filePath: string) => {
     addSheet(sheetName: string, hidden?: boolean): void;
-    writeSheet(rows: any[][], headers: string[] | null, doAutofilter?: boolean): void;
+    writeSheet(rows: unknown[][], headers: string[] | null, doAutofilter?: boolean): void;
+    // Streaming API methods
+    startSheet(sheetName: string, columnCount: number, headers?: string[], options?: { hidden?: boolean; doAutofilter?: boolean }): void;
+    writeRow(row: unknown[]): void;
+    endSheet(): void;
     finalize(): Promise<void>;
 };
+import { NzConnection, ConnectionDetails } from '../types';
 
 
 /**
@@ -15,7 +20,7 @@ const XlsbWriter = require('../../ExcelHelpersTs/XlsbWriter').default as new (fi
  * @param val - Value to potentially convert
  * @returns The value as number if it's a numeric string, otherwise the original value
  */
-function convertToNumberIfNumericString(val: any): any {
+function convertToNumberIfNumericString(val: unknown): unknown {
     if (typeof val === 'string' && val.length > 0) {
         // Check if it's a numeric string (including negatives and decimals)
         // Match: optional minus, digits, optional decimal part
@@ -35,7 +40,7 @@ function convertToNumberIfNumericString(val: any): any {
  * @param row - Array of values
  * @returns New array with numeric strings converted to numbers
  */
-function convertRowNumericStrings(row: any[]): any[] {
+function convertRowNumericStrings(row: unknown[]): unknown[] {
     return row.map(convertToNumberIfNumericString);
 }
 
@@ -59,27 +64,11 @@ export interface ExportResult {
     };
 }
 
-function parseConnectionString(connStr: string): any {
-    const parts = connStr.split(';');
-    const config: any = {};
-    for (const part of parts) {
-        const idx = part.indexOf('=');
-        if (idx > 0) {
-            const key = part.substring(0, idx).trim().toUpperCase();
-            const value = part.substring(idx + 1).trim();
-            if (key === 'SERVER') config.host = value;
-            else if (key === 'PORT') config.port = parseInt(value);
-            else if (key === 'DATABASE') config.database = value;
-            else if (key === 'UID') config.user = value;
-            else if (key === 'PWD') config.password = value;
-        }
-    }
-    return config;
-}
+// ConnectionDetails used directly - no parseConnectionString needed
 
 /**
  * Export SQL query results to XLSB file
- * @param connectionString Database connection string
+ * @param connectionDetails Database connection details
  * @param query SQL query to execute
  * @param outputPath Path where to save the XLSB file
  * @param copyToClipboard If true, also copy file to clipboard (Windows only)
@@ -87,13 +76,13 @@ function parseConnectionString(connStr: string): any {
  * @returns Export result with success status and details
  */
 export async function exportQueryToXlsb(
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     query: string,
     outputPath: string,
     copyToClipboard: boolean = false,
     progressCallback?: ProgressCallback
 ): Promise<ExportResult> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
         // Connect to database
@@ -101,11 +90,16 @@ export async function exportQueryToXlsb(
             progressCallback('Connecting to database...');
         }
 
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
         await connection.connect();
 
         // Use XlsbWriter
@@ -129,10 +123,10 @@ export async function exportQueryToXlsb(
             }
 
             try {
-                const cmd = connection.createCommand(currentQuery);
+                const cmd = connection!.createCommand(currentQuery);
                 const reader = await cmd.executeReader();
 
-                // Prepare data for XLSB
+                // Prepare headers for XLSB
                 const headers: string[] = [];
                 for (let i = 0; i < reader.fieldCount; i++) {
                     headers.push(reader.getName(i));
@@ -141,40 +135,52 @@ export async function exportQueryToXlsb(
                 const columnCount = headers.length;
                 totalCols = Math.max(totalCols, columnCount);
 
-                const rows: any[][] = [];
+                // Use streaming API - start sheet with headers
+                writer.startSheet(sheetName, columnCount, headers, { doAutofilter: true });
+
                 let rowCount = 0;
 
+                // Stream rows directly from database reader to Excel writer
                 while (await reader.read()) {
-                    const row: any[] = [];
+                    const row: unknown[] = [];
                     for (let i = 0; i < reader.fieldCount; i++) {
                         row.push(reader.getValue(i));
                     }
-                    // Convert numeric strings to numbers for proper Excel formatting
-                    rows.push(convertRowNumericStrings(row));
+                    // Convert numeric strings to numbers and write immediately
+                    writer.writeRow(convertRowNumericStrings(row));
                     rowCount++;
+
+                    // Progress update every 10000 rows
+                    if (rowCount % 10000 === 0 && progressCallback) {
+                        progressCallback(`Streaming ${rowCount.toLocaleString()} rows to "${sheetName}"...`);
+                    }
                 }
+
+                // Finalize the sheet
+                writer.endSheet();
 
                 totalRows += rowCount;
 
                 if (progressCallback) {
-                    progressCallback(`Writing ${rowCount.toLocaleString()} rows to sheet "${sheetName}"`);
+                    progressCallback(`Written ${rowCount.toLocaleString()} rows to sheet "${sheetName}"`);
                 }
-
-                // Add Sheet
-                writer.addSheet(sheetName);
-                writer.writeSheet(rows, headers);
-            } catch (err: any) {
-                // If one query fails, maybe we log it to a sheet or just continue?
-                // Let's create an error sheet
-                writer.addSheet(`Error ${qIndex + 1}`);
-                writer.writeSheet([[`Error executing query: ${err.message}`]], ['Error'], false);
+            } catch (err: unknown) {
+                // If one query fails, create an error sheet
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                writer.startSheet(`Error ${qIndex + 1}`, 1, ['Error'], { doAutofilter: false });
+                writer.writeRow([`Error executing query: ${errorMsg}`]);
+                writer.endSheet();
             }
         }
 
-        // Final sheet: SQL Code
-        writer.addSheet('SQL Code');
-        const sqlRows = [['SQL Query:'], ...query.split('\n').map(line => [line])];
-        writer.writeSheet(sqlRows, null, false); // No header, no autofilter for SQL
+        // Final sheet: SQL Code (using streaming API)
+        const sqlLines = query.split('\n');
+        writer.startSheet('SQL Code', 1, undefined, { doAutofilter: false });
+        writer.writeRow(['SQL Query:']);
+        for (const line of sqlLines) {
+            writer.writeRow([line]);
+        }
+        writer.endSheet();
 
         if (progressCallback) {
             progressCallback('Finalizing file...');
@@ -215,10 +221,11 @@ export async function exportQueryToXlsb(
         }
 
         return exportResult;
-    } catch (error: any) {
+    } catch (error: unknown) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
         return {
             success: false,
-            message: `Export error: ${error.message || error}`
+            message: `Export error: ${errorMsg}`
         };
     } finally {
         if (connection) {
@@ -240,7 +247,7 @@ export async function exportQueryToXlsb(
  * @param progressCallback Optional callback for progress updates
  * @returns Export result with success status and details
  */
-interface CsvExportItem {
+export interface CsvExportItem {
     csv: string;
     sql?: string; // Made optional as not all items might have SQL
     name: string;
@@ -264,9 +271,8 @@ export async function exportCsvToXlsb(
         let totalColumns = 0;
         const sqlItems: { name: string; sql: string }[] = [];
 
-        // Helper to process a single CSV string
+        // Helper to process a single CSV string using streaming API
         const processCsv = (csv: string, sheetName: string) => {
-            const rows: any[][] = [];
             const lines = csv.split(/\r?\n/); // Handle both \n and \r\n
 
             // Simple regex parser for CSV lines
@@ -296,28 +302,37 @@ export async function exportCsvToXlsb(
                 return result;
             };
 
-            let headers: string[] = [];
+            // Find first non-empty line for headers
+            let headerIndex = 0;
+            while (headerIndex < lines.length && !lines[headerIndex].trim()) {
+                headerIndex++;
+            }
+
+            if (headerIndex >= lines.length) return;
+
+            const headers = parseCsvLine(lines[headerIndex]);
+            if (headers.length === 0) return;
+
+            totalColumns = Math.max(totalColumns, headers.length);
+
+            // Start streaming sheet with headers
+            writer.startSheet(sheetName, headers.length, headers, { doAutofilter: true });
+
             let currentRowCount = 0;
 
-            lines.forEach((line, index) => {
-                if (!line.trim()) return;
+            // Stream data rows
+            for (let i = headerIndex + 1; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line.trim()) continue;
 
                 const fields = parseCsvLine(line);
-                if (index === 0) {
-                    headers = fields;
-                } else {
-                    // Convert numeric strings to numbers for proper Excel formatting
-                    rows.push(convertRowNumericStrings(fields));
-                    currentRowCount++;
-                }
-            });
-
-            if (headers.length > 0) {
-                totalColumns = Math.max(totalColumns, headers.length);
-                writer.addSheet(sheetName);
-                writer.writeSheet(rows, headers);
-                totalRows += currentRowCount; // Accumulate total rows
+                // Convert numeric strings to numbers and write immediately
+                writer.writeRow(convertRowNumericStrings(fields));
+                currentRowCount++;
             }
+
+            writer.endSheet();
+            totalRows += currentRowCount;
         };
 
         if (Array.isArray(csvContent)) {
@@ -346,27 +361,27 @@ export async function exportCsvToXlsb(
                 sqlItems.push({ name: 'Query Results', sql: metadata.sql });
             } else if (metadata.source) {
                 // If no SQL, but a source, add a source sheet
-                writer.addSheet('CSV Source');
-                const sourceRows = [['CSV Source:'], [metadata.source]];
-                writer.writeSheet(sourceRows, null, false);
+                writer.startSheet('CSV Source', 1, undefined, { doAutofilter: false });
+                writer.writeRow(['CSV Source:']);
+                writer.writeRow([metadata.source]);
+                writer.endSheet();
             }
         }
 
-        // Add SQL Code sheet if we have any SQL
+        // Add SQL Code sheet if we have any SQL (using streaming API)
         if (sqlItems.length > 0) {
-            writer.addSheet('SQL Code');
-            const sqlRows: string[][] = [];
+            writer.startSheet('SQL Code', 1, undefined, { doAutofilter: false });
 
             sqlItems.forEach(item => {
-                sqlRows.push([`--- SQL for ${item.name} ---`]);
+                writer.writeRow([`--- SQL for ${item.name} ---`]);
                 // Split multiline SQL
                 item.sql.split('\n').forEach(line => {
-                    sqlRows.push([line]);
+                    writer.writeRow([line]);
                 });
-                sqlRows.push(['']); // Spacer
+                writer.writeRow(['']); // Spacer
             });
 
-            writer.writeSheet(sqlRows, null, false);
+            writer.endSheet();
         }
 
         if (progressCallback) {
@@ -407,10 +422,11 @@ export async function exportCsvToXlsb(
         }
 
         return exportResult;
-    } catch (err: any) {
+    } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
         return {
             success: false,
-            message: `Export failed: ${err.message}`
+            message: `Export failed: ${errorMsg}`
         };
     }
 }
@@ -458,8 +474,9 @@ export async function copyFileToClipboard(filePath: string): Promise<boolean> {
                 console.error(`Error spawning PowerShell: ${err.message}`);
                 resolve(false);
             });
-        } catch (error: any) {
-            console.error(`Error copying file to clipboard: ${error.message}`);
+        } catch (error: unknown) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            console.error(`Error copying file to clipboard: ${errorMsg}`);
             resolve(false);
         }
     });

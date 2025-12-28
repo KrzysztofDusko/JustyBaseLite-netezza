@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.18",
+  "version": "0.0.19",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -586,6 +586,18 @@
             "NZ011": "warning"
           },
           "description": "Configure SQL linter rules severity. Available rules: NZ001 (SELECT *), NZ002 (DELETE without WHERE), NZ003 (UPDATE without WHERE), NZ004 (CROSS JOIN), NZ005 (Leading wildcard LIKE), NZ006 (ORDER BY without LIMIT), NZ007 (Inconsistent keyword case), NZ008 (TRUNCATE), NZ009 (Multiple OR), NZ010 (Missing table alias), NZ011 (CTAS missing DISTRIBUTE ON). Values: error, warning, information, hint, off."
+        },
+        "netezza.enableStreaming": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable streaming mode for query results. When enabled, results are sent to the UI in chunks for better memory efficiency and faster first-data display with large result sets."
+        },
+        "netezza.streamingChunkSize": {
+          "type": "integer",
+          "default": 5000,
+          "minimum": 1000,
+          "maximum": 50000,
+          "description": "Number of rows per chunk when streaming mode is enabled. Larger chunks are more efficient but use more memory."
         }
       }
     },
@@ -628,6 +640,12 @@
         "key": "shift+alt+f",
         "mac": "shift+option+f",
         "when": "editorLangId == sql"
+      },
+      {
+        "command": "netezza.copySelection",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "netezza.resultsHasSelection && !editorHasSelection && editorTextFocus"
       }
     ]
   },

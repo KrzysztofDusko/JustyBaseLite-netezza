@@ -22,4 +22,6 @@ dist/*.map
 
 # Exclude bundled sources
 node_modules/
-driver/
+libs/
+
+Icon.png

@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import { ConnectionManager } from '../core/connectionManager';
+import { CsvExportItem } from '../export/xlsbExporter';
 
 export interface ExportCommandsDependencies {
     context: vscode.ExtensionContext;
@@ -57,8 +58,8 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
             try {
                 const documentUri = editor.document.uri.toString();
                 const connectionName = connectionManager.getConnectionForExecution(documentUri);
-                const connectionString = await connectionManager.getConnectionString(connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionName || '');
+                if (!connectionDetails) {
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
@@ -72,7 +73,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         const { exportQueryToXlsb } = await import('../export/xlsbExporter');
 
                         const result = await exportQueryToXlsb(
-                            connectionString,
+                            connectionDetails,
                             text,
                             uri.fsPath,
                             false,
@@ -90,8 +91,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
 
                 logExecutionTime(outputChannel, 'Export to XLSB', startTime);
                 vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Error exporting to XLSB: ${err.message}`);
+            } catch (err: unknown) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`Error exporting to XLSB: ${errorMsg}`);
             }
         }),
 
@@ -123,8 +125,8 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
             try {
                 const documentUri = editor.document.uri.toString();
                 const connectionName = connectionManager.getConnectionForExecution(documentUri);
-                const connectionString = await connectionManager.getConnectionString(connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionName || '');
+                if (!connectionDetails) {
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
@@ -136,14 +138,15 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     },
                     async progress => {
                         const { exportToCsv } = await import('../export/csvExporter');
-                        await exportToCsv(context, connectionString, text, uri.fsPath, progress);
+                        await exportToCsv(context, connectionDetails, text, uri.fsPath, progress);
                     }
                 );
 
                 logExecutionTime(outputChannel, 'Export to CSV', startTime);
                 vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Error exporting to CSV: ${err.message}`);
+            } catch (err: unknown) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`Error exporting to CSV: ${errorMsg}`);
             }
         }),
 
@@ -166,8 +169,8 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
             try {
                 const documentUri = editor.document.uri.toString();
                 const connectionName = connectionManager.getConnectionForExecution(documentUri);
-                const connectionString = await connectionManager.getConnectionString(connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionName || '');
+                if (!connectionDetails) {
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
@@ -185,7 +188,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         const tempPath = getTempFilePath();
 
                         const result = await exportQueryToXlsb(
-                            connectionString,
+                            connectionDetails,
                             text,
                             tempPath,
                             true,
@@ -217,8 +220,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     const tempDir = os.tmpdir();
                     await vscode.env.openExternal(vscode.Uri.file(tempDir));
                 }
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Error copying XLSB to clipboard: ${err.message}`);
+            } catch (err: unknown) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`Error copying XLSB to clipboard: ${errorMsg}`);
             }
         }),
 
@@ -250,8 +254,8 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
             try {
                 const documentUri = editor.document.uri.toString();
                 const connectionName = connectionManager.getConnectionForExecution(documentUri);
-                const connectionString = await connectionManager.getConnectionString(connectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(connectionName || '');
+                if (!connectionDetails) {
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
@@ -265,7 +269,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         const { exportQueryToXlsb } = await import('../export/xlsbExporter');
 
                         const result = await exportQueryToXlsb(
-                            connectionString,
+                            connectionDetails,
                             text,
                             uri.fsPath,
                             false,
@@ -285,15 +289,16 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
 
                 await vscode.env.openExternal(uri);
                 vscode.window.showInformationMessage(`Results exported and opened: ${uri.fsPath}`);
-            } catch (err: any) {
-                vscode.window.showErrorMessage(`Error exporting to XLSB: ${err.message}`);
+            } catch (err: unknown) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
+                vscode.window.showErrorMessage(`Error exporting to XLSB: ${errorMsg}`);
             }
         }),
 
         // Export Current Result to XLSB and Open (from datagrid)
         vscode.commands.registerCommand(
             'netezza.exportCurrentResultToXlsbAndOpen',
-            async (csvContent: string | any[], sql?: string) => {
+            async (csvContent: string | (CsvExportItem & { isActive?: boolean })[], sql?: string) => {
                 try {
                     if (!csvContent || (Array.isArray(csvContent) && csvContent.length === 0)) {
                         vscode.window.showErrorMessage('No data to export');
@@ -358,8 +363,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
 
                     await vscode.env.openExternal(vscode.Uri.file(tempPath));
                     vscode.window.showInformationMessage(`Results exported and opened: ${tempPath}`);
-                } catch (err: any) {
-                    vscode.window.showErrorMessage(`Error exporting to Excel: ${err.message}`);
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    vscode.window.showErrorMessage(`Error exporting to Excel: ${errorMsg}`);
                 }
             }
         ),
@@ -367,7 +373,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
         // Copy Current Result to Clipboard as XLSB
         vscode.commands.registerCommand(
             'netezza.copyCurrentResultToXlsbClipboard',
-            async (csvContent: string | any[], sql?: string) => {
+            async (csvContent: string | (CsvExportItem & { isActive?: boolean })[], sql?: string) => {
                 try {
                     if (!csvContent || (Array.isArray(csvContent) && csvContent.length === 0)) {
                         vscode.window.showErrorMessage('No data to copy');
@@ -437,8 +443,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         const tempDir = os.tmpdir();
                         await vscode.env.openExternal(vscode.Uri.file(tempDir));
                     }
-                } catch (err: any) {
-                    vscode.window.showErrorMessage(`Error copying to Excel: ${err.message}`);
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    vscode.window.showErrorMessage(`Error copying to Excel: ${errorMsg}`);
                 }
             }
         )

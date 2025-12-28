@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { runQuery } from '../core/queryRunner';
 import { MetadataCache } from '../metadataCache';
 import { ConnectionManager } from '../core/connectionManager';
+import { DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from '../metadata/types';
 
 export class SqlCompletionItemProvider implements vscode.CompletionItemProvider {
     constructor(
@@ -172,8 +173,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
 
         // 1. Temp Tables: CREATE TABLE TEMP_1 AS ( SELECT ... )
         // Regex to capture: CREATE TABLE name AS ( query )
-        // We need to be careful with nested parenthesis. For simplicity, we assume the query is inside the first balanced parens after AS.
-        // Or we just grab everything until the matching closing paren.
+        // We need to stop at matching closing paren.
 
         const tempTableRegex = /CREATE\s+TABLE\s+([a-zA-Z0-9_]+)\s+AS\s*\(/gi;
         let match;
@@ -294,11 +294,11 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const selectMatch = query.match(/^\s*SELECT\s+/i);
         if (!selectMatch) return [];
 
+        const start = selectMatch[0].length;
         let selectList = '';
         let balance = 0;
         let fromIndex = -1;
 
-        const start = selectMatch[0].length;
         for (let i = start; i < query.length; i++) {
             if (query[i] === '(') balance++;
             else if (query[i] === ')') balance--;
@@ -345,8 +345,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             // "col" -> col
             // "table.col" -> col
 
-            // Remove comments from the column definition if any (though we stripped globally, inline comments might remain if logic wasn't perfect, but global strip should handle it)
-
+            // Remove comments from the column definition if any
             const asMatch = col.match(/\s+AS\s+([a-zA-Z0-9_]+)$/i);
             if (asMatch) return asMatch[1];
 
@@ -359,49 +358,57 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         });
     }
 
+    /**
+     * Find alias definition for a given identifier
+     * e.g. "FROM DB.SCHEMA.TABLE T" -> T aliased to TABLE
+     */
+    private findAlias(text: string, alias: string): { db?: string; schema?: string; table: string } | null {
+        // Regex to find: TABLE [AS] ALIAS
+        // or SCHEMA.TABLE [AS] ALIAS
+        // or DB.SCHEMA.TABLE [AS] ALIAS
+
+        // We want to match whole word alias
+        const regex = new RegExp(`(?:FROM|JOIN)\\s+([a-zA-Z0-9_\\.]+)(?:\\s+(?:AS\\s+)?([a-zA-Z0-9_]+))?`, 'gi');
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+            const fullRef = match[1]; // DB.SCHEMA.TABLE
+            const foundAlias = match[2]; // ALIAS (optional)
+
+            if (foundAlias && foundAlias.toUpperCase() === alias.toUpperCase()) {
+                const parts = fullRef.split('.');
+                if (parts.length === 3) {
+                    return { db: parts[0], schema: parts[1], table: parts[2] };
+                } else if (parts.length === 2) {
+                    return { schema: parts[0], table: parts[1] }; // db undefined (current?)
+                } else {
+                    return { table: parts[0] };
+                }
+            } else if (!foundAlias) {
+                // If no alias, the table name itself is the alias reference if it matches
+                // e.g. FROM TABLE -> TABLE.col
+                const parts = fullRef.split('.');
+                const tableName = parts[parts.length - 1];
+                if (tableName.toUpperCase() === alias.toUpperCase()) {
+                    if (parts.length === 3) {
+                        return { db: parts[0], schema: parts[1], table: parts[2] };
+                    } else if (parts.length === 2) {
+                        return { schema: parts[0], table: parts[1] };
+                    } else {
+                        return { table: parts[0] };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
     private getKeywords(): vscode.CompletionItem[] {
         const keywords = [
-            'SELECT',
-            'FROM',
-            'WHERE',
-            'GROUP BY',
-            'ORDER BY',
-            'LIMIT',
-            'INSERT',
-            'INTO',
-            'VALUES',
-            'UPDATE',
-            'SET',
-            'DELETE',
-            'CREATE',
-            'DROP',
-            'TABLE',
-            'VIEW',
-            'DATABASE',
-            'JOIN',
-            'INNER',
-            'LEFT',
-            'RIGHT',
-            'OUTER',
-            'ON',
-            'AND',
-            'OR',
-            'NOT',
-            'NULL',
-            'IS',
-            'IN',
-            'BETWEEN',
-            'LIKE',
-            'AS',
-            'DISTINCT',
-            'CASE',
-            'WHEN',
-            'THEN',
-            'ELSE',
-            'END',
-            'WITH',
-            'UNION',
-            'ALL'
+            'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'LIMIT', 'INSERT', 'INTO', 'VALUES',
+            'UPDATE', 'SET', 'DELETE', 'CREATE', 'DROP', 'TABLE', 'VIEW', 'DATABASE', 'JOIN',
+            'INNER', 'LEFT', 'RIGHT', 'OUTER', 'ON', 'AND', 'OR', 'NOT', 'NULL', 'IS', 'IN',
+            'BETWEEN', 'LIKE', 'AS', 'DISTINCT', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'WITH',
+            'UNION', 'ALL'
         ];
         return keywords.map(k => {
             const item = new vscode.CompletionItem(k, vscode.CompletionItemKind.Keyword);
@@ -414,9 +421,8 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         if (!connectionName) return [];
         const cached = this.metadataCache.getDatabases(connectionName);
         if (cached) {
-            return cached.map((item: any) => {
-                if (item instanceof vscode.CompletionItem) return item;
-                const ci = new vscode.CompletionItem(item.label, item.kind);
+            return cached.map((item) => {
+                const ci = new vscode.CompletionItem(item.label || item.DATABASE, item.kind || vscode.CompletionItemKind.Module);
                 ci.detail = item.detail;
                 return ci;
             });
@@ -427,17 +433,22 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) return [];
 
-            const results = JSON.parse(resultJson);
-            const items = results.map((row: any) => {
-                const item = new vscode.CompletionItem(row.DATABASE, vscode.CompletionItemKind.Module);
-                item.detail = 'Database';
-                return item;
-            });
+            const results = JSON.parse(resultJson) as { DATABASE: string }[];
+            const items: DatabaseMetadata[] = results.map(row => ({
+                DATABASE: row.DATABASE,
+                label: row.DATABASE,
+                kind: 9, // Module
+                detail: 'Database'
+            }));
 
             this.metadataCache.setDatabases(connectionName, items);
 
-            return items;
-        } catch (e) {
+            return items.map(item => {
+                const ci = new vscode.CompletionItem(item.label!, item.kind);
+                ci.detail = item.detail;
+                return ci;
+            });
+        } catch (e: unknown) {
             console.error(e);
             return [];
         }
@@ -447,9 +458,8 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         if (!connectionName) return [];
         const cached = this.metadataCache.getSchemas(connectionName, dbName);
         if (cached) {
-            return cached.map((item: any) => {
-                if (item instanceof vscode.CompletionItem) return item;
-                const ci = new vscode.CompletionItem(item.label, item.kind);
+            return cached.map((item) => {
+                const ci = new vscode.CompletionItem(item.label || item.SCHEMA, item.kind || vscode.CompletionItemKind.Folder);
                 ci.detail = item.detail;
                 ci.insertText = item.insertText;
                 ci.sortText = item.sortText;
@@ -466,23 +476,33 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 return [];
             }
 
-            const results = JSON.parse(resultJson);
-            const items = results
-                .filter((row: any) => row.SCHEMA != null && row.SCHEMA !== '')
-                .map((row: any) => {
-                    const schemaName = row.SCHEMA;
-                    const item = new vscode.CompletionItem(schemaName, vscode.CompletionItemKind.Folder);
-                    item.detail = `Schema in ${dbName}`;
-                    item.insertText = schemaName;
-                    item.sortText = schemaName;
-                    item.filterText = schemaName;
-                    return item;
+            const results = JSON.parse(resultJson) as { SCHEMA: string | null }[];
+            const items: SchemaMetadata[] = results
+                .filter(row => row.SCHEMA != null && row.SCHEMA !== '')
+                .map(row => {
+                    const schemaName = row.SCHEMA!;
+                    return {
+                        SCHEMA: schemaName,
+                        label: schemaName,
+                        kind: 19, // Folder
+                        detail: `Schema in ${dbName}`,
+                        insertText: schemaName,
+                        sortText: schemaName,
+                        filterText: schemaName
+                    };
                 });
 
             this.metadataCache.setSchemas(connectionName, dbName, items);
 
-            return items;
-        } catch (e) {
+            return items.map(item => {
+                const ci = new vscode.CompletionItem(item.label!, item.kind);
+                ci.detail = item.detail;
+                ci.insertText = item.insertText;
+                ci.sortText = item.sortText;
+                ci.filterText = item.filterText;
+                return ci;
+            });
+        } catch (e: unknown) {
             console.error('[SqlCompletion] Error in getSchemas:', e);
             return [];
         } finally {
@@ -498,16 +518,15 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         if (!connectionName) return [];
         const cacheKey = schemaName ? `${dbName}.${schemaName}` : `${dbName}..`;
 
-        // For double-dot pattern (no schema), try to aggregate from all cached schemas first
         const cached = schemaName
             ? this.metadataCache.getTables(connectionName, cacheKey)
             : this.metadataCache.getTables(connectionName, cacheKey) ||
             this.metadataCache.getTablesAllSchemas(connectionName, dbName);
 
         if (cached) {
-            return cached.map((item: any) => {
-                if (item instanceof vscode.CompletionItem) return item;
-                const ci = new vscode.CompletionItem(item.label, item.kind);
+            return cached.map((item) => {
+                const label = typeof item.label === 'string' ? item.label : (item.label?.label || item.OBJNAME || item.TABLENAME || '?');
+                const ci = new vscode.CompletionItem(label, item.kind || vscode.CompletionItemKind.Class);
                 ci.detail = item.detail;
                 ci.sortText = item.sortText;
                 return ci;
@@ -530,33 +549,41 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) return [];
 
-            const results = JSON.parse(resultJson);
-
+            const results = JSON.parse(resultJson) as { OBJNAME: string; OBJID: number; SCHEMA?: string }[];
             const idMapForKey = new Map<string, number>();
 
-            const items = results.map((row: any) => {
-                const item = new vscode.CompletionItem(row.OBJNAME, vscode.CompletionItemKind.Class);
-                item.detail = schemaName ? 'Table' : `Table (${row.SCHEMA})`;
-                item.sortText = row.OBJNAME;
+            const items: TableMetadata[] = results.map(row => {
+                const label = row.OBJNAME;
+                const schema = row.SCHEMA || schemaName;
+                const fullKey = schema
+                    ? `${dbName}.${schema}.${row.OBJNAME}`
+                    : `${dbName}..${row.OBJNAME}`;
 
-                // If we don't have schemaName, we can't reliably build the full key unless we use the schema from the row
-                // But the cache key for 'getTables' with no schema is 'DB..', so we just store under that.
-                // However, findTableId usually expects DB.SCHEMA.TABLE.
-                // So idMapForKey should store fully qualified names if possible.
+                // Populate map while iterating
+                idMapForKey.set(fullKey, row.OBJID);
 
-                if (schemaName) {
-                    idMapForKey.set(`${dbName}.${schemaName}.${row.OBJNAME}`, row.OBJID);
-                } else if (row.SCHEMA) {
-                    idMapForKey.set(`${dbName}.${row.SCHEMA}.${row.OBJNAME}`, row.OBJID);
-                }
-
-                return item;
+                return {
+                    OBJNAME: row.OBJNAME,
+                    TABLENAME: row.OBJNAME,
+                    OBJID: row.OBJID,
+                    SCHEMA: schema,
+                    label: label,
+                    kind: 6, // Class
+                    detail: schemaName ? 'Table' : `Table (${schema})`,
+                    sortText: row.OBJNAME
+                };
             });
 
             this.metadataCache.setTables(connectionName, cacheKey, items, idMapForKey);
 
-            return items;
-        } catch (e) {
+            return items.map(item => {
+                const label = typeof item.label === 'string' ? item.label : (item.label?.label || '?');
+                const ci = new vscode.CompletionItem(label, item.kind);
+                ci.detail = item.detail;
+                ci.sortText = item.sortText;
+                return ci;
+            });
+        } catch (e: unknown) {
             console.error(e);
             return [];
         } finally {
@@ -588,9 +615,8 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const cacheKey = `${dbName || 'CURRENT'}.${schemaName || ''}.${tableName}`;
         const cached = this.metadataCache.getColumns(connectionName, cacheKey);
         if (cached) {
-            return cached.map((item: any) => {
-                if (item instanceof vscode.CompletionItem) return item;
-                const ci = new vscode.CompletionItem(item.label, item.kind);
+            return cached.map((item) => {
+                const ci = new vscode.CompletionItem(item.label || item.ATTNAME, item.kind || vscode.CompletionItemKind.Field);
                 ci.detail = item.detail;
                 return ci;
             });
@@ -617,12 +643,15 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
             if (!resultJson) return [];
 
-            const results = JSON.parse(resultJson);
-            const items = results.map((row: any) => {
-                const item = new vscode.CompletionItem(row.ATTNAME, vscode.CompletionItemKind.Field);
-                item.detail = row.FORMAT_TYPE;
-                return item;
-            });
+            const results = JSON.parse(resultJson) as { ATTNAME: string; FORMAT_TYPE: string }[];
+
+            const items: ColumnMetadata[] = results.map(row => ({
+                ATTNAME: row.ATTNAME,
+                FORMAT_TYPE: row.FORMAT_TYPE,
+                label: row.ATTNAME,
+                kind: 9, // Field
+                detail: row.FORMAT_TYPE
+            }));
 
             this.metadataCache.setColumns(connectionName, cacheKey, items);
 
@@ -633,88 +662,27 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 setTimeout(async () => {
                     try {
                         await cache.prefetchColumnsForSchema(
-                            connectionName, // Pass connection name
+                            connectionName,
                             dbName,
                             schemaName,
-                            q => runQuery(context, q, true, connectionName, this.connectionManager)
+                            q => runQuery(context, q, true, connectionName!, this.connectionManager)
                         );
-                    } catch (e) {
+                    } catch (e: unknown) {
                         console.error('[SqlCompletion] Background column prefetch error:', e);
                     }
-                }, 100); // Small delay to not block UI
+                }, 100);
             }
 
-            return items;
-        } catch (e) {
+            return items.map(item => {
+                const ci = new vscode.CompletionItem(item.label!, item.kind);
+                ci.detail = item.detail;
+                return ci;
+            });
+        } catch (e: unknown) {
             console.error(e);
             return [];
         } finally {
             statusMsg.dispose();
         }
-    }
-
-    private findAlias(text: string, alias: string): { db?: string; schema?: string; table: string } | null {
-        // "FROM db.schema.table alias"
-        // "JOIN table alias"
-
-        // Use global search to find all occurrences, then filter out keywords.
-        // We iterate to find a valid table reference that is NOT a keyword.
-        const aliasPattern = new RegExp(`([a-zA-Z0-9_\\.]+) (?:AS\\s+)?${alias}\\b`, 'gi');
-
-        const keywords = new Set([
-            'SELECT',
-            'WHERE',
-            'GROUP',
-            'ORDER',
-            'HAVING',
-            'LIMIT',
-            'ON',
-            'AND',
-            'OR',
-            'NOT',
-            'CASE',
-            'WHEN',
-            'THEN',
-            'ELSE',
-            'END',
-            'JOIN',
-            'LEFT',
-            'RIGHT',
-            'INNER',
-            'OUTER',
-            'CROSS',
-            'FULL',
-            'UNION',
-            'EXCEPT',
-            'INTERSECT',
-            'FROM',
-            'UPDATE',
-            'DELETE',
-            'INSERT',
-            'INTO',
-            'VALUES',
-            'SET'
-        ]);
-
-        let match;
-        while ((match = aliasPattern.exec(text)) !== null) {
-            const tableRef = match[1];
-
-            // Check if tableRef is a keyword (false positive)
-            if (keywords.has(tableRef.toUpperCase())) {
-                continue;
-            }
-
-            // Valid candidate found
-            const parts = tableRef.split('.');
-            if (parts.length === 3) {
-                return { db: parts[0], schema: parts[1], table: parts[2] };
-            } else if (parts.length === 2) {
-                return { table: parts[1], schema: parts[0] };
-            } else {
-                return { table: parts[0] };
-            }
-        }
-        return null;
     }
 }

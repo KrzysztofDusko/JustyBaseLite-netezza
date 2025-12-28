@@ -4,7 +4,8 @@
  */
 
 import { ColumnInfo, KeyInfo, BatchDDLOptions, BatchDDLResult } from './types';
-import { executeQueryHelper, parseConnectionString } from './helpers';
+import { executeQueryHelper } from './helpers';
+import { NzConnection } from '../types';
 import { buildTableDDLFromCache } from './tableDDL';
 import { generateViewDDL } from './viewDDL';
 import { generateProcedureDDL } from './procedureDDL';
@@ -16,7 +17,7 @@ import { generateSynonymDDL } from './synonymDDL';
  * OPTIMIZED: Uses bulk queries to fetch all metadata at once instead of per-object queries
  */
 export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchDDLResult> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
     const errors: string[] = [];
     const ddlParts: string[] = [];
     let objectCount = 0;
@@ -26,12 +27,17 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
     const supportedTypes = ['TABLE', 'VIEW', 'PROCEDURE', 'EXTERNAL TABLE', 'SYNONYM'];
 
     try {
-        const config = parseConnectionString(options.connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: options.connectionDetails.host,
+            port: options.connectionDetails.port || 5480,
+            database: options.connectionDetails.database,
+            user: options.connectionDetails.user,
+            password: options.connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
+        const NzConnection = require('../../libs/driver/src/NzConnection');
         connection = new NzConnection(config);
-        await connection.connect();
+        await connection!.connect();
 
         const database = options.database.toUpperCase();
         const schemaFilter = options.schema ? options.schema.toUpperCase() : null;
@@ -93,7 +99,17 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                 ORDER BY D.SCHEMA, D.OBJNAME, X.ATTNUM
             `;
             try {
-                const colResults = await executeQueryHelper(connection, columnsQuery);
+                interface ColumnRow {
+                    SCHEMA: string;
+                    OBJNAME: string;
+                    OBJTYPE: string;
+                    ATTNAME: string;
+                    DESCRIPTION: string;
+                    FULL_TYPE: string;
+                    ATTNOTNULL: boolean | number | string;
+                    COLDEFAULT: string;
+                }
+                const colResults = await executeQueryHelper<ColumnRow>(connection!, columnsQuery);
                 for (const row of colResults) {
                     const key = `${row.SCHEMA}.${row.OBJNAME}`;
                     if (!allColumns.has(key)) {
@@ -115,8 +131,9 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                         defaultValue: row.COLDEFAULT || null
                     });
                 }
-            } catch (e: any) {
-                errors.push(`Error bulk fetching columns: ${e.message}`);
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                errors.push(`Error bulk fetching columns: ${msg}`);
             }
         }
 
@@ -130,7 +147,8 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                 ORDER BY SCHEMA, TABLENAME, DISTSEQNO
             `;
             try {
-                const distResults = await executeQueryHelper(connection, distQuery);
+                interface DistRow { SCHEMA: string; TABLENAME: string; ATTNAME: string; }
+                const distResults = await executeQueryHelper<DistRow>(connection!, distQuery);
                 for (const row of distResults) {
                     const key = `${row.SCHEMA}.${row.TABLENAME}`;
                     if (!allDistribution.has(key)) {
@@ -153,7 +171,8 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                 ORDER BY SCHEMA, TABLENAME, ORGSEQNO
             `;
             try {
-                const orgResults = await executeQueryHelper(connection, orgQuery);
+                interface OrgRow { SCHEMA: string; TABLENAME: string; ATTNAME: string; }
+                const orgResults = await executeQueryHelper<OrgRow>(connection!, orgQuery);
                 for (const row of orgResults) {
                     const key = `${row.SCHEMA}.${row.TABLENAME}`;
                     if (!allOrganize.has(key)) {
@@ -179,7 +198,12 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                 ORDER BY X.SCHEMA, X.RELATION, X.CONSTRAINTNAME, X.CONSEQ
             `;
             try {
-                const keysResults = await executeQueryHelper(connection, keysQuery);
+                interface KeyRow {
+                    SCHEMA: string; RELATION: string; CONSTRAINTNAME: string; CONTYPE: string;
+                    ATTNAME: string; PKDATABASE: string; PKSCHEMA: string; PKRELATION: string; PKATTNAME: string;
+                    UPDT_TYPE: string; DEL_TYPE: string;
+                }
+                const keysResults = await executeQueryHelper<KeyRow>(connection!, keysQuery);
                 for (const row of keysResults) {
                     const tableKey = `${row.SCHEMA}.${row.RELATION}`;
                     if (!allKeys.has(tableKey)) {
@@ -223,7 +247,8 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                 WHERE DBNAME = '${database}' AND OBJTYPE = 'TABLE' AND DESCRIPTION IS NOT NULL ${schemaClause}
             `;
             try {
-                const commentResults = await executeQueryHelper(connection, commentQuery);
+                interface CommentRow { SCHEMA: string; OBJNAME: string; DESCRIPTION: string; }
+                const commentResults = await executeQueryHelper<CommentRow>(connection!, commentQuery);
                 for (const row of commentResults) {
                     if (row.DESCRIPTION) {
                         allComments.set(`${row.SCHEMA}.${row.OBJNAME}`, row.DESCRIPTION);
@@ -247,17 +272,18 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                     let query = `SELECT PROCEDURESIGNATURE AS OBJNAME, SCHEMA FROM ${database}.._V_PROCEDURE WHERE DATABASE = '${database}'`;
                     if (schemaFilter) query += ` AND SCHEMA = '${schemaFilter}'`;
                     query += ` ORDER BY SCHEMA, PROCEDURESIGNATURE`;
-                    const result = await executeQueryHelper(connection, query);
+                    const result = await executeQueryHelper<{ OBJNAME: string; SCHEMA: string }>(connection!, query);
                     objects = result.map(r => ({ name: r.OBJNAME, schema: r.SCHEMA }));
                 } else {
                     let query = `SELECT OBJNAME, SCHEMA FROM ${database}.._V_OBJECT_DATA WHERE DBNAME = '${database}' AND OBJTYPE = '${objType}'`;
                     if (schemaFilter) query += ` AND SCHEMA = '${schemaFilter}'`;
                     query += ` ORDER BY SCHEMA, OBJNAME`;
-                    const result = await executeQueryHelper(connection, query);
+                    const result = await executeQueryHelper<{ OBJNAME: string; SCHEMA: string }>(connection!, query);
                     objects = result.map(r => ({ name: r.OBJNAME, schema: r.SCHEMA }));
                 }
-            } catch (e: any) {
-                errors.push(`Error querying ${objType}s: ${e.message}`);
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                errors.push(`Error querying ${objType}s: ${msg}`);
                 continue;
             }
 
@@ -288,18 +314,18 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                             break;
                         case 'VIEW':
                             // Views still need individual query for DEFINITION
-                            ddlCode = await generateViewDDL(connection, database, obj.schema, obj.name);
+                            ddlCode = await generateViewDDL(connection!, database, obj.schema, obj.name);
                             break;
                         case 'PROCEDURE':
                             // Procedures still need individual query for source
-                            ddlCode = await generateProcedureDDL(connection, database, obj.schema, obj.name);
+                            ddlCode = await generateProcedureDDL(connection!, database, obj.schema, obj.name);
                             break;
                         case 'EXTERNAL TABLE':
                             // External tables still need individual query for USING clause
-                            ddlCode = await generateExternalTableDDL(connection, database, obj.schema, obj.name);
+                            ddlCode = await generateExternalTableDDL(connection!, database, obj.schema, obj.name);
                             break;
                         case 'SYNONYM':
-                            ddlCode = await generateSynonymDDL(connection, database, obj.schema, obj.name);
+                            ddlCode = await generateSynonymDDL(connection!, database, obj.schema, obj.name);
                             break;
                         default:
                             skipped++;
@@ -310,9 +336,10 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                     ddlParts.push(ddlCode);
                     ddlParts.push('');
                     objectCount++;
-                } catch (e: any) {
+                } catch (e: unknown) {
+                    const msg = e instanceof Error ? e.message : String(e);
                     errors.push(
-                        `Error generating DDL for ${objType} ${database}.${obj.schema}.${obj.name}: ${e.message}`
+                        `Error generating DDL for ${objType} ${database}.${obj.schema}.${obj.name}: ${msg}`
                     );
                     skipped++;
                 }
@@ -334,11 +361,12 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
             errors,
             skipped
         };
-    } catch (e: any) {
+    } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
         return {
             success: false,
             objectCount: 0,
-            errors: [`Batch DDL generation error: ${e.message || e}`],
+            errors: [`Batch DDL generation error: ${msg}`],
             skipped: 0
         };
     } finally {

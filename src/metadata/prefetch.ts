@@ -5,11 +5,37 @@
 
 import { CacheStorage } from './cacheStorage';
 import { extractLabel } from './helpers';
+import { TableMetadata, ColumnMetadata } from './types';
 
 /**
  * Type for query execution function
  */
 export type QueryRunnerFn = (query: string) => Promise<string | undefined>;
+
+interface RawObjectRow {
+    OBJNAME: string;
+    OBJID: number;
+    SCHEMA: string;
+    DBNAME: string;
+    OBJTYPE?: string;
+}
+
+interface RawColumnRow {
+    TABLENAME: string;
+    ATTNAME: string;
+    FORMAT_TYPE: string;
+    ATTNUM?: number;
+    SCHEMA?: string;
+    DBNAME?: string;
+}
+
+interface RawSchemaRow {
+    SCHEMA: string;
+}
+
+interface RawDatabaseRow {
+    DATABASE: string;
+}
 
 /**
  * Handles background prefetching of metadata for cache population
@@ -82,15 +108,17 @@ export class CachePrefetcher {
                 try {
                     const resultJson = await runQueryFn(query);
                     if (resultJson) {
-                        const results = JSON.parse(resultJson);
-                        const columnsByTable = new Map<string, any[]>();
+                        const results = JSON.parse(resultJson) as RawColumnRow[];
+                        const columnsByTable = new Map<string, ColumnMetadata[]>();
                         for (const row of results) {
                             const tableName = row.TABLENAME;
                             if (!columnsByTable.has(tableName)) {
                                 columnsByTable.set(tableName, []);
                             }
                             columnsByTable.get(tableName)!.push({
-                                label: row.ATTNAME,
+                                ATTNAME: row.ATTNAME,
+                                FORMAT_TYPE: row.FORMAT_TYPE,
+                                label: row.ATTNAME, // Add label to satisfy extractLabel
                                 kind: 5,
                                 detail: row.FORMAT_TYPE
                             });
@@ -101,7 +129,7 @@ export class CachePrefetcher {
                             this.storage.setColumns(connectionName, columnKey, columns);
                         }
                     }
-                } catch (e) {
+                } catch (e: unknown) {
                     console.error(`[CachePrefetcher] Error fetching batch columns:`, e);
                 }
             }
@@ -123,17 +151,17 @@ export class CachePrefetcher {
 
         try {
             const tablesQuery = `
-                SELECT OBJNAME, OBJID, SCHEMA, DBNAME 
+                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE
                 FROM _V_OBJECT_DATA 
-                WHERE OBJTYPE = 'TABLE' 
+                WHERE OBJTYPE IN ('TABLE', 'VIEW') 
                 ORDER BY DBNAME, SCHEMA, OBJNAME
             `;
 
             const resultJson = await runQueryFn(tablesQuery);
             if (!resultJson) return;
 
-            const results = JSON.parse(resultJson);
-            const tablesByKey = new Map<string, { tables: any[]; idMap: Map<string, number> }>();
+            const results = JSON.parse(resultJson) as RawObjectRow[];
+            const tablesByKey = new Map<string, { tables: TableMetadata[]; idMap: Map<string, number> }>();
 
             for (const row of results) {
                 const key = row.SCHEMA ? `${row.DBNAME}.${row.SCHEMA}` : `${row.DBNAME}..`;
@@ -142,10 +170,13 @@ export class CachePrefetcher {
                 }
                 const entry = tablesByKey.get(key)!;
                 entry.tables.push({
+                    OBJNAME: row.OBJNAME,
                     label: row.OBJNAME,
-                    kind: 7,
-                    detail: row.SCHEMA ? 'Table' : `Table (${row.SCHEMA})`,
-                    sortText: row.OBJNAME
+                    kind: row.OBJTYPE === 'VIEW' ? 18 : 6, // 18=View, 6=Table (using 6 to match prefetchAllTablesAndViews logic)
+                    detail: row.SCHEMA ? (row.OBJTYPE === 'VIEW' ? 'View' : 'Table') : `${row.OBJTYPE === 'VIEW' ? 'View' : 'Table'} (${row.SCHEMA})`,
+                    objType: row.OBJTYPE, // Explicitly set objType
+                    OBJID: row.OBJID,
+                    SCHEMA: row.SCHEMA
                 });
 
                 const fullKey = row.SCHEMA
@@ -159,7 +190,7 @@ export class CachePrefetcher {
             }
 
             console.log(`[CachePrefetcher] Prefetched tables for ${tablesByKey.size} schema(s) on ${connectionName}`);
-        } catch (e) {
+        } catch (e: unknown) {
             console.error(`[CachePrefetcher] Error in prefetchAllObjects:`, e);
         }
     }
@@ -217,7 +248,7 @@ export class CachePrefetcher {
     private async prefetchDatabases(connectionName: string, runQueryFn: QueryRunnerFn): Promise<string[]> {
         if (this.storage.getDatabases(connectionName)) {
             const cached = this.storage.getDatabases(connectionName);
-            return cached?.map((item: any) => extractLabel(item)).filter(Boolean) as string[] || [];
+            return cached?.map((item) => extractLabel(item)).filter(Boolean) as string[] || [];
         }
 
         try {
@@ -225,16 +256,17 @@ export class CachePrefetcher {
             const resultJson = await runQueryFn(query);
             if (!resultJson) return [];
 
-            const results = JSON.parse(resultJson);
-            const items = results.map((row: any) => ({
+            const results = JSON.parse(resultJson) as RawDatabaseRow[];
+            const items = results.map((row) => ({
+                DATABASE: row.DATABASE,
                 label: row.DATABASE,
                 kind: 9,
                 detail: 'Database'
             }));
 
             this.storage.setDatabases(connectionName, items);
-            return results.map((row: any) => row.DATABASE);
-        } catch (e) {
+            return results.map(row => row.DATABASE);
+        } catch (e: unknown) {
             console.error('[CachePrefetcher] prefetchDatabases error:', e);
             return [];
         }
@@ -254,10 +286,11 @@ export class CachePrefetcher {
             const resultJson = await runQueryFn(query);
             if (!resultJson) return;
 
-            const results = JSON.parse(resultJson);
+            const results = JSON.parse(resultJson) as RawSchemaRow[];
             const items = results
-                .filter((row: any) => row.SCHEMA != null && row.SCHEMA !== '')
-                .map((row: any) => ({
+                .filter(row => row.SCHEMA != null && row.SCHEMA !== '')
+                .map(row => ({
+                    SCHEMA: row.SCHEMA,
                     label: row.SCHEMA,
                     kind: 19,
                     detail: `Schema in ${dbName}`,
@@ -267,7 +300,7 @@ export class CachePrefetcher {
                 }));
 
             this.storage.setSchemas(connectionName, dbName, items);
-        } catch (e) {
+        } catch (e: unknown) {
             console.error(`[CachePrefetcher] prefetchSchemasForDb error for ${dbName}:`, e);
         }
     }
@@ -284,8 +317,8 @@ export class CachePrefetcher {
             const resultJson = await runQueryFn(query);
             if (!resultJson) return;
 
-            const results = JSON.parse(resultJson);
-            const tablesByKey = new Map<string, { tables: any[]; idMap: Map<string, number> }>();
+            const results = JSON.parse(resultJson) as RawObjectRow[];
+            const tablesByKey = new Map<string, { tables: TableMetadata[]; idMap: Map<string, number> }>();
 
             for (const row of results) {
                 const key = row.SCHEMA ? `${row.DBNAME}.${row.SCHEMA}` : `${row.DBNAME}..`;
@@ -295,11 +328,12 @@ export class CachePrefetcher {
                 const entry = tablesByKey.get(key)!;
 
                 entry.tables.push({
+                    OBJNAME: row.OBJNAME,
                     label: row.OBJNAME,
                     kind: row.OBJTYPE === 'VIEW' ? 18 : 6,
                     detail: row.SCHEMA ? row.OBJTYPE : `${row.OBJTYPE} (${row.SCHEMA})`,
-                    sortText: row.OBJNAME,
-                    objType: row.OBJTYPE
+                    objType: row.OBJTYPE,
+                    // sortText: row.OBJNAME // Add to interface or use loose property
                 });
 
                 const fullKey = row.SCHEMA
@@ -315,7 +349,7 @@ export class CachePrefetcher {
             }
 
             console.log(`[CachePrefetcher] Prefetched tables/views for ${tablesByKey.size} schema(s)`);
-        } catch (e) {
+        } catch (e: unknown) {
             console.error(`[CachePrefetcher] prefetchAllTablesAndViews error:`, e);
         }
     }
@@ -383,8 +417,8 @@ export class CachePrefetcher {
                     try {
                         const resultJson = await runQueryFn(query);
                         if (resultJson) {
-                            const results = JSON.parse(resultJson);
-                            const columnsByKey = new Map<string, any[]>();
+                            const results = JSON.parse(resultJson) as RawColumnRow[];
+                            const columnsByKey = new Map<string, ColumnMetadata[]>();
 
                             for (const row of results) {
                                 const key = `${row.DBNAME}.${row.SCHEMA || ''}.${row.TABLENAME}`;
@@ -392,6 +426,8 @@ export class CachePrefetcher {
                                     columnsByKey.set(key, []);
                                 }
                                 columnsByKey.get(key)!.push({
+                                    ATTNAME: row.ATTNAME,
+                                    FORMAT_TYPE: row.FORMAT_TYPE,
                                     label: row.ATTNAME,
                                     kind: 5,
                                     detail: row.FORMAT_TYPE
@@ -405,7 +441,7 @@ export class CachePrefetcher {
                                 }
                             }
                         }
-                    } catch (e) {
+                    } catch (e: unknown) {
                         console.error(`[CachePrefetcher] Error fetching batch columns for DB ${dbName}:`, e);
                     }
                 }
@@ -414,7 +450,7 @@ export class CachePrefetcher {
             }
 
             console.log(`[CachePrefetcher] Prefetched columns for ${fetchedCount} tables/views (Batched)`);
-        } catch (e) {
+        } catch (e: unknown) {
             console.error(`[CachePrefetcher] prefetchAllColumnsForConnection error:`, e);
         }
     }

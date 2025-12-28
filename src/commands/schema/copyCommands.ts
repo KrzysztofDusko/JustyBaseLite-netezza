@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { runQuery } from '../../core/queryRunner';
 import { SchemaCommandsDependencies, SchemaItemData } from './types';
-import { getFullName, requireConnection, executeWithProgress } from './helpers';
+import { getFullName, executeWithProgress } from './helpers';
 
 /**
  * Register copy-related commands
@@ -59,8 +59,7 @@ export function registerCopyCommands(deps: SchemaCommandsDependencies): vscode.D
                 );
 
                 if (confirmation === 'Yes, delete') {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    // Note: runQuery uses connectionManager internally, no need to pre-fetch connection
 
                     try {
                         await executeWithProgress(

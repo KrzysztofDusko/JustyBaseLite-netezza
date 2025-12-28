@@ -3,7 +3,7 @@
  * Manages in-memory cache data structures and CRUD operations
  */
 
-import { PerKeyEntry, CacheType, CachedObjectInfo, ObjectWithSchema } from './types';
+import { PerKeyEntry, CacheType, CachedObjectInfo, ObjectWithSchema, DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from './types';
 import { extractLabel, buildIdLookupKey } from './helpers';
 
 /**
@@ -11,10 +11,10 @@ import { extractLabel, buildIdLookupKey } from './helpers';
  */
 export class CacheStorage {
     // In-memory caches with per-key timestamps
-    private dbCache: Map<string, { data: any[]; timestamp: number }> = new Map();
-    public schemaCache: Map<string, PerKeyEntry<any[]>> = new Map();
-    public tableCache: Map<string, PerKeyEntry<any[]>> = new Map(); // Key: "CONN|DB.SCHEMA" or "CONN|DB.."
-    public columnCache: Map<string, PerKeyEntry<any[]>> = new Map(); // Key: "CONN|DB.SCHEMA.TABLE"
+    private dbCache: Map<string, { data: DatabaseMetadata[]; timestamp: number }> = new Map();
+    public schemaCache: Map<string, PerKeyEntry<SchemaMetadata[]>> = new Map();
+    public tableCache: Map<string, PerKeyEntry<TableMetadata[]>> = new Map(); // Key: "CONN|DB.SCHEMA" or "CONN|DB.."
+    public columnCache: Map<string, PerKeyEntry<ColumnMetadata[]>> = new Map(); // Key: "CONN|DB.SCHEMA.TABLE"
     public tableIdMap: Map<string, PerKeyEntry<Map<string, number>>> = new Map(); // Key: tableCache key -> {tableName -> OBJID}
     public typeGroupCache: Map<string, PerKeyEntry<string[]>> = new Map(); // Key: "CONN|DB" -> ['TABLE', 'VIEW', ...]
 
@@ -42,23 +42,23 @@ export class CacheStorage {
 
     // ========== Database Cache ==========
 
-    getDatabases(connectionName: string): any[] | undefined {
+    getDatabases(connectionName: string): DatabaseMetadata[] | undefined {
         return this.dbCache.get(connectionName)?.data;
     }
 
-    setDatabases(connectionName: string, data: any[]): void {
+    setDatabases(connectionName: string, data: DatabaseMetadata[]): void {
         this.dbCache.set(connectionName, { data, timestamp: Date.now() });
         this.onDataChange?.('db');
     }
 
     // ========== Schema Cache ==========
 
-    getSchemas(connectionName: string, dbName: string): any[] | undefined {
+    getSchemas(connectionName: string, dbName: string): SchemaMetadata[] | undefined {
         const key = `${connectionName}|${dbName}`;
         return this.schemaCache.get(key)?.data;
     }
 
-    setSchemas(connectionName: string, dbName: string, data: any[]): void {
+    setSchemas(connectionName: string, dbName: string, data: SchemaMetadata[]): void {
         const key = `${connectionName}|${dbName}`;
         this.schemaCache.set(key, { data, timestamp: Date.now() });
         this.onDataChange?.('schema');
@@ -66,7 +66,7 @@ export class CacheStorage {
 
     // ========== Table Cache ==========
 
-    getTables(connectionName: string, key: string): any[] | undefined {
+    getTables(connectionName: string, key: string): TableMetadata[] | undefined {
         // incoming key is DB.SCHEMA or DB..
         const fullKey = `${connectionName}|${key}`;
         return this.tableCache.get(fullKey)?.data;
@@ -76,9 +76,9 @@ export class CacheStorage {
      * Get tables from all schemas for a given database.
      * Used for double-dot pattern (DB..) where schema is not specified.
      */
-    getTablesAllSchemas(connectionName: string, dbName: string): any[] | undefined {
+    getTablesAllSchemas(connectionName: string, dbName: string): TableMetadata[] | undefined {
         const prefix = `${connectionName}|${dbName}.`;
-        const allTables: any[] = [];
+        const allTables: TableMetadata[] = [];
         const seenNames = new Set<string>();
 
         for (const [key, entry] of this.tableCache) {
@@ -96,7 +96,7 @@ export class CacheStorage {
         return allTables.length > 0 ? allTables : undefined;
     }
 
-    setTables(connectionName: string, key: string, data: any[], idMap: Map<string, number>): void {
+    setTables(connectionName: string, key: string, data: TableMetadata[], idMap: Map<string, number>): void {
         const now = Date.now();
         const fullKey = `${connectionName}|${key}`;
         this.tableCache.set(fullKey, { data, timestamp: now });
@@ -145,12 +145,12 @@ export class CacheStorage {
 
     // ========== Column Cache ==========
 
-    getColumns(connectionName: string, key: string): any[] | undefined {
+    getColumns(connectionName: string, key: string): ColumnMetadata[] | undefined {
         const fullKey = `${connectionName}|${key}`;
         return this.columnCache.get(fullKey)?.data;
     }
 
-    setColumns(connectionName: string, key: string, data: any[]): void {
+    setColumns(connectionName: string, key: string, data: ColumnMetadata[]): void {
         const fullKey = `${connectionName}|${key}`;
         this.columnCache.set(fullKey, { data, timestamp: Date.now() });
         this.onDataChange?.('column');
@@ -259,15 +259,15 @@ export class CacheStorage {
 
     // ========== Serialization Helpers (for persistence) ==========
 
-    getDbCacheMap(): Map<string, { data: any[]; timestamp: number }> {
+    getDbCacheMap(): Map<string, { data: DatabaseMetadata[]; timestamp: number }> {
         return this.dbCache;
     }
 
-    getSchemaCacheMap(): Map<string, PerKeyEntry<any[]>> {
+    getSchemaCacheMap(): Map<string, PerKeyEntry<SchemaMetadata[]>> {
         return this.schemaCache;
     }
 
-    getTableCacheMap(): Map<string, PerKeyEntry<any[]>> {
+    getTableCacheMap(): Map<string, PerKeyEntry<TableMetadata[]>> {
         return this.tableCache;
     }
 
@@ -277,15 +277,15 @@ export class CacheStorage {
 
     // ========== Deserialization (for loading from disk) ==========
 
-    loadDbCache(entries: Map<string, { data: any[]; timestamp: number }>): void {
+    loadDbCache(entries: Map<string, { data: DatabaseMetadata[]; timestamp: number }>): void {
         this.dbCache = entries;
     }
 
-    loadSchemaCache(entries: Map<string, PerKeyEntry<any[]>>): void {
+    loadSchemaCache(entries: Map<string, PerKeyEntry<SchemaMetadata[]>>): void {
         this.schemaCache = entries;
     }
 
-    loadTableCache(entries: Map<string, PerKeyEntry<any[]>>): void {
+    loadTableCache(entries: Map<string, PerKeyEntry<TableMetadata[]>>): void {
         this.tableCache = entries;
     }
 

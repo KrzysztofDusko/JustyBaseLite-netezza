@@ -3,43 +3,34 @@ import * as fs from 'fs';
 
 // import * as odbc from 'odbc'; // Removed odbc dependency
 
-function parseConnectionString(connStr: string): any {
-    const parts = connStr.split(';');
-    const config: any = {};
-    for (const part of parts) {
-        const idx = part.indexOf('=');
-        if (idx > 0) {
-            const key = part.substring(0, idx).trim().toUpperCase();
-            const value = part.substring(idx + 1).trim();
-            if (key === 'SERVER') config.host = value;
-            else if (key === 'PORT') config.port = parseInt(value);
-            else if (key === 'DATABASE') config.database = value;
-            else if (key === 'UID') config.user = value;
-            else if (key === 'PWD') config.password = value;
-        }
-    }
-    return config;
-}
+import { NzConnection, ConnectionDetails } from '../types';
+
+// ConnectionDetails used directly - no parseConnectionString needed
 
 export async function exportToCsv(
     _context: vscode.ExtensionContext,
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     query: string,
     filePath: string,
     progress?: vscode.Progress<{ message?: string; increment?: number }>
 ): Promise<void> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
         if (progress) {
             progress.report({ message: 'Connecting to database...' });
         }
 
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
         await connection.connect();
 
         if (progress) {
@@ -47,7 +38,7 @@ export async function exportToCsv(
         }
 
         // executeReader returns a reader that allows streaming rows
-        const cmd = connection.createCommand(query);
+        const cmd = connection!.createCommand(query);
         const reader = await cmd.executeReader();
 
         if (progress) {
@@ -122,14 +113,14 @@ export async function exportToCsv(
         if (connection) {
             try {
                 await connection.close();
-            } catch (e) {
+            } catch (e: unknown) {
                 console.error('Error closing connection:', e);
             }
         }
     }
 }
 
-function escapeCsvField(field: any): string {
+function escapeCsvField(field: unknown): string {
     if (field === null || field === undefined) {
         return '';
     }

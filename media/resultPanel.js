@@ -48,9 +48,111 @@ function init() {
 
         // Setup global keyboard shortcuts
         setupGlobalKeyboardShortcuts();
+
+        // Setup message handler for streaming updates
+        setupStreamingMessageHandler();
     } catch (e) {
         showError('Initialization error: ' + e.message);
         console.error(e);
+    }
+}
+
+// Handle messages from extension for streaming updates
+function setupStreamingMessageHandler() {
+    window.addEventListener('message', event => {
+        const message = event.data;
+
+        switch (message.command) {
+            case 'appendRows':
+                handleAppendRows(message);
+                break;
+            case 'streamingComplete':
+                handleStreamingComplete(message);
+                break;
+            case 'switchToResultSet':
+                if (typeof message.resultSetIndex === 'number') {
+                    switchToResultSet(message.resultSetIndex);
+                }
+                break;
+            case 'copySelection':
+                if (window.copySelection) {
+                    window.copySelection(true); // Copy with headers
+                }
+                break;
+        }
+    });
+}
+
+// Handle incremental row append during streaming
+function handleAppendRows(message) {
+    const { resultSetIndex, rows, totalRows, isLastChunk, limitReached } = message;
+
+    // Update the data in window.resultSets
+    if (window.resultSets && window.resultSets[resultSetIndex]) {
+        const rs = window.resultSets[resultSetIndex];
+        rs.data.push(...rows);
+        rs.limitReached = limitReached;
+
+        // Update search worker with new data
+        if (searchWorker) {
+            searchWorker.postMessage({
+                command: 'appendData',
+                id: resultSetIndex,
+                rows: rows
+            });
+        }
+
+        // Update the grid virtualizer count
+        const grid = grids[resultSetIndex];
+        if (grid && grid.tanTable) {
+            // Update TanStack Table's data
+            grid.tanTable.options.data = rs.data;
+
+            // Recreate virtualizer with new count
+            if (grid.createVirtualizer) {
+                grid.createVirtualizer();
+            }
+
+            // Render only the table rows (not full re-render)
+            if (grid.renderTableRows) {
+                grid.renderTableRows();
+            }
+        }
+
+        // Update row count display
+        updateRowCountInfo(resultSetIndex, totalRows, limitReached);
+    }
+}
+
+// Handle streaming completion
+function handleStreamingComplete(message) {
+    const { resultSetIndex, totalRows, limitReached } = message;
+
+    // Final update of row count
+    updateRowCountInfo(resultSetIndex, totalRows, limitReached);
+
+    // Update search worker with complete data for accurate search
+    if (searchWorker && window.resultSets && window.resultSets[resultSetIndex]) {
+        searchWorker.postMessage({
+            command: 'setData',
+            id: resultSetIndex,
+            data: window.resultSets[resultSetIndex].data,
+            columns: window.resultSets[resultSetIndex].columns
+        });
+    }
+}
+
+// Update the row count info display
+function updateRowCountInfo(resultSetIndex, totalRows, limitReached) {
+    if (resultSetIndex === activeGridIndex) {
+        const rowCountInfo = document.getElementById('rowCountInfo');
+        if (rowCountInfo) {
+            let text = `${totalRows.toLocaleString()} rows`;
+            if (limitReached) {
+                text += ' (limit reached)';
+            }
+            rowCountInfo.textContent = text;
+        }
     }
 }
 
@@ -809,7 +911,9 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         executionTimestamp: rs.executionTimestamp,
         renderGrouping: () => renderGrouping(),
         updateRowCount: () => updateRowCount(),
-        render: () => render()
+        render: () => render(),
+        createVirtualizer: () => createVirtualizer(),
+        renderTableRows: () => renderTableRows()
     };
     grids.push(gridObj);
 
@@ -957,8 +1061,10 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             aggRow.className = 'aggregation-row';
 
             const rows = tanTable.getFilteredRowModel().rows || [];
+            // Use getVisibleLeafColumns to respect column order changes
+            const visibleColumns = tanTable.getVisibleLeafColumns();
 
-            columns.forEach(col => {
+            visibleColumns.forEach(col => {
                 const td = document.createElement('td');
                 td.style.padding = '6px 8px';
                 td.style.borderTop = '1px solid var(--vscode-panel-border)';
@@ -1043,7 +1149,10 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             tbody.appendChild(tr);
         }
 
-        virtualItems.forEach(virtualRow => {
+        // Track groups to insert footers
+        const renderedGroupFooters = new Set();
+
+        virtualItems.forEach((virtualRow, vIdx) => {
             const row = rows[virtualRow.index];
             if (!row) return;
 
@@ -1058,6 +1167,36 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             }
 
             tbody.appendChild(tr);
+
+            // Check if we need to insert a group footer after this row
+            // A non-grouped row with depth > 0 is inside a group
+            if (!row.getIsGrouped?.() && row.depth > 0) {
+                const nextRow = rows[virtualRow.index + 1];
+
+                // Group ends when:
+                // - No next row exists
+                // - Next row has different depth (going up or into another group)  
+                // - Next row is a group header
+                const isLastInGroup = !nextRow ||
+                    nextRow.depth < row.depth ||
+                    nextRow.getIsGrouped?.();
+
+                if (isLastInGroup) {
+                    // Get the parent group row using getParentRow or by searching
+                    const parentRow = row.getParentRow?.() || rows.find(r =>
+                        r.getIsGrouped?.() &&
+                        r.subRows?.some(sr => sr.id === row.id)
+                    );
+
+                    if (parentRow && parentRow.getIsExpanded?.() && !renderedGroupFooters.has(parentRow.id)) {
+                        const footerTr = createGroupFooterRow(parentRow, rs);
+                        if (footerTr) {
+                            tbody.appendChild(footerTr);
+                            renderedGroupFooters.add(parentRow.id);
+                        }
+                    }
+                }
+            }
         });
 
         if (paddingBottom > 0) {
@@ -1122,6 +1261,88 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         firstCell.appendChild(groupText);
 
         tr.appendChild(firstCell);
+    }
+
+    // Create group footer row with subtotals for each group
+    function createGroupFooterRow(groupRow, resultSet) {
+        const tr = document.createElement('tr');
+        tr.className = 'group-footer';
+        tr.dataset.groupFooter = 'true';
+
+        const depth = groupRow.depth || 0;
+        const subRows = groupRow.subRows || [];
+        const currentAggs = aggregationStates[rsIndex] || {};
+
+        // Check if any aggregation is set
+        const hasAnyAggregation = Object.keys(currentAggs).length > 0;
+        if (!hasAnyAggregation) {
+            return null; // Don't show footer if no aggregations selected
+        }
+
+        // Use getVisibleLeafColumns to respect column order changes
+        const visibleColumns = tanTable.getVisibleLeafColumns();
+
+        visibleColumns.forEach((col, colIndex) => {
+            const td = document.createElement('td');
+
+            // Add indent for first column
+            if (colIndex === 0 && depth > 0) {
+                const indent = document.createElement('span');
+                indent.className = 'group-indent';
+                indent.style.width = (depth * 20) + 'px';
+                td.appendChild(indent);
+            }
+
+            const agg = currentAggs[col.id];
+            if (!agg) {
+                td.textContent = '';
+                tr.appendChild(td);
+                return;
+            }
+
+            // Calculate aggregation for this group's subRows
+            let result = '';
+            if (agg === 'sum') {
+                let sum = 0;
+                let hasNumber = false;
+                subRows.forEach(r => {
+                    const v = r.getValue(col.id);
+                    if (v !== null && v !== undefined && v !== '') {
+                        const n = parseFloat(String(v).replace(/,/g, ''));
+                        if (!isNaN(n)) { sum += n; hasNumber = true; }
+                    }
+                });
+                result = hasNumber ? String(sum) : '';
+            } else if (agg === 'count') {
+                const cnt = subRows.filter(r => {
+                    const v = r.getValue(col.id);
+                    return v !== null && v !== undefined;
+                }).length;
+                result = String(cnt);
+            } else if (agg === 'countDistinct') {
+                const s = new Set();
+                subRows.forEach(r => {
+                    const v = r.getValue(col.id);
+                    if (v !== null && v !== undefined) s.add(String(v));
+                });
+                result = String(s.size);
+            }
+
+            if (result) {
+                const labelSpan = document.createElement('span');
+                labelSpan.className = 'agg-label';
+                labelSpan.textContent = agg === 'sum' ? 'Σ' : agg === 'count' ? '#' : '◇';
+                td.appendChild(labelSpan);
+
+                const valueSpan = document.createElement('span');
+                valueSpan.textContent = result;
+                td.appendChild(valueSpan);
+            }
+
+            tr.appendChild(td);
+        });
+
+        return tr;
     }
 
     render();
@@ -2517,7 +2738,7 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
     let selectedCells = new Set();
     let isAllSelected = false;
 
-    function clearSelection() {
+    function _internalClearSelection() {
         isAllSelected = false;
         selectedCells.forEach(cellId => {
             const cell = document.querySelector(`[data-cell-id="${cellId}"]`);
@@ -2526,6 +2747,15 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
             }
         });
         selectedCells.clear();
+    }
+
+    function clearSelection() {
+        _internalClearSelection();
+        vscode.postMessage({
+            command: 'setContext',
+            key: 'netezza.resultsHasSelection',
+            value: false
+        });
     }
 
     function getCellId(element) {
@@ -2553,7 +2783,7 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
         const minCol = Math.min(startCol, endCol);
         const maxCol = Math.max(startCol, endCol);
 
-        clearSelection();
+        _internalClearSelection();
 
         for (let row = minRow; row <= maxRow; row++) {
             for (let col = minCol; col <= maxCol; col++) {
@@ -2566,6 +2796,12 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
                 }
             }
         }
+
+        vscode.postMessage({
+            command: 'setContext',
+            key: 'netezza.resultsHasSelection',
+            value: true
+        });
     }
 
     function addCellIds() {
@@ -2596,7 +2832,7 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
             wrapper.focus();
 
             if (!e.ctrlKey && !e.metaKey) {
-                clearSelection();
+                _internalClearSelection();
             }
 
             if (startCell) {
@@ -2606,6 +2842,14 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
                     cell.classList.add('selected-cell');
                 }
                 renderRowView();
+
+
+
+                vscode.postMessage({
+                    command: 'setContext',
+                    key: 'netezza.resultsHasSelection',
+                    value: true
+                });
             }
         }
     });
@@ -2639,19 +2883,25 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
     addCellIds();
 
     function performSelectAll() {
-        clearSelection();
+        _internalClearSelection();
         isAllSelected = true;
         const rows = wrapper.querySelectorAll('tbody tr[data-index]');
 
         rows.forEach(tr => {
             const cells = tr.querySelectorAll('td[data-cell-id]');
-            cells.forEach(td => {
+            cells.forEach((td, cellIndex) => {
                 const cellId = td.dataset.cellId;
                 if (cellId) {
                     selectedCells.add(cellId);
                     td.classList.add('selected-cell');
                 }
             });
+        });
+
+        vscode.postMessage({
+            command: 'setContext',
+            key: 'netezza.resultsHasSelection',
+            value: true
         });
     }
 

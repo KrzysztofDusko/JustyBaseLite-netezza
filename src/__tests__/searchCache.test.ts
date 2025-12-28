@@ -74,10 +74,10 @@ describe('metadata/search', () => {
         beforeEach(() => {
             // Setup column data
             const columns = [
-                { label: 'CUSTOMER_ID', detail: 'INTEGER' },
-                { label: 'CUSTOMER_NAME', detail: 'VARCHAR(100)' },
-                { label: 'EMAIL', detail: 'VARCHAR(255)' },
-                { label: 'CREATED_DATE', detail: 'DATE' }
+                { label: 'CUSTOMER_ID', detail: 'INTEGER', ATTNAME: 'CUSTOMER_ID', FORMAT_TYPE: 'INTEGER' },
+                { label: 'CUSTOMER_NAME', detail: 'VARCHAR(100)', ATTNAME: 'CUSTOMER_NAME', FORMAT_TYPE: 'VARCHAR(100)' },
+                { label: 'EMAIL', detail: 'VARCHAR(255)', ATTNAME: 'EMAIL', FORMAT_TYPE: 'VARCHAR(255)' },
+                { label: 'CREATED_DATE', detail: 'DATE', ATTNAME: 'CREATED_DATE', FORMAT_TYPE: 'DATE' }
             ];
             storage.setColumns('conn1', 'MYDB.ADMIN.CUSTOMERS', columns);
         });
@@ -140,8 +140,8 @@ describe('metadata/search', () => {
             // Add both tables and columns
             const tables = [{ label: 'USERS', objType: 'TABLE', kind: 6 }];
             const columns = [
-                { label: 'USER_ID', detail: 'INTEGER' },
-                { label: 'USERNAME', detail: 'VARCHAR(50)' }
+                { label: 'USER_ID', detail: 'INTEGER', ATTNAME: 'USER_ID', FORMAT_TYPE: 'INTEGER' },
+                { label: 'USERNAME', detail: 'VARCHAR(50)', ATTNAME: 'USERNAME', FORMAT_TYPE: 'VARCHAR(50)' }
             ];
             const emptyIdMap = new Map<string, number>();
 

@@ -6,35 +6,31 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { ConnectionDetails } from '../types';
 
 // XLSX import for Excel file support
 // Custom Excel Reader from ExcelHelpersTs
-let ReaderFactory: any;
-try {
-    const readerModule = require('../../ExcelHelpersTs/ReaderFactory');
-    // Handle both ES module default export and named export
-    ReaderFactory = readerModule.default || readerModule.ReaderFactory || readerModule;
-} catch (e) {
-    console.error('ExcelHelpersTs/ReaderFactory module not available', e);
+interface IExcelReader {
+    open(path: string): Promise<void>;
+    read(): Promise<boolean>;
+    close(): Promise<void>;
+    _currentRow: unknown[];
 }
 
-function parseConnectionString(connStr: string): any {
-    const parts = connStr.split(';');
-    const config: any = {};
-    for (const part of parts) {
-        const idx = part.indexOf('=');
-        if (idx > 0) {
-            const key = part.substring(0, idx).trim().toUpperCase();
-            const value = part.substring(idx + 1).trim();
-            if (key === 'SERVER') config.host = value;
-            else if (key === 'PORT') config.port = parseInt(value);
-            else if (key === 'DATABASE') config.database = value;
-            else if (key === 'UID') config.user = value;
-            else if (key === 'PWD') config.password = value;
-        }
-    }
-    return config;
+interface IReaderFactory {
+    create(path: string): IExcelReader;
 }
+
+let ReaderFactory: IReaderFactory | undefined;
+try {
+    const readerModule = require('../../libs/ExcelHelpersTs/ReaderFactory');
+    // Handle both ES module default export and named export
+    ReaderFactory = (readerModule.default || readerModule.ReaderFactory || readerModule) as IReaderFactory;
+} catch (e: unknown) {
+    console.error('libs/ExcelHelpersTs/ReaderFactory module not available', e);
+}
+
+// ConnectionDetails is imported from '../types' - no need for parseConnectionString
 
 /**
  * Netezza data type representation
@@ -375,7 +371,7 @@ export class NetezzaImporter {
         const rows: string[][] = [];
 
         // Helper to format values
-        const valToString = (val: any): string => {
+        const valToString = (val: unknown): string => {
             if (val === null || val === undefined) return '';
             if (val instanceof Date) {
                 // Format Date to YYYY-MM-DD HH:mm:ss
@@ -399,7 +395,7 @@ export class NetezzaImporter {
 
             // We'll iterate up to fieldCount? No, fieldCount might grow.
             // _currentRow.length is reliable if we trust the reader implementation.
-            const currentRow = (reader as any)._currentRow;
+            const currentRow = reader._currentRow;
             if (currentRow && Array.isArray(currentRow)) {
                 for (let i = 0; i < currentRow.length; i++) {
                     row.push(valToString(currentRow[i]));
@@ -608,8 +604,9 @@ ${columns.join(',\n')}
             progressCallback?.(`Data file created: ${this.pipeName}`);
 
             return tempFile;
-        } catch (e: any) {
-            throw new Error(`Error creating data file: ${e.message}`);
+        } catch (e: unknown) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Error creating data file: ${errorMsg}`);
         }
     }
 
@@ -635,17 +632,19 @@ ${columns.join(',\n')}
     }
 }
 
+import { NzConnection } from '../types';
+
 /**
  * Import data from a file to Netezza table
  */
 export async function importDataToNetezza(
     filePath: string,
     targetTable: string,
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     progressCallback?: ProgressCallback
 ): Promise<ImportResult> {
     const startTime = Date.now();
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
         // Validate parameters
@@ -663,10 +662,10 @@ export async function importDataToNetezza(
             };
         }
 
-        if (!connectionString) {
+        if (!connectionDetails || !connectionDetails.host) {
             return {
                 success: false,
-                message: 'Connection string is required'
+                message: 'Connection details are required'
             };
         }
 
@@ -690,8 +689,8 @@ export async function importDataToNetezza(
         progressCallback?.(`  File size: ${fileSize.toLocaleString()} bytes`);
         progressCallback?.(`  File format: ${fileExt}`);
 
-        // Create importer instance
-        const importer = new NetezzaImporter(filePath, targetTable, connectionString);
+        // Create importer instance (logDir defaults to netezza_logs alongside source file)
+        const importer = new NetezzaImporter(filePath, targetTable);
 
         // Analyze data types
         await importer.analyzeDataTypes(progressCallback);
@@ -708,18 +707,37 @@ export async function importDataToNetezza(
         // Execute import
         progressCallback?.('Connecting to Netezza...');
 
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
-        await connection.connect();
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
+        await connection!.connect();
 
         try {
             progressCallback?.('Executing CREATE TABLE with EXTERNAL data...');
             // Create command for the CREATE TABLE AS SELECT ... FROM EXTERNAL
             // NzConnection should handle the external table protocol automatically
-            const cmd = connection.createCommand(createSql);
+            const cmd = connection!.createCommand(createSql);
+
+            // Set 60-minute timeout for large file imports
+            cmd.commandTimeout = 3600;
+
+            // Listen for import progress events
+            const totalRows = importer.getRowsCount();
+            connection!.on('importProgress', (progressData: unknown) => {
+                const progress = progressData as { bytesSent: number, totalSize: number, percentComplete: number };
+                const estimatedRows = totalRows > 0
+                    ? Math.round((progress.percentComplete / 100) * totalRows)
+                    : 0;
+                progressCallback?.(`Importing: ${progress.percentComplete}% complete (${estimatedRows.toLocaleString()} / ${totalRows.toLocaleString()} rows)`);
+            });
+
             await cmd.execute();
 
             progressCallback?.('Import completed successfully');
@@ -732,8 +750,9 @@ export async function importDataToNetezza(
                     fs.unlinkSync(tempFile);
                     progressCallback?.('Temporary data file cleaned up');
                 }
-            } catch (e: any) {
-                progressCallback?.(`Warning: Could not clean up temp file: ${e.message}`);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                progressCallback?.(`Warning: Could not clean up temp file: ${errorMsg}`);
             }
         }
 
@@ -755,11 +774,12 @@ export async function importDataToNetezza(
                 detectedDelimiter: importer.getCsvDelimiter()
             }
         };
-    } catch (e: any) {
+    } catch (e: unknown) {
         const processingTime = (Date.now() - startTime) / 1000;
+        const errorMsg = e instanceof Error ? e.message : String(e);
         return {
             success: false,
-            message: `Import failed: ${e.message}`,
+            message: `Import failed: ${errorMsg}`,
             details: {
                 processingTime: `${processingTime.toFixed(1)}s`
             }

@@ -2,9 +2,13 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from './connectionManager';
 import { QueryHistoryManager } from './queryHistoryManager';
 import { extractVariables, parseSetVariables, replaceVariablesInSql } from './variableUtils';
+import { NzConnection, NzCommand, QueryResult, ColumnDefinition, NzDataReader } from '../types';
+
+// Re-export QueryResult for backward compatibility
+export { QueryResult };
 
 // Session tracking for DROP SESSION functionality
-const executingCommands = new Map<string, any>(); // Map documentUri -> NzCommand
+const executingCommands = new Map<string, NzCommand>(); // Map documentUri -> NzCommand
 
 export async function cancelCurrentQuery(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
@@ -21,8 +25,9 @@ export async function cancelCurrentQuery(): Promise<void> {
         try {
             await cmd.cancel();
             vscode.window.showInformationMessage('Cancellation request sent.');
-        } catch (e: any) {
-            vscode.window.showErrorMessage(`Failed to cancel query: ${e.message}`);
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            vscode.window.showErrorMessage(`Failed to cancel query: ${msg}`);
         }
     } else {
         vscode.window.showInformationMessage('No active query found for this tab.');
@@ -81,14 +86,199 @@ async function promptForVariableValues(
     return values;
 }
 
-export interface QueryResult {
-    columns: { name: string; type?: string }[];
-    data: any[][];
-    rowsAffected?: number;
-    message?: string;
-    limitReached?: boolean;
-    sql?: string;
+// QueryResult is now imported from '../types' and re-exported above
+
+// --- Helper functions for runQueryRaw ---
+
+interface OutputLogger {
+    outputChannel?: vscode.OutputChannel;
+    logCallback?: (msg: string) => void;
 }
+
+function createLogger(silent: boolean, logCallback?: (msg: string) => void): OutputLogger {
+    let outputChannel: vscode.OutputChannel | undefined;
+    if (!silent && !logCallback) {
+        outputChannel = vscode.window.createOutputChannel('Netezza SQL');
+        outputChannel.show(true);
+    }
+    return { outputChannel, logCallback };
+}
+
+function log(logger: OutputLogger, message: string): void {
+    if (logger.outputChannel) {
+        logger.outputChannel.appendLine(message);
+    }
+    if (logger.logCallback) {
+        logger.logCallback(message);
+    }
+}
+
+async function resolveQueryVariables(
+    query: string,
+    silent: boolean
+): Promise<string> {
+    const parsed = parseSetVariables(query);
+    let queryToExecute = parsed.sql;
+    const setDefaults = parsed.setValues;
+
+    const vars = extractVariables(queryToExecute);
+    if (vars.size > 0) {
+        const resolved = await promptForVariableValues(vars, silent, setDefaults);
+        queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
+    }
+
+    return queryToExecute;
+}
+
+function resolveConnectionName(
+    connManager: ConnectionManager,
+    connectionName?: string,
+    documentUri?: string
+): string {
+    let resolvedConnectionName = connectionName;
+
+    if (!resolvedConnectionName && documentUri) {
+        resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
+    }
+    if (!resolvedConnectionName) {
+        resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
+    }
+
+    if (!resolvedConnectionName) {
+        throw new Error('No connection selected');
+    }
+
+    return resolvedConnectionName;
+}
+
+async function getConnection(
+    connManager: ConnectionManager,
+    resolvedConnectionName: string,
+    keepConnectionOpen: boolean
+): Promise<{ connection: NzConnection; shouldCloseConnection: boolean }> {
+    if (keepConnectionOpen) {
+        const connection = await connManager.getPersistentConnection(resolvedConnectionName);
+        return { connection, shouldCloseConnection: false };
+    } else {
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        const details = await connManager.getConnection(resolvedConnectionName);
+        if (!details) {
+            throw new Error(`Connection '${resolvedConnectionName}' not found`);
+        }
+        const config = {
+            host: details.host,
+            port: details.port || 5480,
+            database: details.database,
+            user: details.user,
+            password: details.password
+        };
+        const connection = new NzConnection(config) as NzConnection;
+        await connection.connect();
+        return { connection, shouldCloseConnection: true };
+    }
+}
+
+async function consumeRestAndCancel(reader: NzDataReader, cmd: NzCommand): Promise<void> {
+    const startTime = Date.now();
+    const timeoutMs = 10000; // 10 seconds
+
+    try {
+        let timedOut = false;
+        do {
+            while (await reader.read()) {
+                if (Date.now() - startTime > timeoutMs) {
+                    timedOut = true;
+                    break;
+                }
+            }
+            if (timedOut) break;
+
+            // Check timeout before waiting for nextResult 
+            if (Date.now() - startTime > timeoutMs) {
+                timedOut = true;
+                break;
+            }
+        } while (await reader.nextResult());
+
+        if (timedOut) {
+            console.warn(`consumeRestAndCancel timed out after ${timeoutMs}ms, forcing cancel`);
+        }
+
+        await cmd.cancel();
+    } catch (e) {
+        console.warn('Failed to cancel command after limit reached:', e);
+    }
+}
+
+async function executeQueryAndFetch(
+    connection: NzConnection,
+    queryToExecute: string,
+    queryTimeout: number,
+    documentUri?: string
+): Promise<{ columns: { name: string; type?: string }[]; data: unknown[][]; limitReached: boolean }> {
+    const cmd = connection.createCommand(queryToExecute);
+    cmd.commandTimeout = queryTimeout;
+
+    if (documentUri) {
+        executingCommands.set(documentUri, cmd);
+    }
+
+    try {
+        const reader = await cmd.executeReader();
+        const columns: { name: string; type?: string }[] = [];
+        const data: unknown[][] = [];
+
+        const limit = 200000;
+        let fetchedCount = 0;
+        let limitReached = false;
+
+        while (await reader.read()) {
+            if (columns.length === 0) {
+                for (let i = 0; i < reader.fieldCount; i++) {
+                    columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+                }
+            }
+
+            const row: unknown[] = [];
+            for (let i = 0; i < reader.fieldCount; i++) {
+                row.push(reader.getValue(i));
+            }
+            data.push(row);
+            fetchedCount++;
+
+            if (fetchedCount >= limit) {
+                limitReached = true;
+                // Cancel the command on the server side since we don't need more data
+                await consumeRestAndCancel(reader, cmd);
+                break;
+            }
+        }
+
+        return { columns, data, limitReached };
+    } finally {
+        if (documentUri) {
+            executingCommands.delete(documentUri);
+        }
+    }
+}
+
+async function logQueryToHistory(
+    context: vscode.ExtensionContext,
+    connManager: ConnectionManager,
+    resolvedConnectionName: string,
+    query: string
+): Promise<void> {
+    const currentSchema = 'unknown';
+    const details = await connManager.getConnection(resolvedConnectionName);
+    if (details) {
+        const historyManager = new QueryHistoryManager(context);
+        historyManager
+            .addEntry(details.host, details.database, currentSchema, query, resolvedConnectionName)
+            .catch(err => console.error('History log error:', err));
+    }
+}
+
+// --- Main runQueryRaw function (refactored) ---
 
 export async function runQueryRaw(
     context: vscode.ExtensionContext,
@@ -101,206 +291,82 @@ export async function runQueryRaw(
 ): Promise<QueryResult> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
+    const logger = createLogger(silent, logCallback);
 
-    // Create and show output channel only if not silent AND no callback
-    // If callback is provided, we assume the caller handles UI/Logging (e.g. Logs Tab)
-    // The user requested: "Skoro zapisujesz do 'Log' to już nie zapisuj do 'Output'"
-    let outputChannel: vscode.OutputChannel | undefined;
-    if (!silent && !logCallback) {
-        outputChannel = vscode.window.createOutputChannel('Netezza SQL');
-        outputChannel.show(true);
-        outputChannel.appendLine('Executing query...');
-    }
-
-    if (logCallback) logCallback('Executing query...');
+    log(logger, 'Executing query...');
 
     if (connectionName) {
-        const msg = `Target Connection: ${connectionName}`;
-        if (outputChannel) outputChannel.appendLine(msg);
-        if (logCallback) logCallback(msg);
+        log(logger, `Target Connection: ${connectionName}`);
     }
 
     try {
-        // Parse @SET definitions (they are removed from SQL and used as defaults)
-        const parsed = parseSetVariables(query);
-        let queryToExecute = parsed.sql;
-        const setDefaults = parsed.setValues;
+        // 1. Resolve variables in query
+        const queryToExecute = await resolveQueryVariables(query, silent);
 
-        // Detect and resolve ${VAR} placeholders before executing
-        const vars = extractVariables(queryToExecute);
-        if (vars.size > 0) {
-            const resolved = await promptForVariableValues(vars, silent, setDefaults);
-            queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
-        }
+        // 2. Resolve connection name
+        const resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
 
-        // Connect to database using JsNzDriver
-        let connection;
-        let shouldCloseConnection = true;
-        let resolvedConnectionName: string | undefined = connectionName;
+        // 3. Get connection
+        const { connection, shouldCloseConnection } = await getConnection(
+            connManager,
+            resolvedConnectionName,
+            keepConnectionOpen
+        );
 
-        // If no explicit connectionName, try to resolve from document or fall back to active
-        if (!resolvedConnectionName && documentUri) {
-            resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
-        }
-        if (!resolvedConnectionName) {
-            resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
-        }
-
-        if (!resolvedConnectionName) {
-            throw new Error('No connection selected');
-        }
-
-        // We can get details to log history properly later
-        // const details = await connManager.getConnection(resolvedConnectionName!);
-
-        if (keepConnectionOpen) {
-            // Use persistent connection
-            connection = await connManager.getPersistentConnection(resolvedConnectionName);
-            shouldCloseConnection = false; // Don't close persistent connection
-        } else {
-            // Create new connection
-            const NzConnection = require('../../driver/dist/NzConnection');
-            const details = await connManager.getConnection(resolvedConnectionName);
-            if (!details) {
-                throw new Error(`Connection '${resolvedConnectionName}' not found`);
-            }
-            const config = {
-                host: details.host,
-                port: details.port || 5480,
-                database: details.database,
-                user: details.user,
-                password: details.password
+        // Attach listener for notices
+        if (logger.outputChannel) {
+            const noticeHandler = (msg: unknown) => {
+                const notification = msg as { message: string };
+                logger.outputChannel!.appendLine(`NOTICE: ${notification.message}`);
             };
-            connection = new NzConnection(config);
-            await connection.connect();
-        }
-
-        // Attach listener for notices (e.g. RAISE NOTICE)
-        if (outputChannel) {
-            connection.on('notice', (msg: any) => {
-                outputChannel.appendLine(`NOTICE: ${msg.message}`);
-            });
+            connection.on('notice', noticeHandler);
         }
 
         try {
-            // Get timeout configuration
+            // 4. Get timeout configuration
             const config = vscode.workspace.getConfiguration('netezza');
             const queryTimeout = config.get<number>('queryTimeout', 1800);
 
-            // Execute query
-            const cmd = connection.createCommand(queryToExecute);
-            cmd.commandTimeout = queryTimeout;
+            // 5. Execute query and fetch results
+            const { columns, data, limitReached } = await executeQueryAndFetch(
+                connection,
+                queryToExecute,
+                queryTimeout,
+                documentUri
+            );
 
-            // Track command for cancellation if documentUri is available
-            if (documentUri) {
-                executingCommands.set(documentUri, cmd);
-            }
+            // 6. Log to history (async, don't wait)
+            await logQueryToHistory(context, connManager, resolvedConnectionName, query);
 
-            try {
-                // We use executeReader which works for SELECT and others (returns reader logic)
-                // But we need to handle "non-query" commands too?
-                // In JsNzDriver, executeReader returns a reader even if empty?
-                // Or we can use execute() for non-queries?
-                // Let's assume most are SELECT-like or we want to allow reading result if any.
-                // If it's pure INSERT/UPDATE without RETURNING, reader might be empty.
-
-                const reader = await cmd.executeReader();
-                const columns: { name: string; type?: string }[] = [];
-                const data: any[][] = [];
-                let rowsAffected: number | undefined;
-
-                // Check if we have columns
-                // JsNzDriver reader API: reader.read() returns boolean, reader.getName(i), reader.getValue(i)
-
-                // Fetch loop with limit
-                const limit = 200000;
-                let fetchedCount = 0;
-                let limitReached = false;
-
-                while (await reader.read()) {
-                    // Initialize columns on first row if not done
-                    if (columns.length === 0) {
-                        for (let i = 0; i < reader.fieldCount; i++) {
-                            columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
-                        }
-                    }
-
-                    const row: any[] = [];
-                    for (let i = 0; i < reader.fieldCount; i++) {
-                        row.push(reader.getValue(i));
-                    }
-                    data.push(row);
-                    fetchedCount++;
-
-                    if (fetchedCount >= limit) {
-                        limitReached = true;
-                        break;
-                    }
-                }
-
-                // Only close reader (it doesn't have close method? JsNzDriver NzDataReader usually just completes)
-                // But we can check rowsAffected if available in reader or command?
-                // JsNzDriver doesn't seem to expose rowsAffected directly on reader easily unless extended.
-                // But 'CommandComplete' message has it. NzConnections usually stores it?
-                // Let's assume undefined for now or check if Reader has it.
-
-                // Get current schema for history logging
-                const currentSchema = 'unknown';
-                try {
-                    // Reuse valid connection to get schema? Or skip to avoid overhead?
-                    // Let's skip automatic schema check for performance unless crucial.
-                } catch {
-                    // Schema retrieval failed - not critical, continue with 'unknown'
-                }
-
-                // Log to history (async, don't wait)
-                // We need valid details
-                const details = await connManager.getConnection(resolvedConnectionName!);
-                if (details) {
-                    const historyManager = new QueryHistoryManager(context);
-                    historyManager
-                        .addEntry(details.host, details.database, currentSchema, query, resolvedConnectionName)
-                        .catch(err => console.error('History log error:', err));
-                }
-
-                if (columns.length > 0) {
-                    if (outputChannel) outputChannel.appendLine('Query completed.');
-                    return {
-                        columns: columns,
-                        data: data,
-                        rowsAffected: rowsAffected,
-                        limitReached: limitReached,
-                        sql: queryToExecute
-                    };
-                } else {
-                    if (outputChannel) outputChannel.appendLine('Query executed successfully (no results).');
-                    return {
-                        columns: [],
-                        data: [],
-                        rowsAffected: rowsAffected,
-                        message: 'Query executed successfully (no results).',
-                        sql: queryToExecute
-                    };
-                }
-            } finally {
-                // Cleanup cancellation tracking
-                if (documentUri) {
-                    executingCommands.delete(documentUri);
-                }
+            // 7. Return result
+            if (columns.length > 0) {
+                log(logger, 'Query completed.');
+                return {
+                    columns,
+                    data,
+                    rowsAffected: undefined,
+                    limitReached,
+                    sql: queryToExecute
+                };
+            } else {
+                log(logger, 'Query executed successfully (no results).');
+                return {
+                    columns: [],
+                    data: [],
+                    rowsAffected: undefined,
+                    message: 'Query executed successfully (no results).',
+                    sql: queryToExecute
+                };
             }
         } finally {
-            // Close connection only if not using persistent connection
-            if (shouldCloseConnection) {
+            if (shouldCloseConnection && connection) {
                 await connection.close();
             }
         }
-    } catch (error: any) {
-        // const errorMessage = formatOdbcError(error);
-        const errorMessage = `Error: ${error.message || error}`;
-        if (outputChannel) {
-            outputChannel.appendLine(errorMessage);
-        }
-        if (logCallback) logCallback(errorMessage);
+    } catch (error: unknown) {
+        const errObj = error as { message?: string };
+        const errorMessage = `Error: ${errObj.message || String(error)}`;
+        log(logger, errorMessage);
         throw new Error(errorMessage);
     }
 }
@@ -320,7 +386,7 @@ export async function runQuery(
         // Convert array of arrays back to array of objects
         // WARNING: This will lose duplicate columns, but that's expected for legacy callers
         const mapped = result.data.map(row => {
-            const obj: any = {};
+            const obj: Record<string, unknown> = {};
             result.columns.forEach((col, index) => {
                 obj[col.name] = row[index];
             });
@@ -366,44 +432,19 @@ export async function runExplainQuery(
     const notices: string[] = [];
 
     // Resolve connection name
-    let resolvedConnectionName = connectionName;
-    if (!resolvedConnectionName && documentUri) {
-        resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
-    }
-    if (!resolvedConnectionName) {
-        resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
-    }
-    if (!resolvedConnectionName) {
-        throw new Error('No connection selected');
-    }
+    const resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
 
-    let connection;
-    let shouldCloseConnection = true;
+    const { connection, shouldCloseConnection } = await getConnection(
+        connManager,
+        resolvedConnectionName,
+        keepConnectionOpen
+    );
 
     try {
-        if (keepConnectionOpen) {
-            connection = await connManager.getPersistentConnection(resolvedConnectionName);
-            shouldCloseConnection = false;
-        } else {
-            const NzConnection = require('../../driver/dist/NzConnection');
-            const details = await connManager.getConnection(resolvedConnectionName);
-            if (!details) {
-                throw new Error(`Connection '${resolvedConnectionName}' not found`);
-            }
-            const config = {
-                host: details.host,
-                port: details.port || 5480,
-                database: details.database,
-                user: details.user,
-                password: details.password
-            };
-            connection = new NzConnection(config);
-            await connection.connect();
-        }
-
         // Attach listener to capture notices
-        const noticeHandler = (msg: any) => {
-            notices.push(msg.message);
+        const noticeHandler = (msg: unknown) => {
+            const notification = msg as { message: string };
+            notices.push(notification.message);
         };
         connection.on('notice', noticeHandler);
 
@@ -481,7 +522,6 @@ export async function runQueriesSequentially(
         // Connect with fetchArray option to get results as arrays
         let connection;
         let shouldCloseConnection = true;
-        // let connectionString: string;
 
         // Get details (needed for creating connection and history)
         const details = await connManager.getConnection(resolvedConnectionName);
@@ -493,7 +533,7 @@ export async function runQueriesSequentially(
             connection = await connManager.getPersistentConnection(resolvedConnectionName);
             shouldCloseConnection = false; // Don't close persistent connection
         } else {
-            const NzConnection = require('../../driver/dist/NzConnection');
+            const NzConnection = require('../../libs/driver/src/NzConnection');
             const config = {
                 host: details.host,
                 port: details.port || 5480,
@@ -507,9 +547,10 @@ export async function runQueriesSequentially(
 
         // Attach listener for notices
         // Attach listener for notices
-        connection.on('notice', (msg: any) => {
-            if (outputChannel) outputChannel.appendLine(`NOTICE: ${msg.message}`);
-            if (logCallback) logCallback(`NOTICE: ${msg.message}`);
+        connection.on('notice', (msg: unknown) => {
+            const notification = msg as { message: string };
+            if (outputChannel) outputChannel.appendLine(`NOTICE: ${notification.message}`);
+            if (logCallback) logCallback(`NOTICE: ${notification.message}`);
         });
 
         try {
@@ -593,20 +634,19 @@ export async function runQueriesSequentially(
                     if (batchResults && batchResults.length > 0) {
                         // Process all results (partial or full)
                         for (const rs of batchResults) {
-                            if (rs && (rs as any).columns) {
-                                const columns = (rs as any).columns;
+                            if (rs.columns.length > 0) {
                                 allResults.push({
-                                    columns: columns,
-                                    data: rs,
-                                    rowsAffected: (rs as any).count,
-                                    limitReached: (rs as any).limitReached,
+                                    columns: rs.columns,
+                                    data: rs.rows,
+                                    rowsAffected: undefined, // Not captured here
+                                    limitReached: rs.limitReached,
                                     sql: queryToExecute
                                 });
                             } else {
                                 allResults.push({
                                     columns: [],
                                     data: [],
-                                    rowsAffected: (rs as any)?.count,
+                                    rowsAffected: undefined, // Not captured here
                                     message: 'Query executed successfully',
                                     sql: queryToExecute
                                 });
@@ -618,19 +658,19 @@ export async function runQueriesSequentially(
                     if (resultCallback && batchResults && batchResults.length > 0) {
                         const queryResults: QueryResult[] = [];
                         for (const rs of batchResults) {
-                            if (rs && (rs as any).columns) {
+                            if (rs.columns.length > 0) {
                                 queryResults.push({
-                                    columns: (rs as any).columns,
-                                    data: rs,
-                                    rowsAffected: (rs as any).count,
-                                    limitReached: (rs as any).limitReached,
+                                    columns: rs.columns,
+                                    data: rs.rows,
+                                    rowsAffected: undefined, // Not captured here
+                                    limitReached: rs.limitReached,
                                     sql: queryToExecute
                                 });
                             } else {
                                 queryResults.push({
                                     columns: [],
                                     data: [],
-                                    rowsAffected: (rs as any)?.count,
+                                    rowsAffected: undefined,
                                     message: 'Query executed successfully',
                                     sql: queryToExecute
                                 });
@@ -643,8 +683,8 @@ export async function runQueriesSequentially(
                         // Re-throw valid error to be caught by outer catch
                         throw batchError;
                     }
-                } catch (err: any) {
-                    const errorMsg = `Error: ${err.message}`;
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
                     if (outputChannel) outputChannel.appendLine(`Error in query ${i + 1}: ${errorMsg}`);
                     throw new Error(errorMsg);
                 }
@@ -656,8 +696,9 @@ export async function runQueriesSequentially(
                 await connection.close();
             }
         }
-    } catch (error: any) {
-        const errorMessage = `Error: ${error.message}`;
+    } catch (error: unknown) {
+        const errObj = error as { message?: string };
+        const errorMessage = `Error: ${errObj.message || String(error)}`;
         if (outputChannel) outputChannel.appendLine(errorMessage);
         if (logCallback) logCallback(errorMessage);
         throw new Error(errorMessage);
@@ -674,13 +715,21 @@ export async function runQueriesSequentially(
 /**
  * Execute a query and fetch results up to a limit using NzConnection.
  */
+// Internal result set interface for executeAndFetchWithLimit
+// Uses 'rows' internally, converted to 'data' when creating QueryResult
+interface InternalResultSet {
+    columns: ColumnDefinition[];
+    rows: unknown[][];
+    limitReached: boolean;
+}
+
 async function executeAndFetchWithLimit(
-    connection: any,
+    connection: NzConnection,
     query: string,
     limit: number,
     timeoutSeconds?: number,
     documentUri?: string
-): Promise<{ results: any[]; error?: Error }> {
+): Promise<{ results: InternalResultSet[]; error?: Error }> {
     const cmd = connection.createCommand(query);
     if (timeoutSeconds && timeoutSeconds > 0) {
         cmd.commandTimeout = timeoutSeconds;
@@ -693,14 +742,14 @@ async function executeAndFetchWithLimit(
 
     try {
         const reader = await cmd.executeReader();
-        const results: any[] = [];
+        const results: InternalResultSet[] = [];
         let hasMore = true;
         let caughtError: Error | undefined;
 
         try {
             do {
                 const columns: { name: string; type?: string }[] = [];
-                const allRows: any[] = [];
+                const rows: unknown[][] = [];
                 let fetchedCount = 0;
                 let limitReached = false;
 
@@ -714,34 +763,33 @@ async function executeAndFetchWithLimit(
                     }
 
                     if (fetchedCount < limit) {
-                        const row: any[] = [];
+                        const row: unknown[] = [];
                         for (let i = 0; i < reader.fieldCount; i++) {
                             row.push(reader.getValue(i));
                         }
-                        allRows.push(row);
+                        rows.push(row);
                         fetchedCount++;
                     }
 
                     if (fetchedCount >= limit) {
                         limitReached = true;
+                        // Cancel the command on the server side since we don't need more data
+                        await consumeRestAndCancel(reader, cmd);
                         break;
                     }
                 }
 
-                // Attach columns metadata
-                if (columns.length > 0) {
-                    (allRows as any).columns = columns;
-                }
-                if (limitReached) {
-                    (allRows as any).limitReached = true;
-                }
-
-                results.push(allRows);
+                results.push({
+                    columns,
+                    rows,
+                    limitReached
+                });
 
                 hasMore = await reader.nextResult();
             } while (hasMore);
-        } catch (readErr: any) {
-            caughtError = readErr;
+
+        } catch (readErr: unknown) {
+            caughtError = readErr instanceof Error ? readErr : new Error(String(readErr));
             // Don't throw loop error immediately, return what we have so far
         }
 
@@ -750,5 +798,275 @@ async function executeAndFetchWithLimit(
         if (documentUri) {
             executingCommands.delete(documentUri);
         }
+    }
+}
+
+/**
+ * Streaming chunk callback
+ */
+export interface StreamingChunk {
+    columns: { name: string; type?: string }[];
+    rows: unknown[][];
+    isFirstChunk: boolean;
+    isLastChunk: boolean;
+    totalRowsSoFar: number;
+    limitReached: boolean;
+}
+
+/**
+ * Execute a query and stream results in chunks to avoid memory pressure.
+ * Uses chunk-based streaming for better memory management and faster first-data-display.
+ */
+async function executeAndFetchStreaming(
+    connection: NzConnection,
+    query: string,
+    limit: number,
+    chunkSize: number,
+    timeoutSeconds: number | undefined,
+    documentUri: string | undefined,
+    onChunk: (chunk: StreamingChunk) => void
+): Promise<{ totalRows: number; limitReached: boolean; error?: Error }> {
+    const cmd = connection.createCommand(query);
+    if (timeoutSeconds && timeoutSeconds > 0) {
+        cmd.commandTimeout = timeoutSeconds;
+    }
+
+    // Track command
+    if (documentUri) {
+        executingCommands.set(documentUri, cmd);
+    }
+
+    try {
+        const reader = await cmd.executeReader();
+        let caughtError: Error | undefined;
+        let totalRows = 0;
+        let limitReached = false;
+
+        try {
+            // We only handle the first result set for streaming (common case)
+            const columns: { name: string; type?: string }[] = [];
+            let chunk: unknown[][] = [];
+            let isFirstChunk = true;
+
+            while (await reader.read()) {
+                // Initialize columns on first row
+                if (columns.length === 0) {
+                    for (let i = 0; i < reader.fieldCount; i++) {
+                        columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+                    }
+                }
+
+                // Add row to chunk
+                const row: unknown[] = [];
+                for (let i = 0; i < reader.fieldCount; i++) {
+                    row.push(reader.getValue(i));
+                }
+                chunk.push(row);
+                totalRows++;
+
+                // Send chunk when it reaches chunk size
+                if (chunk.length >= chunkSize) {
+                    onChunk({
+                        columns: isFirstChunk ? columns : [],
+                        rows: chunk,
+                        isFirstChunk,
+                        isLastChunk: false,
+                        totalRowsSoFar: totalRows,
+                        limitReached: false
+                    });
+                    chunk = [];
+                    isFirstChunk = false;
+                }
+
+                // Check limit
+                if (totalRows >= limit) {
+                    limitReached = true;
+                    await consumeRestAndCancel(reader, cmd);
+                    break;
+                }
+            }
+
+            // Send final chunk (even if empty, to signal completion)
+            onChunk({
+                columns: isFirstChunk ? columns : [],
+                rows: chunk,
+                isFirstChunk,
+                isLastChunk: true,
+                totalRowsSoFar: totalRows,
+                limitReached
+            });
+
+        } catch (readErr: unknown) {
+            caughtError = readErr instanceof Error ? readErr : new Error(String(readErr));
+        }
+
+        return { totalRows, limitReached, error: caughtError };
+    } finally {
+        if (documentUri) {
+            executingCommands.delete(documentUri);
+        }
+    }
+}
+
+/**
+ * Run queries sequentially with streaming support.
+ * Sends results in chunks for better memory efficiency and responsiveness.
+ */
+export async function runQueriesWithStreaming(
+    context: vscode.ExtensionContext,
+    queries: string[],
+    connectionManager?: ConnectionManager,
+    documentUri?: string,
+    logCallback?: (msg: string) => void,
+    chunkCallback?: (queryIndex: number, chunk: StreamingChunk, sql: string) => void,
+    chunkSize: number = 5000
+): Promise<void> {
+    const connManager = connectionManager || new ConnectionManager(context);
+    const keepConnectionOpen = connManager.getKeepConnectionOpen();
+
+    let outputChannel: vscode.OutputChannel | undefined;
+    if (!logCallback) {
+        outputChannel = vscode.window.createOutputChannel('Netezza SQL');
+        outputChannel.show(true);
+        outputChannel.appendLine(`Executing ${queries.length} queries with streaming...`);
+    }
+
+    // Resolve connection name from document or use active
+    let resolvedConnectionName = connectionManager
+        ? connectionManager.getConnectionForExecution(documentUri)
+        : undefined;
+    if (!resolvedConnectionName) {
+        resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
+    }
+
+    if (!resolvedConnectionName) {
+        const msg = 'Error: No connection selected';
+        if (outputChannel) outputChannel.appendLine(msg);
+        if (logCallback) logCallback(msg);
+        throw new Error('No connection selected');
+    }
+
+    try {
+        // Get connection details
+        const details = await connManager.getConnection(resolvedConnectionName);
+        if (!details) {
+            throw new Error(`Connection '${resolvedConnectionName}' not found`);
+        }
+
+        let connection;
+        let shouldCloseConnection = true;
+
+        if (keepConnectionOpen) {
+            connection = await connManager.getPersistentConnection(resolvedConnectionName);
+            shouldCloseConnection = false;
+        } else {
+            const NzConnection = require('../../libs/driver/src/NzConnection');
+            const config = {
+                host: details.host,
+                port: details.port || 5480,
+                database: details.database,
+                user: details.user,
+                password: details.password
+            };
+            connection = new NzConnection(config);
+            await connection.connect();
+        }
+
+        // Attach listener for notices
+        connection.on('notice', (msg: unknown) => {
+            const notification = msg as { message: string };
+            if (outputChannel) outputChannel.appendLine(`NOTICE: ${notification.message}`);
+            if (logCallback) logCallback(`NOTICE: ${notification.message}`);
+        });
+
+        try {
+            // Get Session ID
+            try {
+                const sidCmd = connection.createCommand('SELECT CURRENT_SID');
+                const sidReader = await sidCmd.executeReader();
+                if (await sidReader.read()) {
+                    const sid = sidReader.getValue(0);
+                    if (sid !== undefined && logCallback) {
+                        logCallback(`Connected. Session ID: ${sid}`);
+                    }
+                }
+                await sidReader.close();
+            } catch (sidErr) {
+                console.debug('Could not retrieve session ID:', sidErr);
+                if (logCallback) logCallback('Connected.');
+            }
+
+            const historyManager = new QueryHistoryManager(context);
+            const currentSchema = 'unknown';
+
+            for (let i = 0; i < queries.length; i++) {
+                const query = queries[i];
+                const msg = `Executing query ${i + 1}/${queries.length}...`;
+                if (outputChannel) outputChannel.appendLine(msg);
+                if (logCallback) logCallback(msg);
+
+                try {
+                    // Parse variables
+                    const parsed = parseSetVariables(query);
+                    let queryToExecute = parsed.sql;
+                    const setDefaults = parsed.setValues;
+                    const vars = extractVariables(queryToExecute);
+                    if (vars.size > 0) {
+                        const resolved = await promptForVariableValues(vars, false, setDefaults);
+                        queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
+                    }
+
+                    const config = vscode.workspace.getConfiguration('netezza');
+                    const queryTimeout = config.get<number>('queryTimeout', 1800);
+
+                    const startTime = Date.now();
+
+                    // Use streaming fetch
+                    const { totalRows, limitReached, error } = await executeAndFetchStreaming(
+                        connection,
+                        queryToExecute,
+                        200000, // limit
+                        chunkSize,
+                        queryTimeout,
+                        documentUri,
+                        (chunk) => {
+                            if (chunkCallback) {
+                                chunkCallback(i, chunk, queryToExecute);
+                            }
+                        }
+                    );
+
+                    const durationMs = Date.now() - startTime;
+                    if (logCallback) {
+                        logCallback(`Query ${i + 1}/${queries.length}: ${totalRows} rows in ${durationMs}ms${limitReached ? ' (limit reached)' : ''}`);
+                    }
+
+                    // Log to history
+                    historyManager
+                        .addEntry(details.host, details.database, currentSchema, query, resolvedConnectionName)
+                        .catch(err => console.error('Failed to log query to history:', err));
+
+                    if (error) {
+                        throw error;
+                    }
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    if (outputChannel) outputChannel.appendLine(`Error in query ${i + 1}: ${errorMsg}`);
+                    throw new Error(errorMsg);
+                }
+            }
+
+            if (outputChannel) outputChannel.appendLine('All queries completed.');
+        } finally {
+            if (shouldCloseConnection) {
+                await connection.close();
+            }
+        }
+    } catch (error: unknown) {
+        const errObj = error as { message?: string };
+        const errorMessage = `Error: ${errObj.message || String(error)}`;
+        if (outputChannel) outputChannel.appendLine(errorMessage);
+        if (logCallback) logCallback(errorMessage);
+        throw new Error(errorMessage);
     }
 }

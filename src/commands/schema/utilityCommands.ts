@@ -101,8 +101,8 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                     }
                 }
 
-                const connectionString = await connectionManager.getConnectionString(targetConnectionName);
-                if (!connectionString) {
+                const connectionDetails = await connectionManager.getConnection(targetConnectionName);
+                if (!connectionDetails) {
                     statusBarDisposable.dispose();
                     vscode.window.showWarningMessage('Not connected to database and object not found in cache.');
                     return;

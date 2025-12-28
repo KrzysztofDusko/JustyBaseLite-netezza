@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import { runQuery } from '../../core/queryRunner';
 import { SchemaCommandsDependencies, SchemaItemData } from './types';
-import { getFullName, requireConnection, executeWithProgress } from './helpers';
+import { getFullName, executeWithProgress } from './helpers';
 
 /**
  * Register maintenance commands
@@ -79,8 +79,7 @@ export function registerMaintenanceCommands(deps: SchemaCommandsDependencies): v
                 );
 
                 if (confirmation === 'Yes, execute') {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    // Note: runQuery uses connectionManager internally
 
                     try {
                         const startTime = Date.now();
@@ -117,8 +116,7 @@ export function registerMaintenanceCommands(deps: SchemaCommandsDependencies): v
                 );
 
                 if (confirmation === 'Yes, generate') {
-                    const connectionString = await requireConnection(connectionManager);
-                    if (!connectionString) return;
+                    // Note: runQuery uses connectionManager internally
 
                     try {
                         const startTime = Date.now();
@@ -172,8 +170,8 @@ export function registerMaintenanceCommands(deps: SchemaCommandsDependencies): v
                 return;
             }
 
-            const connectionString = await requireConnection(connectionManager);
-            if (!connectionString) {
+            const connectionDetails = await connectionManager.getConnection(connectionManager.getActiveConnectionName() || '');
+            if (!connectionDetails) {
                 vscode.window.showErrorMessage('Connection not configured. Please connect via Netezza: Connect...');
                 return;
             }
@@ -193,7 +191,7 @@ export function registerMaintenanceCommands(deps: SchemaCommandsDependencies): v
                         const { generateRecreateTableScript } = await import('../../schema/tableRecreator');
 
                         const result = await generateRecreateTableScript(
-                            connectionString,
+                            connectionDetails,
                             item.dbName!,
                             item.schema!,
                             item.label!,

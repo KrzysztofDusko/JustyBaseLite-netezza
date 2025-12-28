@@ -4,12 +4,13 @@
 
 import { ProcedureInfo } from './types';
 import { executeQueryHelper, quoteNameIfNeeded, fixProcReturnType } from './helpers';
+import { NzConnection } from '../types';
 
 /**
  * Generate DDL code for creating a procedure in Netezza
  */
 export async function generateProcedureDDL(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     procName: string
@@ -33,7 +34,18 @@ export async function generateProcedureDDL(
         ORDER BY 1, 2, 3
     `;
 
-    const result = await executeQueryHelper(connection, sql);
+    interface ProcedureRow {
+        SCHEMA: string;
+        PROCEDURESOURCE: string;
+        OBJID: number;
+        RETURNS: string;
+        EXECUTEDASOWNER: boolean | number | string;
+        DESCRIPTION: string;
+        PROCEDURESIGNATURE: string;
+        PROCEDURE: string;
+        ARGUMENTS: string;
+    }
+    const result = await executeQueryHelper<ProcedureRow>(connection, sql);
     const rows = result;
 
     if (rows.length === 0) {

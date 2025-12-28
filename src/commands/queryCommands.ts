@@ -4,10 +4,10 @@
 
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../core/connectionManager';
-import { runQueriesSequentially, runExplainQuery } from '../core/queryRunner';
+import { runQueriesSequentially, runExplainQuery, runQueriesWithStreaming, StreamingChunk } from '../core/queryRunner';
 import { SqlParser } from '../sql/sqlParser';
 import { ResultPanelView } from '../views/resultPanelView';
-import { format as formatSQL } from 'sql-formatter';
+// sql-formatter is lazy-loaded to reduce startup time
 import { buildExecCommand } from '../utils/shellUtils';
 
 export interface QueryCommandsDependencies {
@@ -103,21 +103,43 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
             try {
                 resultPanelProvider.startExecution(sourceUri);
 
-                await runQueriesSequentially(
-                    context,
-                    queries,
-                    connectionManager,
-                    sourceUri,
-                    msg => resultPanelProvider.log(sourceUri, msg),
-                    queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
-                );
+                // Check if streaming is enabled
+                const config = vscode.workspace.getConfiguration('netezza');
+                const enableStreaming = config.get<boolean>('enableStreaming', false);
+                const streamingChunkSize = config.get<number>('streamingChunkSize', 5000);
+
+                if (enableStreaming) {
+                    // Use streaming for large result sets
+                    await runQueriesWithStreaming(
+                        context,
+                        queries,
+                        connectionManager,
+                        sourceUri,
+                        msg => resultPanelProvider.log(sourceUri, msg),
+                        (queryIndex: number, chunk: StreamingChunk, sql: string) => {
+                            resultPanelProvider.appendStreamingChunk(sourceUri, queryIndex, chunk, sql);
+                        },
+                        streamingChunkSize
+                    );
+                } else {
+                    // Use traditional batch loading
+                    await runQueriesSequentially(
+                        context,
+                        queries,
+                        connectionManager,
+                        sourceUri,
+                        msg => resultPanelProvider.log(sourceUri, msg),
+                        queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
+                    );
+                }
 
                 resultPanelProvider.finalizeExecution(sourceUri);
                 vscode.commands.executeCommand('netezza.results.focus');
-            } catch (err: any) {
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
                 resultPanelProvider.finalizeExecution(sourceUri);
-                resultPanelProvider.log(sourceUri, `Error: ${err.message}`);
-                vscode.window.showErrorMessage(`Error executing query: ${err.message}`);
+                resultPanelProvider.log(sourceUri, `Error: ${msg}`);
+                vscode.window.showErrorMessage(`Error executing query: ${msg}`);
             }
         }),
 
@@ -190,10 +212,11 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
 
                 resultPanelProvider.finalizeExecution(sourceUri);
                 vscode.commands.executeCommand('netezza.results.focus');
-            } catch (err: any) {
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
                 resultPanelProvider.finalizeExecution(sourceUri);
-                resultPanelProvider.log(sourceUri, `Error: ${err.message}`);
-                vscode.window.showErrorMessage(`Error executing query: ${err.message}`);
+                resultPanelProvider.log(sourceUri, `Error: ${msg}`);
+                vscode.window.showErrorMessage(`Error executing query: ${msg}`);
             }
         }),
 
@@ -228,6 +251,9 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
             const text = selection.isEmpty ? editor.document.getText() : editor.document.getText(selection);
 
             try {
+                // Lazy load sql-formatter only when needed
+                const { format: formatSQL } = await import('sql-formatter');
+
                 const doubleDotPlaceholder = '__NZ_DOUBLE_DOT__';
                 const preprocessed = text.replace(/\.\.(?=[a-zA-Z_])/g, `.${doubleDotPlaceholder}.`);
 
@@ -253,8 +279,8 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
                 });
 
                 vscode.window.showInformationMessage('SQL formatted successfully');
-            } catch (err: any) {
-                const errMsg = err.message || String(err);
+            } catch (err: unknown) {
+                const errMsg = err instanceof Error ? err.message : String(err);
                 if (errMsg.includes('Parse error')) {
                     vscode.window.showErrorMessage(
                         'SQL formatting failed: The SQL contains syntax not supported by the formatter. ' +
@@ -315,9 +341,8 @@ async function executeExplainQuery(
     try {
         const documentUri = document.uri.toString();
         const connectionName = connectionManager.getConnectionForExecution(documentUri);
-        const connectionString = await connectionManager.getConnectionString(connectionName);
 
-        if (!connectionString) {
+        if (!connectionName) {
             vscode.window.showErrorMessage('No database connection. Please connect first.');
             return;
         }
@@ -346,7 +371,8 @@ async function executeExplainQuery(
                 }
             }
         );
-    } catch (err: any) {
-        vscode.window.showErrorMessage(`Error generating query plan: ${err.message}`);
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Error generating query plan: ${msg}`);
     }
 }

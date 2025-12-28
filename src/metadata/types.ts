@@ -36,11 +36,57 @@ export interface CachedObjectInfo {
     name: string;
 }
 
+export interface DatabaseMetadata {
+    DATABASE: string;
+    label?: string;
+    detail?: string;
+    kind?: number;
+    [key: string]: unknown;
+}
+
+export interface SchemaMetadata {
+    SCHEMA: string;
+    OWNER?: string;
+    label?: string;
+    detail?: string;
+    kind?: number;
+    insertText?: string;
+    sortText?: string;
+    filterText?: string;
+    [key: string]: unknown;
+}
+
+export interface TableMetadata {
+    OBJNAME?: string;
+    TABLENAME?: string;
+    OBJID?: number;
+    SCHEMA?: string;
+    kind?: number;
+    objType?: string;
+    TYPE?: string;
+    label?: string | { label: string };
+    detail?: string;
+    sortText?: string;
+    [key: string]: unknown;
+}
+
+export interface ColumnMetadata {
+    ATTNAME: string;
+    FORMAT_TYPE: string;
+    label?: string;
+    detail?: string;
+    kind?: number;
+    documentation?: string;
+    isPk?: boolean;
+    isFk?: boolean;
+    [key: string]: unknown;
+}
+
 /**
  * Object with schema information
  */
 export interface ObjectWithSchema {
-    item: any;
+    item: TableMetadata;
     schema: string;
     objId?: number;
 }

@@ -26,8 +26,9 @@ export class LoginPanel {
                                 `Connection '${message.data.name}' saved and activated!`
                             );
                             this.sendConnectionsToWebview(); // Refresh list
-                        } catch (e: any) {
-                            vscode.window.showErrorMessage(`Error saving: ${e.message}`);
+                        } catch (e: unknown) {
+                            const errorMsg = e instanceof Error ? e.message : String(e);
+                            vscode.window.showErrorMessage(`Error saving: ${errorMsg}`);
                         }
                         return;
                     case 'delete':
@@ -43,8 +44,9 @@ export class LoginPanel {
                                 vscode.window.showInformationMessage(`Connection '${message.name}' deleted.`);
                                 this.sendConnectionsToWebview();
                             }
-                        } catch (e: any) {
-                            vscode.window.showErrorMessage(`Error deleting: ${e.message}`);
+                        } catch (e: unknown) {
+                            const errorMsg = e instanceof Error ? e.message : String(e);
+                            vscode.window.showErrorMessage(`Error deleting: ${errorMsg}`);
                         }
                         return;
                     case 'loadConnections':

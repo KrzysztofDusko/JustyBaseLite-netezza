@@ -15,42 +15,30 @@ export interface RecreateTableResult {
     error?: string;
 }
 
-/**
- * Generate a script to recreate a table (Maintenance/Restructure)
- */
-function parseConnectionString(connStr: string): any {
-    const parts = connStr.split(';');
-    const config: any = {};
-    for (const part of parts) {
-        const idx = part.indexOf('=');
-        if (idx > 0) {
-            const key = part.substring(0, idx).trim().toUpperCase();
-            const value = part.substring(idx + 1).trim();
-            if (key === 'SERVER') config.host = value;
-            else if (key === 'PORT') config.port = parseInt(value);
-            else if (key === 'DATABASE') config.database = value;
-            else if (key === 'UID') config.user = value;
-            else if (key === 'PWD') config.password = value;
-        }
-    }
-    return config;
-}
+import { NzConnection, ConnectionDetails } from '../types';
+
+// ConnectionDetails imported from types - no parseConnectionString needed
 
 export async function generateRecreateTableScript(
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     database: string,
     schema: string,
     tableName: string,
     newTableNameInput: string | undefined
 ): Promise<RecreateTableResult> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
         await connection.connect();
 
         // 1. Get Metadata
@@ -249,10 +237,11 @@ export async function generateRecreateTableScript(
             success: true,
             sqlScript: lines.join('\n')
         };
-    } catch (e: any) {
+    } catch (e: unknown) {
+        const errorMsg = e instanceof Error ? e.message : String(e);
         return {
             success: false,
-            error: `Error generating recreate script: ${e.message || e}`
+            error: `Error generating recreate script: ${errorMsg}`
         };
     } finally {
         if (connection) {

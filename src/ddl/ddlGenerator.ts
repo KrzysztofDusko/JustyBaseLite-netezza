@@ -4,27 +4,28 @@
  */
 
 import { DDLResult } from './types';
-import { createConnection } from './helpers';
+import { createConnectionFromDetails } from './helpers';
 import { generateTableDDL } from './tableDDL';
 import { generateViewDDL } from './viewDDL';
 import { generateProcedureDDL } from './procedureDDL';
 import { generateExternalTableDDL } from './externalTableDDL';
 import { generateSynonymDDL } from './synonymDDL';
+import { NzConnection, ConnectionDetails } from '../types';
 
 /**
  * Generate DDL code for a database object
  */
 export async function generateDDL(
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     database: string,
     schema: string,
     objectName: string,
     objectType: string
 ): Promise<DDLResult> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
-        connection = await createConnection(connectionString);
+        connection = await createConnectionFromDetails(connectionDetails);
 
         const upperType = objectType.toUpperCase();
 
@@ -80,10 +81,11 @@ export async function generateDDL(
                 note: `${objectType} DDL generation not yet implemented`
             };
         }
-    } catch (e: any) {
+    } catch (e: unknown) {
+        const errorMsg = e instanceof Error ? e.message : String(e);
         return {
             success: false,
-            error: `DDL generation error: ${e.message || e}`
+            error: `DDL generation error: ${errorMsg}`
         };
     } finally {
         if (connection) {
@@ -95,3 +97,4 @@ export async function generateDDL(
         }
     }
 }
+

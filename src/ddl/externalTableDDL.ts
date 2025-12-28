@@ -5,16 +5,56 @@
 import { ExternalTableInfo } from './types';
 import { executeQueryHelper, quoteNameIfNeeded } from './helpers';
 import { getColumns } from './metadata';
+import { NzConnection } from '../types';
 
 /**
  * Generate DDL code for creating an external table in Netezza
  */
 export async function generateExternalTableDDL(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
 ): Promise<string> {
+    interface ExternalTableRow {
+        SCHEMA: string;
+        TABLENAME: string;
+        EXTOBJNAME: string;
+        OBJID: number;
+        DELIM: string;
+        ENCODING: string;
+        TIMESTYLE: string;
+        REMOTESOURCE: string;
+        SKIPROWS: number;
+        MAXERRORS: number;
+        ESCAPE: string;
+        LOGDIR: string;
+        DECIMALDELIM: string;
+        QUOTEDVALUE: string;
+        NULLVALUE: string;
+        CRINSTRING: boolean | number | string;
+        TRUNCSTRING: boolean | number | string;
+        CTRLCHARS: boolean | number | string;
+        IGNOREZERO: boolean | number | string;
+        TIMEEXTRAZEROS: boolean | number | string;
+        Y2BASE: number;
+        FILLRECORD: boolean | number | string;
+        COMPRESS: boolean | number | string;
+        INCLUDEHEADER: boolean | number | string;
+        LFINSTRING: boolean | number | string;
+        DATESTYLE: string;
+        DATEDELIM: string;
+        TIMEDELIM: string;
+        BOOLSTYLE: string;
+        FORMAT: string;
+        SOCKETBUFSIZE: number;
+        RECORDDELIM: string;
+        MAXROWS: number;
+        REQUIREQUOTES: boolean | number | string;
+        RECORDLENGTH: string;
+        DATETIMEDELIM: string;
+        REJECTFILE: string;
+    }
     // Get external table properties
     const sql = `
         SELECT 
@@ -66,12 +106,19 @@ export async function generateExternalTableDDL(
             AND E1.TABLENAME = '${tableName.toUpperCase()}'
     `;
 
-    const result = await executeQueryHelper(connection, sql);
-    const rows = result;
+    const rows = await executeQueryHelper<ExternalTableRow>(connection, sql);
 
     if (rows.length === 0) {
         throw new Error(`External table ${database}.${schema}.${tableName} not found`);
     }
+
+    const parseBool = (val: boolean | number | string | null | undefined): boolean | null => {
+        if (val === null || val === undefined) return null;
+        if (typeof val === 'boolean') return val;
+        if (typeof val === 'number') return val !== 0;
+        const s = String(val).toLowerCase();
+        return s === 't' || s === 'true' || s === '1' || s === 'yes' || s === 'on';
+    };
 
     const row = rows[0];
     const extInfo: ExternalTableInfo = {
@@ -89,16 +136,16 @@ export async function generateExternalTableDDL(
         decimalDelim: row.DECIMALDELIM || null,
         quotedValue: row.QUOTEDVALUE || null,
         nullValue: row.NULLVALUE || null,
-        crInString: row.CRINSTRING ?? null,
-        truncString: row.TRUNCSTRING ?? null,
-        ctrlChars: row.CTRLCHARS ?? null,
-        ignoreZero: row.IGNOREZERO ?? null,
-        timeExtraZeros: row.TIMEEXTRAZEROS ?? null,
+        crInString: parseBool(row.CRINSTRING),
+        truncString: parseBool(row.TRUNCSTRING),
+        ctrlChars: parseBool(row.CTRLCHARS),
+        ignoreZero: parseBool(row.IGNOREZERO),
+        timeExtraZeros: parseBool(row.TIMEEXTRAZEROS),
         y2Base: row.Y2BASE || null,
-        fillRecord: row.FILLRECORD ?? null,
-        compress: row.COMPRESS || null,
-        includeHeader: row.INCLUDEHEADER ?? null,
-        lfInString: row.LFINSTRING ?? null,
+        fillRecord: parseBool(row.FILLRECORD),
+        compress: parseBool(row.COMPRESS),
+        includeHeader: parseBool(row.INCLUDEHEADER),
+        lfInString: parseBool(row.LFINSTRING),
         dateStyle: row.DATESTYLE || null,
         dateDelim: row.DATEDELIM || null,
         timeDelim: row.TIMEDELIM || null,
@@ -109,7 +156,7 @@ export async function generateExternalTableDDL(
             ? String(row.RECORDDELIM).replace(/\r/g, '\\r').replace(/\n/g, '\\n')
             : null,
         maxRows: row.MAXROWS || null,
-        requireQuotes: row.REQUIREQUOTES ?? null,
+        requireQuotes: parseBool(row.REQUIREQUOTES),
         recordLength: row.RECORDLENGTH || null,
         dateTimeDelim: row.DATETIMEDELIM || null,
         rejectFile: row.REJECTFILE || null

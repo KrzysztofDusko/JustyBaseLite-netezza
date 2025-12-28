@@ -2,6 +2,8 @@
  * DDL Generator - Type Definitions
  */
 
+import { ConnectionDetails } from '../types';
+
 /**
  * Column information for DDL generation
  */
@@ -84,7 +86,7 @@ export interface ExternalTableInfo {
     timeExtraZeros: boolean | null;
     y2Base: number | null;
     fillRecord: boolean | null;
-    compress: string | null;
+    compress: boolean | null;
     includeHeader: boolean | null;
     lfInString: boolean | null;
     dateStyle: string | null;
@@ -105,7 +107,7 @@ export interface ExternalTableInfo {
  * Options for batch DDL generation
  */
 export interface BatchDDLOptions {
-    connectionString: string;
+    connectionDetails: ConnectionDetails;
     database: string;
     schema?: string;
     objectTypes?: string[];

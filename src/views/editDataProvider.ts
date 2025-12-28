@@ -3,12 +3,26 @@ import { runQuery, runQueriesSequentially } from '../core/queryRunner';
 import { ConnectionManager } from '../core/connectionManager';
 import { getTableMetadata, toWebviewFormat } from '../providers/tableMetadataProvider';
 
+export interface EditDataItem {
+    label: string;
+    dbName: string;
+    schema: string;
+    connectionName: string;
+    [key: string]: unknown;
+}
+
+interface DataChanges {
+    updates?: { rowId: string | number; changes: Record<string, unknown> }[];
+    deletes?: (string | number)[];
+    inserts?: Record<string, unknown>[];
+}
+
 export class EditDataProvider {
     public static readonly viewType = 'netezza.editData';
 
     public static async createOrShow(
         extensionUri: vscode.Uri,
-        item: any,
+        item: EditDataItem,
         context: vscode.ExtensionContext,
         connectionManager: ConnectionManager
     ) {
@@ -141,8 +155,8 @@ export class EditDataProvider {
                         vscode.window.showInformationMessage(message.text);
                         break;
                 }
-            } catch (e: any) {
-                vscode.window.showErrorMessage(`Error: ${e.message}`);
+            } catch (e: unknown) {
+                vscode.window.showErrorMessage(`Error: ${e instanceof Error ? e.message : String(e)}`);
             }
         });
     }
@@ -158,8 +172,8 @@ export class EditDataProvider {
         try {
             await runQuery(context, sql, true, connectionName, connectionManager);
             vscode.window.showInformationMessage(successMsg);
-        } catch (e: any) {
-            vscode.window.showErrorMessage(`Operation failed: ${e.message}`);
+        } catch (e: unknown) {
+            vscode.window.showErrorMessage(`Operation failed: ${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
@@ -195,7 +209,7 @@ export class EditDataProvider {
             const columnsMeta = toWebviewFormat(metadata.columns);
 
             // Parse Data
-            let data: any[] = [];
+            let data: Record<string, unknown>[] = [];
             try {
                 // Robust JSON parsing
                 const raw = dataResult || '[]';
@@ -212,24 +226,24 @@ export class EditDataProvider {
 
                 if (typeof raw === 'string') {
                     if (raw.trim().startsWith('[')) {
-                        data = JSON.parse(raw);
+                        data = JSON.parse(raw) as Record<string, unknown>[];
                     } else {
                         // Not a JSON array, likely empty or message
                         console.log('[EditDataProvider] dataResult is NOT JSON array:', raw.substring(0, 100));
                         data = [];
                     }
                 } else if (Array.isArray(raw)) {
-                    data = raw;
+                    data = raw as Record<string, unknown>[];
                 }
                 console.log('[EditDataProvider] Parsed data rows:', data.length);
-            } catch (e) {
+            } catch (e: unknown) {
                 console.error('[EditDataProvider] Data Parse Error', e);
             }
 
             // Columns extraction
             let columns: string[] = [];
             if (columnsMeta.length > 0) {
-                columns = ['ROWID', ...columnsMeta.map((c: any) => c.ATTNAME)];
+                columns = ['ROWID', ...columnsMeta.map((c: { ATTNAME: string }) => c.ATTNAME)];
             } else if (data.length > 0) {
                 columns = Object.keys(data[0]);
             }
@@ -245,9 +259,10 @@ export class EditDataProvider {
                     columns: columnsMeta
                 }
             });
-        } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to load data: ${err.message}`);
-            panel.webview.postMessage({ command: 'setError', text: err.message });
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Failed to load data: ${msg}`);
+            panel.webview.postMessage({ command: 'setError', text: msg });
         } finally {
             panel.webview.postMessage({ command: 'setLoading', loading: false });
         }
@@ -255,7 +270,7 @@ export class EditDataProvider {
 
     private static async _handleSave(
         _panel: vscode.WebviewPanel,
-        changes: any,
+        changes: DataChanges,
         tableName: string,
         _connectionName: string,
         context: vscode.ExtensionContext,
@@ -317,15 +332,15 @@ export class EditDataProvider {
             await runQueriesSequentially(context, batch, connectionManager);
 
             vscode.window.showInformationMessage(`Successfully executed ${queries.length} changes.`);
-        } catch (err: any) {
-            vscode.window.showErrorMessage(`Failed to save changes: ${err.message}`);
+        } catch (err: unknown) {
+            vscode.window.showErrorMessage(`Failed to save changes: ${err instanceof Error ? err.message : String(err)}`);
             // Attempt rollback if mid-way? (Requires session persistence which runQueriesSequentially *might* not guarantee if it opens new conns?
             // Actually runQueriesSequentially in this ext opens one connection and reuses it?
             // Checking runQueriesSequentially implementation is out of scope but assuming it works for now.
         }
     }
 
-    private static _formatValue(val: any): string {
+    private static _formatValue(val: unknown): string {
         if (val === null || val === undefined || val === '') return 'NULL'; // Empty string as NULL? For editing usually yes
         if (typeof val === 'number') return val.toString();
         if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';

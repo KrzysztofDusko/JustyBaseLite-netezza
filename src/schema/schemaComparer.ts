@@ -116,13 +116,18 @@ export interface ProcedureComparisonResult {
 /**
  * Execute query and return array of objects
  */
-async function executeQueryHelper(connection: any, sql: string): Promise<any[]> {
+import { NzConnection, ConnectionDetails } from '../types';
+
+/**
+ * Execute query and return array of objects
+ */
+async function executeQueryHelper(connection: NzConnection, sql: string): Promise<Record<string, unknown>[]> {
     const cmd = connection.createCommand(sql);
     const reader = await cmd.executeReader();
-    const results: any[] = [];
+    const results: Record<string, unknown>[] = [];
 
     while (await reader.read()) {
-        const row: any = {};
+        const row: Record<string, unknown> = {};
         for (let i = 0; i < reader.fieldCount; i++) {
             row[reader.getName(i)] = reader.getValue(i);
         }
@@ -134,22 +139,7 @@ async function executeQueryHelper(connection: any, sql: string): Promise<any[]> 
 /**
  * Parse connection string
  */
-function parseConnectionString(connStr: string): any {
-    const config: any = {};
-    const parts = connStr.split(';');
-    for (const part of parts) {
-        const [key, value] = part.split('=');
-        if (key && value) {
-            const k = key.trim().toLowerCase();
-            if (k === 'server' || k === 'host') config.host = value.trim();
-            else if (k === 'database' || k === 'db') config.database = value.trim();
-            else if (k === 'user' || k === 'uid') config.user = value.trim();
-            else if (k === 'password' || k === 'pwd') config.password = value.trim();
-            else if (k === 'port') config.port = parseInt(value.trim(), 10);
-        }
-    }
-    return config;
-}
+// ConnectionDetails imported from types - no parseConnectionString needed
 
 // ===============================
 // Table Comparison
@@ -159,7 +149,7 @@ function parseConnectionString(connStr: string): any {
  * Get full table metadata for comparison
  */
 async function getTableMetadata(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string
@@ -225,7 +215,7 @@ function compareKeys(source: KeyInfo, target: KeyInfo): string[] {
  * Compare two table structures
  */
 export async function compareTableStructures(
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     sourceDb: string,
     sourceSchema: string,
     sourceTable: string,
@@ -233,19 +223,24 @@ export async function compareTableStructures(
     targetSchema: string,
     targetTable: string
 ): Promise<TableComparisonResult> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
-        await connection.connect();
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
+        await connection!.connect();
 
         // Get metadata for both tables sequentially
-        const sourceMeta = await getTableMetadata(connection, sourceDb, sourceSchema, sourceTable);
-        const targetMeta = await getTableMetadata(connection, targetDb, targetSchema, targetTable);
+        const sourceMeta = await getTableMetadata(connection!, sourceDb, sourceSchema, sourceTable);
+        const targetMeta = await getTableMetadata(connection!, targetDb, targetSchema, targetTable);
 
         // Compare columns
         const columnDiffs: ColumnDiff[] = [];
@@ -366,7 +361,7 @@ export async function compareTableStructures(
  * Get procedure metadata for comparison
  */
 async function getProcedureMetadata(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     procSignature: string
@@ -393,7 +388,15 @@ async function getProcedureMetadata(
         throw new Error(`Procedure ${database}.${schema}.${procSignature} not found`);
     }
 
-    const row = result[0];
+    const row = result[0] as {
+        PROCEDURE: string;
+        PROCEDURESIGNATURE: string;
+        ARGUMENTS: string;
+        RETURNS: string;
+        EXECUTEDASOWNER: number;
+        PROCEDURESOURCE: string;
+        DESCRIPTION: string;
+    };
     return {
         database,
         schema,
@@ -440,7 +443,7 @@ function computeLineDiff(sourceCode: string, targetCode: string): string[] {
  * Compare two procedures
  */
 export async function compareProcedures(
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     sourceDb: string,
     sourceSchema: string,
     sourceProc: string,
@@ -448,14 +451,19 @@ export async function compareProcedures(
     targetSchema: string,
     targetProc: string
 ): Promise<ProcedureComparisonResult> {
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
         await connection.connect();
 
         // Get metadata for both procedures sequentially

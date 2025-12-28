@@ -6,7 +6,7 @@ export class ResultView {
     private _disposables: vscode.Disposable[] = [];
     private readonly _extensionUri: vscode.Uri;
 
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, results: any[]) {
+    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, results: Record<string, unknown>[]) {
         this._panel = panel;
         this._extensionUri = extensionUri;
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
@@ -33,7 +33,7 @@ export class ResultView {
         );
     }
 
-    public static createOrShow(extensionUri: vscode.Uri, results: any[]) {
+    public static createOrShow(extensionUri: vscode.Uri, results: Record<string, unknown>[]) {
         const column = vscode.ViewColumn.Two;
 
         if (ResultView.currentPanel) {
@@ -55,7 +55,7 @@ export class ResultView {
         ResultView.currentPanel = new ResultView(panel, extensionUri, results);
     }
 
-    private _update(results: any[]) {
+    private _update(results: Record<string, unknown>[]) {
         this._panel.webview.html = this._getHtmlForWebview(results);
     }
 
@@ -93,7 +93,7 @@ export class ResultView {
         }
     }
 
-    private _getHtmlForWebview(results: any[]) {
+    private _getHtmlForWebview(results: Record<string, unknown>[]) {
         const rowData = JSON.stringify(results);
         const columns =
             results.length > 0

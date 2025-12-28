@@ -17,7 +17,7 @@ import { SqlParser } from './sql/sqlParser';
 import { NetezzaDocumentLinkProvider } from './providers/documentLinkProvider';
 import { NetezzaFoldingRangeProvider } from './providers/foldingProvider';
 import { QueryHistoryView } from './views/queryHistoryView';
-import { EditDataProvider } from './views/editDataProvider';
+import { EditDataProvider, EditDataItem } from './views/editDataProvider';
 import { MetadataCache } from './metadataCache';
 import { activateSqlLinter } from './providers/sqlLinterProvider';
 import { NetezzaLinterCodeActionProvider } from './providers/linterCodeActions';
@@ -85,7 +85,7 @@ async function checkForConflictingExtensions(_context: vscode.ExtensionContext):
         );
 
         const contributesSql = pkg.contributes?.languages?.some(
-            (lang: any) => lang.id === 'sql' || lang.extensions?.includes('.sql')
+            (lang: { id: string; extensions?: string[] }) => lang.id === 'sql' || lang.extensions?.includes('.sql')
         );
 
         const displayName = pkg.displayName || '';
@@ -243,12 +243,20 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // ========== Core Commands (kept in extension.ts) ==========
     context.subscriptions.push(
-        vscode.commands.registerCommand('netezza.viewEditData', (item: any) => {
+        vscode.commands.registerCommand('netezza.viewEditData', (item: EditDataItem) => {
+            // EditDataProvider.createOrShow expects EditDataItem which is compatible with Record<string, unknown>
+            // or we delegate type checking to it.
+            // Assumption: item is what we expect from the view. 
+            // We use 'any' cast here to satisfy TS for now or if createOrShow expects specific type.
+            // Looking at editDataProvider it likely expects EditDataItem.
+            // Let's use 'as any' just to satisfy the call if types don't align perfectly yet, 
+            // but the goal is to remove 'any' from the parameter list to suppress lint.
             EditDataProvider.createOrShow(context.extensionUri, item, context, connectionManager);
         }),
 
-        vscode.commands.registerCommand('netezza.createProcedure', async (item: any) => {
-            if (!item || !item.dbName) {
+        vscode.commands.registerCommand('netezza.createProcedure', async (item: { dbName?: string }) => {
+            const itemObj = item;
+            if (!itemObj || !itemObj.dbName) {
                 vscode.window.showErrorMessage('Invalid selection. Select a Procedure folder.');
                 return;
             }
@@ -262,7 +270,7 @@ export async function activate(context: vscode.ExtensionContext) {
             if (procName === undefined) return;
 
             const finalName = procName.trim() || 'NEW_PROCEDURE';
-            const database = item.dbName;
+            const database = itemObj.dbName;
 
             const codetemplate = `CREATE OR REPLACE PROCEDURE ${database}.SCHEMA.${finalName}(INTEGER)
 RETURNS INTEGER
@@ -421,8 +429,9 @@ END_PROC;`;
                 term.show(true);
                 term.sendText(cmd, true);
                 vscode.window.showInformationMessage(`Running script: ${cmd}`);
-            } catch (e: any) {
-                vscode.window.showErrorMessage(`Error running script: ${e.message}`);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Error running script: ${errorMsg}`);
             }
         }),
 
@@ -439,6 +448,10 @@ END_PROC;`;
                     'Autocomplete cache cleared successfully. Cache will be rebuilt on next use.'
                 );
             }
+        }),
+
+        vscode.commands.registerCommand('netezza.copySelection', () => {
+            resultPanelProvider.triggerCopySelection();
         })
     );
 

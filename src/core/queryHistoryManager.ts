@@ -214,6 +214,9 @@ export class QueryHistoryManager {
 
     async deleteEntry(id: string): Promise<void> {
         try {
+            if (!this.initialized) {
+                await this.initialize();
+            }
             this.cache = this.cache.filter(entry => entry.id !== id);
             await this.saveToStorage();
         } catch (error) {
@@ -223,6 +226,10 @@ export class QueryHistoryManager {
 
     async clearHistory(): Promise<void> {
         try {
+            // Ensure we are initialized so we don't have a pending load overwrite our clear
+            if (!this.initialized) {
+                await this.initialize();
+            }
             this.cache = [];
             await this.saveToStorage();
             console.log('All query history cleared');
@@ -269,6 +276,9 @@ export class QueryHistoryManager {
 
     async toggleFavorite(id: string): Promise<void> {
         try {
+            if (!this.initialized) {
+                await this.initialize();
+            }
             const entry = this.cache.find(e => e.id === id);
             if (entry) {
                 entry.is_favorite = !entry.is_favorite;
@@ -281,6 +291,9 @@ export class QueryHistoryManager {
 
     async updateEntry(id: string, tags?: string, description?: string): Promise<void> {
         try {
+            if (!this.initialized) {
+                await this.initialize();
+            }
             const entry = this.cache.find(e => e.id === id);
             if (entry) {
                 if (tags !== undefined) entry.tags = tags;

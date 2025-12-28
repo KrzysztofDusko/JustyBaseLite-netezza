@@ -14,18 +14,19 @@ export function getFullName(item: SchemaItemData): string {
 }
 
 /**
- * Validate connection exists and return connection string
+ * Validate connection exists and show error if not
+ * @returns true if connection is available, false otherwise
  */
 export async function requireConnection(
     connectionManager: ConnectionManager,
     connectionName?: string
-): Promise<string | null> {
-    const connectionString = await connectionManager.getConnectionString(connectionName);
-    if (!connectionString) {
+): Promise<boolean> {
+    const connectionDetails = await connectionManager.getConnection(connectionName || connectionManager.getActiveConnectionName() || '');
+    if (!connectionDetails) {
         vscode.window.showErrorMessage('No database connection');
-        return null;
+        return false;
     }
-    return connectionString;
+    return true;
 }
 
 /**

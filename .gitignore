@@ -11,7 +11,7 @@
 *.sln.docstates
 
 dist
-driver/dist/
+libs/driver/dist/
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs

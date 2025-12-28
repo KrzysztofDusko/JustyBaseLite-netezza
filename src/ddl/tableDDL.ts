@@ -6,11 +6,13 @@ import { ColumnInfo, KeyInfo } from './types';
 import { quoteNameIfNeeded } from './helpers';
 import { getColumns, getDistributionInfo, getOrganizeInfo, getKeysInfo, getTableComment } from './metadata';
 
+import { NzConnection } from '../types';
+
 /**
  * Generate complete DDL code for creating a table in Netezza
  */
 export async function generateTableDDL(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     tableName: string

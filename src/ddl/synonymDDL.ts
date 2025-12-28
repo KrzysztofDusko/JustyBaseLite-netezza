@@ -3,12 +3,13 @@
  */
 
 import { executeQueryHelper, quoteNameIfNeeded } from './helpers';
+import { NzConnection } from '../types';
 
 /**
  * Generate DDL code for creating a synonym in Netezza
  */
 export async function generateSynonymDDL(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     synonymName: string
@@ -26,7 +27,14 @@ export async function generateSynonymDDL(
             AND SYNONYM_NAME = '${synonymName.toUpperCase()}'
     `;
 
-    const result = await executeQueryHelper(connection, sql);
+    interface SynonymRow {
+        SCHEMA: string;
+        OWNER: string;
+        SYNONYM_NAME: string;
+        REFOBJNAME: string;
+        DESCRIPTION: string;
+    }
+    const result = await executeQueryHelper<SynonymRow>(connection, sql);
     const rows = result;
 
     if (rows.length === 0) {

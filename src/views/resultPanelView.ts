@@ -1,12 +1,14 @@
 import * as vscode from 'vscode';
 import { AnalysisPanelView } from './analysisPanelView';
+import { ResultSet } from '../types';
+import { ResultsHtmlGenerator, ViewScriptUris, ViewData } from './resultsHtmlGenerator';
 
 export class ResultPanelView implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.results';
     private _view?: vscode.WebviewView;
     private _extensionUri: vscode.Uri;
     // Map<sourceUri, resultSets[]>
-    private _resultsMap: Map<string, any[]> = new Map();
+    private _resultsMap: Map<string, ResultSet[]> = new Map();
     private _pinnedSources: Set<string> = new Set();
     // Map<resultId, {sourceUri, resultSetIndex, timestamp, label}>
     private _pinnedResults: Map<
@@ -96,8 +98,15 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'error':
                     vscode.window.showErrorMessage(message.text);
                     return;
+                case 'setContext':
+                    vscode.commands.executeCommand('setContext', message.key, message.value);
+                    return;
             }
         });
+    }
+
+    public triggerCopySelection() {
+        this._postMessageToWebview({ command: 'copySelection' });
     }
 
     public setActiveSource(sourceUri: string) {
@@ -115,7 +124,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         // Clear unpinned results for this source
         const existingResults = this._resultsMap.get(sourceUri) || [];
 
-        let logResultSet: any;
+        let logResultSet: ResultSet;
 
         // Find existing log in results
         const existingLogIndex = existingResults.findIndex(r => r.isLog);
@@ -139,7 +148,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 executionTimestamp: Date.now(),
                 isLog: true,
                 name: 'Logs'
-            };
+            } as ResultSet;
         }
 
         // Identify other pinned results (excluding the log if it was already there)
@@ -149,7 +158,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             )
             .sort((a, b) => a[1].resultSetIndex - b[1].resultSetIndex); // Keep relative order of others
 
-        const otherPinnedResults: any[] = [];
+        const otherPinnedResults: ResultSet[] = [];
         otherPinnedInfo.forEach(([_id, info]) => {
             if (info.resultSetIndex < existingResults.length) {
                 otherPinnedResults.push(existingResults[info.resultSetIndex]);
@@ -233,7 +242,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         // Note: We don't call _updateWebview() here to avoid flicker
     }
 
-    public updateResults(results: any[], sourceUri: string, append: boolean = false) {
+    public updateResults(results: ResultSet[], sourceUri: string, append: boolean = false) {
         // results is now QueryResult[] (array of { columns, data, ... }) or any[] (legacy)
 
         // Auto-pin the source by default if it's new
@@ -241,7 +250,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             this._pinnedSources.add(sourceUri);
         }
 
-        let newResultSets: any[] = [];
+        let newResultSets: ResultSet[] = [];
         if (Array.isArray(results)) {
             newResultSets = results;
         } else {
@@ -258,11 +267,14 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         // Identify currently pinned results
         const pinnedEntryPairs = Array.from(this._pinnedResults.entries())
-            .filter(([_, info]) => info.sourceUri === sourceUri)
+            .filter((entry): entry is [string, { sourceUri: string; resultSetIndex: number; timestamp: number; label: string }] => {
+                const info = entry[1];
+                return info.sourceUri === sourceUri;
+            })
             .sort((a, b) => a[1].resultSetIndex - b[1].resultSetIndex);
 
-        const finalResultSets: any[] = [];
-        const remappedPins = new Map<string, any>(); // resultId -> resultSetObject
+        const finalResultSets: ResultSet[] = [];
+        const remappedPins = new Map<string, ResultSet>(); // resultId -> resultSetObject
 
         // 1. Logs (Always first if exists)
         if (existingLog) {
@@ -341,7 +353,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             unpinnedSources.forEach(uri => {
                 this._resultsMap.delete(uri);
                 const pinnedResultsToRemove = Array.from(this._pinnedResults.entries())
-                    .filter(([_, info]) => info.sourceUri === uri)
+                    .filter((entry): entry is [string, { sourceUri: string; resultSetIndex: number; timestamp: number; label: string }] => {
+                        const info = entry[1];
+                        return info.sourceUri === uri;
+                    })
                     .map(([id, _]) => id);
                 pinnedResultsToRemove.forEach(id => this._pinnedResults.delete(id));
             });
@@ -357,6 +372,99 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * Handle streaming chunk - append rows to the active result set without full re-render.
+     * This is used for progressive loading of large result sets.
+     */
+    public appendStreamingChunk(
+        sourceUri: string,
+        _queryIndex: number,
+        chunk: {
+            columns: { name: string; type?: string }[];
+            rows: unknown[][];
+            isFirstChunk: boolean;
+            isLastChunk: boolean;
+            totalRowsSoFar: number;
+            limitReached: boolean;
+        },
+        sql: string
+    ) {
+        const existingResults = this._resultsMap.get(sourceUri) || [];
+
+        if (chunk.isFirstChunk && chunk.columns.length > 0) {
+            // Create a new result set for this query
+            const newResultSet: ResultSet = {
+                columns: chunk.columns,
+                data: chunk.rows,
+                executionTimestamp: Date.now(),
+                sql,
+                limitReached: chunk.limitReached
+            };
+
+            // Find log result set (always first)
+            const logIndex = existingResults.findIndex(r => r.isLog);
+
+            if (logIndex >= 0) {
+                // Insert after log and other existing results
+                existingResults.push(newResultSet);
+            } else {
+                existingResults.push(newResultSet);
+            }
+
+            this._resultsMap.set(sourceUri, existingResults);
+
+            // Auto-pin the new result set
+            const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
+            const resultId = `result_${++this._resultIdCounter}`;
+            const resultSetIndex = existingResults.length - 1;
+            this._pinnedResults.set(resultId, {
+                sourceUri,
+                resultSetIndex,
+                timestamp: Date.now(),
+                label: `${filename} - Result ${resultSetIndex}`
+            });
+            this._autoPinnedResults.add(resultId);
+
+            // Full render for first chunk (new result set created)
+            this._activeSourceUri = sourceUri;
+            this._updateWebview();
+            this._view?.show?.(true);
+        } else if (chunk.rows.length > 0) {
+            // Append rows to the last result set for this query
+            const targetResultSet = existingResults[existingResults.length - 1];
+            if (targetResultSet && !targetResultSet.isLog) {
+                targetResultSet.data.push(...chunk.rows);
+                targetResultSet.limitReached = chunk.limitReached;
+
+                // Send incremental update to webview instead of full re-render
+                this._postMessageToWebview({
+                    command: 'appendRows',
+                    resultSetIndex: existingResults.length - 1,
+                    rows: chunk.rows,
+                    totalRows: chunk.totalRowsSoFar,
+                    isLastChunk: chunk.isLastChunk,
+                    limitReached: chunk.limitReached
+                });
+            }
+        }
+
+        // Update row count on last chunk
+        if (chunk.isLastChunk) {
+            this._postMessageToWebview({
+                command: 'streamingComplete',
+                resultSetIndex: existingResults.length - 1,
+                totalRows: chunk.totalRowsSoFar,
+                limitReached: chunk.limitReached
+            });
+        }
+    }
+
+    private _postMessageToWebview(message: Record<string, unknown>) {
+        if (this._view) {
+            this._view.webview.postMessage(message);
+        }
+    }
+
     private _updateWebview() {
         if (this._view) {
             this._view.webview.html = this._getHtmlForWebview();
@@ -366,7 +474,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     private _toggleResultPin(sourceUri: string, resultSetIndex: number) {
         // Check if this result is already pinned
         const existingPin = Array.from(this._pinnedResults.entries()).find(
-            ([_, info]) => info.sourceUri === sourceUri && info.resultSetIndex === resultSetIndex
+            (entry): entry is [string, { sourceUri: string; resultSetIndex: number; timestamp: number; label: string }] => {
+                const info = entry[1];
+                return info.sourceUri === sourceUri && info.resultSetIndex === resultSetIndex;
+            }
         );
 
         if (existingPin) {
@@ -419,14 +530,14 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async openInExcel(data: any, sql?: string) {
+    private async openInExcel(data: unknown, sql?: string) {
         // Data can now be a string (CSV) OR an array of { csv, sql, name } objects
         // If it's the old format (string), we wrap it? Or just pass it?
         // The command handler will need to handle both provided we update it.
         vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', data, sql);
     }
 
-    private async copyAsExcel(data: any, sql?: string) {
+    private async copyAsExcel(data: unknown, sql?: string) {
         vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', data, sql);
     }
 
@@ -500,13 +611,14 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             return '';
         }
 
-        const { scriptUri, virtualUri, mainScriptUri, styleUri, workerUri } = this._getScriptUris();
+        const uris = this._getScriptUris();
         const viewData = this._prepareViewData();
+        const generator = new ResultsHtmlGenerator(this._view.webview.cspSource);
 
-        return this._buildHtmlDocument(scriptUri, virtualUri, mainScriptUri, styleUri, viewData, workerUri);
+        return generator.generateHtml(uris, viewData);
     }
 
-    private _getScriptUris() {
+    private _getScriptUris(): ViewScriptUris {
         return {
             scriptUri: this._view!.webview.asWebviewUri(
                 vscode.Uri.joinPath(this._extensionUri, 'media', 'tanstack-table-core.js')
@@ -526,7 +638,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         };
     }
 
-    private _prepareViewData() {
+    private _prepareViewData(): ViewData {
         const sources = Array.from(this._resultsMap.keys());
         const pinnedSources = Array.from(this._pinnedSources);
         const pinnedResults = Array.from(this._pinnedResults.entries()).map(([id, info]) => ({
@@ -542,7 +654,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         const activeResultSets = activeSource ? this._resultsMap.get(activeSource) : [];
 
         // Serialize data safely with BigInt support
-        const bigIntReplacer = (_key: string, value: any) => {
+        const bigIntReplacer = (_key: string, value: unknown) => {
             if (typeof value === 'bigint') {
                 if (value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER) {
                     return Number(value);
@@ -559,129 +671,5 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             activeSourceJson: JSON.stringify(activeSource),
             resultSetsJson: JSON.stringify(activeResultSets, bigIntReplacer)
         };
-    }
-
-    private _buildHtmlDocument(
-        scriptUri: vscode.Uri,
-        virtualUri: vscode.Uri,
-        mainScriptUri: vscode.Uri,
-        styleUri: vscode.Uri,
-        viewData: any,
-        workerUri: vscode.Uri
-    ) {
-        const cspSource = this._view!.webview.cspSource;
-
-        // SVG Icons
-        const icons = {
-            eye: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 3c-3 0-6 2.5-6 5s3 5 6 5 6-2.5 6-5-3-5-6-5zm0 9c-2.5 0-4.5-2-4.5-4S5.5 4 8 4s4.5 2 4.5 4-2 4.5-4.5 4.5z"/><circle cx="8" cy="8" r="2"/></svg>`,
-            excel: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6 3h8v10H6V3zm-1 0H3v10h2V3zm-2-1h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M6 6h8v1H6V6zm0 2h8v1H6V8zm0 2h8v1H6v-1z"/></svg>`,
-            copy: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M4 4h7v2H4V4zm0 4h7v2H4V8zm0 4h7v2H4v-2zM2 1h12v14H2V1zm1 1v12h10V2H3z"/></svg>`,
-            csv: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13 2H6L2 6v8a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zm-1 11H4V7h3V4h5v9z"/></svg>`,
-            json: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M5 2c0-1.1.9-2 2-2h2a2 2 0 0 1 2 2v2h-2V2H7v2H5V2zm0 12c0 1.1.9 2 2 2h2a2 2 0 0 0 2-2v-2h-2v2H7v-2H5v2zM2 7v2h2V7H2zm10 0v2h2V7h-2z"/></svg>`,
-            xml: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M11.5 1L7 15h2l4.5-14h-2zM4.5 1L0 15h2l4.5-14h-2z"/></svg>`,
-            sql: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 0C3.6 0 0 1.8 0 4v8c0 2.2 3.6 4 8 4s8-1.8 8-4V4c0-2.2-3.6-4-8-4zm0 2c3.3 0 6 1.3 6 3s-2.7 3-6 3-6-1.3-6-3 2.7-3 6-3zm0 12c-3.3 0-6-1.3-6-3V9c1.6 1.7 4.3 2 6 2s4.4-.3 6-2v2c0 1.7-2.7 3-6 3z"/></svg>`,
-            markdown: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14.5 2H1.5C.7 2 0 2.7 0 3.5v9C0 13.3.7 14 1.5 14h13c.8 0 1.5-.7 1.5-1.5v-9c0-.8-.7-1.5-1.5-1.5zM3 11V5l2 2 2-2v6H6V7l-1 1-1-1v4H3zm10 0h-2V9h-2v2H7V5h2v2h2V5h2v6z"/></svg>`,
-            export: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6 3h8v10H6V3zm-1 0H3v10h2V3zm-2-1h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M6 6h8v1H6V6zm0 2h8v1H6V8zm0 2h8v1H6v-1z"/><path d="M10 12L8 14L6 12" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>`, // Custom combo icon
-            checkAll: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13.485 1.929l1.414 1.414-9.9 9.9-4.243-4.242 1.415-1.415 2.828 2.829z"/></svg>`,
-            clear: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 7.293l4.146-4.147.708.708L8.707 8l4.147 4.146-.708.708L8 8.707l-4.146 4.147-.708-.708L7.293 8 3.146 3.854l.708-.708L8 7.293z"/></svg>`
-        };
-
-        return `<!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'unsafe-inline'; worker-src ${cspSource} blob:; connect-src ${cspSource}; style-src ${cspSource} 'unsafe-inline';">
-            <title>Query Results</title>
-            <script src="${scriptUri}"></script>
-            <script src="${virtualUri}"></script>
-            <link rel="stylesheet" href="${styleUri}">
-        </head>
-        <body>
-            <div id="sourceTabs" class="source-tabs"></div>
-            <div id="resultSetTabs" class="result-set-tabs" style="display: none;"></div>
-            
-            <div class="controls">
-                <input type="text" id="globalFilter" placeholder="Filter..." onkeyup="onFilterChanged()" style="background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px;">
-                <button onclick="toggleRowView()" title="Toggle Row View">${icons.eye} Row View</button>
-                
-                <!-- Split Button for Export -->
-                <div class="split-btn-container">
-                    <button id="exportMainBtn" class="split-btn-main" onclick="executeSplitExport()" title="Export results (Excel)">
-                        ${icons.excel} Excel
-                    </button>
-                    <button id="exportArrowBtn" class="split-btn-arrow" onclick="toggleExportMenu()" title="Select export format">
-                        <svg width="10" height="10" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
-                            <path d="M8 11L3 6h10l-5 5z"/>
-                        </svg>
-                    </button>
-                    <div id="exportMenu" class="split-btn-menu" style="display:none;">
-                        <div class="split-btn-menu-item" onclick="selectExportFormat('excel')">
-                            ${icons.excel} Excel (XLSB)
-                        </div>
-                        <div class="split-btn-menu-item" onclick="selectExportFormat('csv')">
-                            ${icons.csv} CSV
-                        </div>
-                        <div class="split-btn-menu-item" onclick="selectExportFormat('json')">
-                            ${icons.json} JSON
-                        </div>
-                        <div class="split-btn-menu-item" onclick="selectExportFormat('xml')">
-                            ${icons.xml} XML
-                        </div>
-                        <div class="split-btn-menu-item" onclick="selectExportFormat('sql')">
-                            ${icons.sql} SQL INSERT
-                        </div>
-                        <div class="split-btn-menu-item" onclick="selectExportFormat('markdown')">
-                            ${icons.markdown} Markdown Table
-                        </div>
-                    </div>
-                </div>
-
-                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 2px;"></div>
-                <button onclick="copyAsExcel()" title="Copy results as Excel to clipboard">${icons.excel} Excel Copy</button>
-                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 2px;"></div>
-                <button onclick="selectAll()" title="Select all rows">${icons.checkAll} Select All</button>
-                <button onclick="copySelection(false)" title="Copy selected cells to clipboard">${icons.copy} Copy</button>
-                <button onclick="copySelection(true)" title="Copy selected cells with headers">${icons.copy} Copy w/ Headers</button>
-                <button onclick="clearAllFilters()" title="Clear all column filters">${icons.clear} Clear Filters</button>
-                <span id="rowCountInfo" style="margin-left: auto; font-size: 12px; opacity: 0.8;"></span>
-            </div>
-
-            <div id="groupingPanel" class="grouping-panel" ondragover="onDragOverGroup(event)" ondragleave="onDragLeaveGroup(event)" ondrop="onDropGroup(event)">
-                <span style="opacity: 0.5;">Drag headers here to group</span>
-            </div>
-
-            <div id="mainSplitView" class="main-split-view">
-                <div id="gridContainer"></div>
-                <div id="rowViewPanel" class="row-view-panel">
-                    <div class="row-view-header">
-                        <span>Row Details & Comparison</span>
-                        <span class="row-view-close" onclick="toggleRowView()">×</span>
-                    </div>
-                    <div id="rowViewContent" class="row-view-content">
-                        <div class="row-view-placeholder">Select 1 or 2 rows to view details or compare</div>
-                    </div>
-                </div>
-            </div>
-            
-            <script>
-                const vscode = acquireVsCodeApi();
-                window.sources = ${viewData.sourcesJson};
-                window.pinnedSources = new Set(${viewData.pinnedSourcesJson});
-                window.pinnedResults = ${viewData.pinnedResultsJson};
-                window.activeSource = ${viewData.activeSourceJson};
-                window.resultSets = ${viewData.resultSetsJson};
-                
-                let grids = [];
-                let activeGridIndex = window.resultSets && window.resultSets.length > 0 ? window.resultSets.length - 1 : 0;
-                const workerUri = "${workerUri}";
-            </script>
-            <script src="${mainScriptUri}"></script>
-            <script>
-                // Initialize on load
-                init();
-            </script>
-        </body>
-        </html>`;
     }
 }

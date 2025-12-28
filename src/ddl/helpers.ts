@@ -1,23 +1,24 @@
 /**
  * DDL Generator - Helper Functions
  */
+import { NzConnection, ConnectionDetails } from '../types';
 
 /**
  * Execute query and return array of objects (shim for NzConnection)
  */
-export async function executeQueryHelper(connection: any, sql: string): Promise<any[]> {
+export async function executeQueryHelper<T = Record<string, unknown>>(connection: NzConnection, sql: string): Promise<T[]> {
     const cmd = connection.createCommand(sql);
     const reader = await cmd.executeReader();
-    const results: any[] = [];
+    const results: Record<string, unknown>[] = [];
 
     while (await reader.read()) {
-        const row: any = {};
+        const row: Record<string, unknown> = {};
         for (let i = 0; i < reader.fieldCount; i++) {
             row[reader.getName(i)] = reader.getValue(i);
         }
         results.push(row);
     }
-    return results;
+    return results as T[];
 }
 
 /**
@@ -42,6 +43,7 @@ export function quoteNameIfNeeded(name: string): string {
 
 /**
  * Parse ODBC-style connection string into config object
+ * @deprecated Use ConnectionDetails directly instead
  */
 export function parseConnectionString(connStr: string): {
     host?: string;
@@ -51,7 +53,7 @@ export function parseConnectionString(connStr: string): {
     password?: string;
 } {
     const parts = connStr.split(';');
-    const config: any = {};
+    const config: { host?: string; port?: number; database?: string; user?: string; password?: string } = {};
     for (const part of parts) {
         const idx = part.indexOf('=');
         if (idx > 0) {
@@ -87,14 +89,20 @@ export function fixProcReturnType(procReturns: string): string {
 }
 
 /**
- * Create NzConnection from connection string
+ * Create NzConnection from ConnectionDetails (recommended)
  */
-export async function createConnection(connectionString: string): Promise<any> {
-    const config = parseConnectionString(connectionString);
-    if (!config.port) config.port = 5480;
+export async function createConnectionFromDetails(details: ConnectionDetails): Promise<NzConnection> {
+    const config = {
+        host: details.host,
+        port: details.port || 5480,
+        database: details.database,
+        user: details.user,
+        password: details.password
+    };
 
-    const NzConnection = require('../../driver/dist/NzConnection');
+    const NzConnection = require('../../libs/driver/src/NzConnection');
     const connection = new NzConnection(config);
     await connection.connect();
     return connection;
 }
+

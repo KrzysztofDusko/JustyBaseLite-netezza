@@ -3,12 +3,13 @@
  */
 
 import { executeQueryHelper, quoteNameIfNeeded } from './helpers';
+import { NzConnection } from '../types';
 
 /**
  * Generate DDL code for creating a view in Netezza
  */
 export async function generateViewDDL(
-    connection: any,
+    connection: NzConnection,
     database: string,
     schema: string,
     viewName: string
@@ -25,7 +26,13 @@ export async function generateViewDDL(
             AND VIEWNAME = '${viewName.toUpperCase()}'
     `;
 
-    const result = await executeQueryHelper(connection, sql);
+    interface ViewRow {
+        SCHEMA: string;
+        VIEWNAME: string;
+        DEFINITION: string;
+        OBJID: number;
+    }
+    const result = await executeQueryHelper<ViewRow>(connection, sql);
     const rows = result;
 
     if (rows.length === 0) {

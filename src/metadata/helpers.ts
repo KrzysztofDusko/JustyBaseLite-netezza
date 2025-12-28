@@ -43,9 +43,11 @@ export function matchesConnection(key: string, connectionName: string | undefine
 /**
  * Extract label text from cache item (handles both string and object labels)
  */
-export function extractLabel(item: any): string | undefined {
-    if (!item) return undefined;
-    return typeof item.label === 'string' ? item.label : item.label?.label;
+export function extractLabel(item: unknown): string | undefined {
+    if (!item || typeof item !== 'object') return undefined;
+    const it = item as { label?: string | { label: string } };
+    if (!it.label) return undefined;
+    return typeof it.label === 'string' ? it.label : it.label.label;
 }
 
 /**
@@ -79,10 +81,11 @@ export function exportTableIdMap(
 /**
  * Infer object type from VS Code completion item kind
  */
-export function inferObjectType(item: any): string {
-    if (item.objType) return item.objType;
+export function inferObjectType(item: unknown): string {
+    const it = item as { objType?: string; kind?: number };
+    if (it.objType) return it.objType;
     // CompletionItemKind: 18 = Interface (used for VIEW), 6/7 = Class (used for TABLE)
-    return item.kind === 18 ? 'VIEW' : 'TABLE';
+    return it.kind === 18 ? 'VIEW' : 'TABLE';
 }
 
 /**

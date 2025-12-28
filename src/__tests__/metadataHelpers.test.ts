@@ -128,7 +128,7 @@ describe('metadata/helpers', () => {
         });
 
         it('should handle complex values', () => {
-            const map = new Map<string, { data: any[]; timestamp: number }>();
+            const map = new Map<string, { data: string[]; timestamp: number }>();
             map.set('key1', { data: ['a', 'b'], timestamp: 12345 });
             const result = exportMap(map);
             expect(result).toEqual({

@@ -6,7 +6,7 @@ export class AnalysisPanelView {
     private readonly _extensionUri: vscode.Uri;
     private _disposables: vscode.Disposable[] = [];
 
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, data: any) {
+    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, data: Record<string, unknown>[]) {
         this._panel = panel;
         this._extensionUri = extensionUri;
 
@@ -34,7 +34,7 @@ export class AnalysisPanelView {
         );
     }
 
-    public static createOrShow(extensionUri: vscode.Uri, data: any) {
+    public static createOrShow(extensionUri: vscode.Uri, data: Record<string, unknown>[]) {
         const column = vscode.window.activeTextEditor ? vscode.ViewColumn.Beside : undefined;
 
         // Create a new panel
@@ -65,13 +65,13 @@ export class AnalysisPanelView {
         }
     }
 
-    private _update(data: any) {
+    private _update(data: Record<string, unknown>[]) {
         const webview = this._panel.webview;
         this._panel.title = 'Data Analysis';
         this._panel.webview.html = this._getHtmlForWebview(webview, data);
     }
 
-    private _getHtmlForWebview(webview: vscode.Webview, initialData: any) {
+    private _getHtmlForWebview(webview: vscode.Webview, initialData: Record<string, unknown>[]) {
         // Local path to main script run in the webview
         const scriptPathOnDisk = vscode.Uri.joinPath(this._extensionUri, 'media', 'analysisPanel.js');
         const scriptUri = webview.asWebviewUri(scriptPathOnDisk);

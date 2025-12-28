@@ -489,6 +489,25 @@ tfoot {
     cursor: pointer;
 }
 
+/* Group Footer Row (subtotals per group) */
+.group-footer {
+    background-color: rgba(128, 128, 128, 0.1) !important;
+    font-weight: 600;
+    font-size: 12px;
+    border-top: 1px solid var(--vscode-panel-border);
+}
+
+.group-footer td {
+    color: var(--vscode-descriptionForeground);
+    padding: 4px 8px;
+}
+
+.group-footer .agg-label {
+    font-size: 10px;
+    opacity: 0.7;
+    margin-right: 4px;
+}
+
 
 .group-indent {
     display: inline-block;

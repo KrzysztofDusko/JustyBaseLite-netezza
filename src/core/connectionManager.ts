@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { NzConnection } from '../types';
 
 export interface ConnectionDetails {
     name: string;
@@ -24,7 +25,7 @@ export class ConnectionManager {
     private _documentConnections: Map<string, string> = new Map();
 
     // Persistent connections: { [name]: odbc_connection }
-    private _persistentConnections: Map<string, any> = new Map();
+    private _persistentConnections: Map<string, NzConnection> = new Map();
 
     private _keepConnectionOpen: boolean = false;
 
@@ -150,33 +151,6 @@ export class ConnectionManager {
         return this._activeConnectionName;
     }
 
-    async getConnectionString(name?: string): Promise<string | null> {
-        await this.ensureLoaded();
-        const targetName = name || this._activeConnectionName;
-        // console.log(`[ConnectionManager] getConnectionString called with name='${name}', active='${this._activeConnectionName}', resolved='${targetName}'`);
-
-        if (!targetName) {
-            // console.log('[ConnectionManager] No target connection name resolved.');
-            return null;
-        }
-
-        const details = this._connections[targetName];
-        if (!details) {
-            console.error(
-                `[ConnectionManager] Connection '${targetName}' not found in registry. Available keys: ${Object.keys(this._connections).join(', ')}`
-            );
-            return null;
-        }
-
-        const dbType = details.dbType || 'NetezzaSQL';
-
-        if (dbType === 'NetezzaSQL') {
-            return `DRIVER={NetezzaSQL};SERVER=${details.host};PORT=${details.port};DATABASE=${details.database};UID=${details.user};PWD=${details.password};`;
-        }
-
-        // Fallback for NetezzaSQL or other potential future types
-        return `DRIVER={${dbType}};SERVER=${details.host};PORT=${details.port};DATABASE=${details.database};UID=${details.user};PWD=${details.password};`;
-    }
 
     async getCurrentDatabase(name?: string): Promise<string | null> {
         await this.ensureLoaded();
@@ -196,41 +170,32 @@ export class ConnectionManager {
         return this._keepConnectionOpen;
     }
 
-    async getPersistentConnection(name?: string): Promise<any> {
+    async getPersistentConnection(name?: string): Promise<NzConnection> {
         const targetName = name || this._activeConnectionName;
         if (!targetName) {
             throw new Error('No connection selected');
         }
 
-        const connString = await this.getConnectionString(targetName);
-        if (!connString) {
+        const details = await this.getConnection(targetName);
+        if (!details) {
             throw new Error(`Connection '${targetName}' not found or invalid`);
         }
 
         let existing = this._persistentConnections.get(targetName);
 
-        // Check if existing connection matches current string (password change?)
-        // Note: For simplicity, we assume if it exists it's valid, unless we closed it.
-        // But if user edited connection, we should have closed it.
-        // Let's add logic in saveConnection to close old one?
-        // For now, simpler: just check if exists. ODBS driver connection object doesn't show connection string easily?
-
         if (!existing) {
-            // Use JsNzDriver
-            const NzConnection = require('../../driver/dist/NzConnection');
-            const details = this._connections[targetName];
+            // Use JsNzDriver with ConnectionDetails directly
+            const NzConnection = require('../../libs/driver/src/NzConnection');
 
-            // Map details to config
             const config = {
                 host: details.host,
                 port: details.port || 5480,
                 database: details.database,
                 user: details.user,
                 password: details.password
-                // dbType is not used by NzConnection directly usually?
             };
 
-            const conn = new NzConnection(config);
+            const conn = new NzConnection(config) as NzConnection;
             await conn.connect();
             existing = conn;
 

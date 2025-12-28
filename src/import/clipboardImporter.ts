@@ -8,25 +8,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { ColumnTypeChooser, ProgressCallback, ImportResult } from './dataImporter';
+import { NzConnection, ConnectionDetails } from '../types';
 
 
-function parseConnectionString(connStr: string): any {
-    const parts = connStr.split(';');
-    const config: any = {};
-    for (const part of parts) {
-        const idx = part.indexOf('=');
-        if (idx > 0) {
-            const key = part.substring(0, idx).trim().toUpperCase();
-            const value = part.substring(idx + 1).trim();
-            if (key === 'SERVER') config.host = value;
-            else if (key === 'PORT') config.port = parseInt(value);
-            else if (key === 'DATABASE') config.database = value;
-            else if (key === 'UID') config.user = value;
-            else if (key === 'PWD') config.password = value;
-        }
-    }
-    return config;
-}
+// ConnectionDetails is imported from '../types' - no need for parseConnectionString
 
 /**
  * Clipboard data processor - handles text and XML Spreadsheet formats
@@ -286,14 +271,14 @@ function formatValue(
  */
 export async function importClipboardDataToNetezza(
     targetTable: string,
-    connectionString: string,
+    connectionDetails: ConnectionDetails,
     formatPreference?: string | null,
-    _options?: any,
+    _options?: unknown,
     progressCallback?: ProgressCallback
 ): Promise<ImportResult> {
     const startTime = Date.now();
     let tempFilePath: string | null = null;
-    let connection: any = null;
+    let connection: NzConnection | null = null;
 
     try {
         // Validate parameters
@@ -304,10 +289,10 @@ export async function importClipboardDataToNetezza(
             };
         }
 
-        if (!connectionString) {
+        if (!connectionDetails || !connectionDetails.host) {
             return {
                 success: false,
-                message: 'Connection string is required'
+                message: 'Connection details are required'
             };
         }
 
@@ -480,22 +465,31 @@ ${columns.join(',\n')}
         // Execute import
         progressCallback?.('Connecting to Netezza...');
 
-        const config = parseConnectionString(connectionString);
-        if (!config.port) config.port = 5480;
+        const config = {
+            host: connectionDetails.host,
+            port: connectionDetails.port || 5480,
+            database: connectionDetails.database,
+            user: connectionDetails.user,
+            password: connectionDetails.password
+        };
 
-        const NzConnection = require('../../driver/dist/NzConnection');
-        connection = new NzConnection(config);
+        const NzConnection = require('../../libs/driver/src/NzConnection');
+        connection = new NzConnection(config) as NzConnection;
         await connection.connect();
 
         try {
             progressCallback?.('Executing CREATE TABLE with EXTERNAL clipboard data...');
             // NzConnection should handle the external table protocol automatically
-            const cmd = connection.createCommand(createSql);
+            const cmd = connection!.createCommand(createSql);
+
+            // Set 60-minute timeout for large clipboard imports
+            cmd.commandTimeout = 3600;
+
             await cmd.execute();
 
             progressCallback?.('Clipboard import completed successfully');
         } finally {
-            await connection.close();
+            await connection!.close();
         }
 
         const processingTime = (Date.now() - startTime) / 1000;
@@ -513,11 +507,12 @@ ${columns.join(',\n')}
                 detectedDelimiter: delimiter
             }
         };
-    } catch (e: any) {
+    } catch (e: unknown) {
         const processingTime = (Date.now() - startTime) / 1000;
+        const errorMsg = e instanceof Error ? e.message : String(e);
         return {
             success: false,
-            message: `Clipboard import failed: ${e.message}`,
+            message: `Clipboard import failed: ${errorMsg}`,
             details: {
                 processingTime: `${processingTime.toFixed(1)}s`
             }
@@ -536,8 +531,9 @@ ${columns.join(',\n')}
             try {
                 fs.unlinkSync(tempFilePath);
                 progressCallback?.('Temporary clipboard data file cleaned up');
-            } catch (e: any) {
-                progressCallback?.(`Warning: Could not clean up temp file: ${e.message}`);
+            } catch (e: unknown) {
+                const errorMsg = e instanceof Error ? e.message : String(e);
+                progressCallback?.(`Warning: Could not clean up temp file: ${errorMsg}`);
             }
         }
     }

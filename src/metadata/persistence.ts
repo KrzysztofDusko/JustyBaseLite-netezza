@@ -5,7 +5,7 @@
 
 import * as vscode from 'vscode';
 import { CacheStorage } from './cacheStorage';
-import { CacheType, PerKeyEntry } from './types';
+import { CacheType, PerKeyEntry, DatabaseMetadata, SchemaMetadata, TableMetadata } from './types';
 import { exportMap, exportTableIdMap } from './helpers';
 
 /**
@@ -57,7 +57,7 @@ export class CachePersistence {
                     await this.context.workspaceState.update(key, undefined);
                 }
             }
-        } catch (e) {
+        } catch (e: unknown) {
             console.error('[CachePersistence] Error cleaning up legacy workspace state:', e);
         }
 
@@ -72,9 +72,9 @@ export class CachePersistence {
 
                 // Load dbCache
                 if (json.dbCache) {
-                    const dbCache = new Map<string, { data: any[]; timestamp: number }>();
+                    const dbCache = new Map<string, { data: DatabaseMetadata[]; timestamp: number }>();
                     for (const [key, entry] of Object.entries(
-                        json.dbCache as Record<string, { data: any[]; timestamp: number }>
+                        json.dbCache as Record<string, { data: DatabaseMetadata[]; timestamp: number }>
                     )) {
                         if (now - entry.timestamp < this.CACHE_TTL) {
                             dbCache.set(key, entry);
@@ -85,9 +85,9 @@ export class CachePersistence {
 
                 // Load schemaCache
                 if (json.schemaCache) {
-                    const schemaCache = new Map<string, PerKeyEntry<any[]>>();
+                    const schemaCache = new Map<string, PerKeyEntry<SchemaMetadata[]>>();
                     for (const [key, entry] of Object.entries(
-                        json.schemaCache as Record<string, { data: any[]; timestamp: number }>
+                        json.schemaCache as Record<string, { data: SchemaMetadata[]; timestamp: number }>
                     )) {
                         if (now - entry.timestamp < this.CACHE_TTL) {
                             schemaCache.set(key, entry);
@@ -98,9 +98,9 @@ export class CachePersistence {
 
                 // Load tableCache
                 if (json.tableCache) {
-                    const tableCache = new Map<string, PerKeyEntry<any[]>>();
+                    const tableCache = new Map<string, PerKeyEntry<TableMetadata[]>>();
                     for (const [key, entry] of Object.entries(
-                        json.tableCache as Record<string, { data: any[]; timestamp: number }>
+                        json.tableCache as Record<string, { data: TableMetadata[]; timestamp: number }>
                     )) {
                         if (now - entry.timestamp < this.CACHE_TTL) {
                             tableCache.set(key, entry);
@@ -128,7 +128,7 @@ export class CachePersistence {
 
                 // columnCache is NOT loaded from disk - kept in memory only for performance
             }
-        } catch (e) {
+        } catch (e: unknown) {
             console.error('[CachePersistence] Error loading cache from disk:', e);
         }
     }
@@ -162,7 +162,7 @@ export class CachePersistence {
             };
 
             await fs.promises.writeFile(this.cacheFilePath, JSON.stringify(data), 'utf-8');
-        } catch (e) {
+        } catch (e: unknown) {
             console.error('[CachePersistence] Error saving cache to disk:', e);
         }
     }
@@ -186,7 +186,7 @@ export class CachePersistence {
                 if (fs.existsSync(this.cacheFilePath)) {
                     await fs.promises.unlink(this.cacheFilePath);
                 }
-            } catch (e) {
+            } catch (e: unknown) {
                 console.error('[CachePersistence] Error clearing cache file:', e);
             }
         }

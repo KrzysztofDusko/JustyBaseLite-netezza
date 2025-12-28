@@ -18,7 +18,7 @@ export default tseslint.config(
         files: ['src/**/*.ts'],
         rules: {
             '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
-            '@typescript-eslint/no-explicit-any': 'off',
+            '@typescript-eslint/no-explicit-any': 'error',
             '@typescript-eslint/no-require-imports': 'off',
             'no-case-declarations': 'off',
             'prefer-const': 'warn'
