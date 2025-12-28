@@ -1,6 +1,7 @@
 import * as net from 'net';
 import * as tls from 'tls';
 import * as fs from 'fs';
+import { Readable } from 'stream';
 import { EventEmitter } from 'events';
 import Handshake = require('./Handshake');
 import PGUtil = require('./utils/PGUtil');
@@ -59,6 +60,17 @@ class NzConnection extends EventEmitter {
     connectionTimeout: number = 30; // Default 30 seconds for connection timeout
     private _executing: boolean = false;
     private _exportStream: fs.WriteStream | null = null;
+
+    // Static registry for virtual import streams
+    private static _streamRegistry: Map<string, Readable> = new Map();
+
+    static registerImportStream(id: string, stream: Readable) {
+        this._streamRegistry.set(id, stream);
+    }
+
+    static unregisterImportStream(id: string) {
+        this._streamRegistry.delete(id);
+    }
 
     constructor(config: NzConnectionConfig) {
         super();
@@ -751,7 +763,9 @@ class NzConnection extends EventEmitter {
 
         debug('ExtTab Import Config:', { hostVersion, format, bufSize });
 
-        if (!fs.existsSync(filename)) {
+        if (NzConnection._streamRegistry.has(filename)) {
+            debug('Using virtual import stream for:', filename);
+        } else if (!fs.existsSync(filename)) {
             debug('Import file not found:', filename);
             const errBuf = Buffer.alloc(4);
             PGUtil.writeInt32(errBuf, ExtabSock.ERROR, 0);
@@ -759,12 +773,21 @@ class NzConnection extends EventEmitter {
             return;
         }
 
-        // Get file size for progress tracking
-        const fileStats = fs.statSync(filename);
-        const totalSize = fileStats.size;
-        let bytesSent = 0;
+        // Get file size for progress tracking (approximate for stream if available)
+        let totalSize = 0;
+        let readStream: Readable;
 
-        const readStream = fs.createReadStream(filename, { highWaterMark: bufSize || 65536 });
+        if (NzConnection._streamRegistry.has(filename)) {
+            readStream = NzConnection._streamRegistry.get(filename)!;
+            // Try to get size from stream property if set manually by user on the stream object
+            totalSize = (readStream as any).byteLength || 0;
+        } else {
+            const fileStats = fs.statSync(filename);
+            totalSize = fileStats.size;
+            readStream = fs.createReadStream(filename, { highWaterMark: bufSize || 65536 });
+        }
+
+        let bytesSent = 0;
 
         await new Promise<void>((resolve, reject) => {
             readStream.on('data', (chunk: string | Buffer) => {

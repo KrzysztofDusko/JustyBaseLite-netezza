@@ -7,8 +7,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { Readable } from 'stream';
 import { ColumnTypeChooser, ProgressCallback, ImportResult } from './dataImporter';
 import { NzConnection, ConnectionDetails } from '../types';
+
+// Helper to unblock event loop
+const delay = () => new Promise(resolve => setTimeout(resolve, 0));
 
 
 // ConnectionDetails is imported from '../types' - no need for parseConnectionString
@@ -22,7 +26,7 @@ export class ClipboardDataProcessor {
      * Process XML Spreadsheet format from Excel
      * Based on C# sequential XML reading approach
      */
-    processXmlSpreadsheet(xmlData: string, progressCallback?: ProgressCallback): string[][] {
+    async processXmlSpreadsheet(xmlData: string, progressCallback?: ProgressCallback): Promise<string[][]> {
         progressCallback?.('Processing XML Spreadsheet data...');
 
         // Simple XML parsing without external dependencies
@@ -87,7 +91,9 @@ export class ClipboardDataProcessor {
 
             rowNum++;
             if (rowNum % 10000 === 0) {
-                progressCallback?.(`Analyzed ${rowNum.toLocaleString()} rows...`);
+                progressCallback?.(`Analyzed ${rowNum.toLocaleString()} rows...`, undefined, false);
+                // Unblock UI
+                await delay();
             }
         }
 
@@ -98,7 +104,7 @@ export class ClipboardDataProcessor {
     /**
      * Process plain text clipboard data with auto-delimiter detection
      */
-    processTextData(textData: string, progressCallback?: ProgressCallback): string[][] {
+    async processTextData(textData: string, progressCallback?: ProgressCallback): Promise<string[][]> {
         progressCallback?.('Processing text data...');
 
         if (!textData.trim()) {
@@ -212,9 +218,12 @@ export class ClipboardDataProcessor {
         // Process based on format
         let processedData: string[][];
         if (detectedFormat === 'XML Spreadsheet') {
-            processedData = this.processXmlSpreadsheet(rawData, progressCallback);
+            processedData = await this.processXmlSpreadsheet(rawData, progressCallback);
         } else {
-            processedData = this.processTextData(rawData, progressCallback);
+            // Text processing is fast enough usually, but strictly we could add delay there too 
+            // if we implement async logic in processTextData.
+            // For now leaving as is unless user reports lockup on text paste.
+            processedData = await this.processTextData(rawData, progressCallback);
         }
 
         progressCallback?.(`Processed ${processedData.length} rows`);
@@ -232,8 +241,8 @@ export class ClipboardDataProcessor {
 function cleanColumnName(colName: string): string {
     let cleanName = String(colName).trim();
     cleanName = cleanName.replace(/[^0-9a-zA-Z]+/g, '_').toUpperCase();
-    if (!cleanName || /^\d/.test(cleanName)) {
-        cleanName = 'COL_' + cleanName;
+    if (!cleanName || /^\d/.test(cleanName) || cleanName.startsWith('_')) {
+        cleanName = 'COL' + (cleanName.startsWith('_') ? '' : '_') + cleanName;
     }
     return cleanName;
 }
@@ -267,6 +276,131 @@ function formatValue(
 }
 
 /**
+ * Clipboard Data Generator Stream
+ * Generates formatted rows on demand for Netezza import
+ */
+class ClipboardDataStream extends Readable {
+    private rows: string[][];
+    private currentIndex: number = 0;
+    private dataTypes: ColumnTypeChooser[];
+    private delimiter: string;
+    private recordDelim: string;
+    private escapechar: string;
+    private valuesToEscape: string[];
+    private decimalDelimiter: string;
+    public byteLength: number = 0;
+    private progressCallback?: ProgressCallback;
+    private lastReportedIndex: number = -1;
+    private lastReportTime: number = 0;
+    private lastReportedMessage: string = '';
+
+    constructor(
+        rows: string[][],
+        dataTypes: ColumnTypeChooser[],
+        delimiter: string,
+        recordDelim: string,
+        escapechar: string,
+        valuesToEscape: string[],
+        decimalDelimiter: string,
+        progressCallback?: ProgressCallback
+    ) {
+        super();
+        this.rows = rows;
+        this.dataTypes = dataTypes;
+        this.delimiter = delimiter;
+        this.recordDelim = recordDelim;
+        this.escapechar = escapechar;
+        this.valuesToEscape = valuesToEscape;
+        this.decimalDelimiter = decimalDelimiter;
+        this.progressCallback = progressCallback;
+        this.currentIndex = 0;
+        this.lastReportedIndex = -1;
+        this.lastReportTime = 0;
+        this.lastReportedMessage = '';
+
+        // Estimate byte size roughly
+        try {
+            this.byteLength = rows.reduce((acc, row) => {
+                const rowLen = row.reduce((rAcc, val) => rAcc + (val ? val.length : 0), 0);
+                return acc + rowLen + row.length; // + delimiters
+            }, 0);
+        } catch {
+            this.byteLength = 1024 * 1024;
+        }
+    }
+
+    _read(_size: number): void {
+        try {
+            let more = true;
+            while (more && this.currentIndex < this.rows.length) {
+                const row = this.rows[this.currentIndex];
+                const formattedRow = row.map((value, j) => {
+                    let val = formatValue(value, j, this.dataTypes, this.escapechar, this.valuesToEscape);
+
+                    // If it is a NUMERIC type and we are using comma as delimiter, replace it with dot for DB consistency
+                    if (this.dataTypes[j].currentType.dbType === 'NUMERIC' && this.decimalDelimiter === ',') {
+                        val = val.replace(',', '.');
+                    }
+
+                    // If DATETIME, check if we need to reformat dd.mm.yyyy
+                    if (this.dataTypes[j].currentType.dbType === 'DATETIME') {
+                        const dateTimeMatch = val.match(
+                            /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/
+                        );
+                        if (dateTimeMatch) {
+                            const day = dateTimeMatch[1];
+                            const month = dateTimeMatch[2];
+                            const year = dateTimeMatch[3];
+                            const hour = dateTimeMatch[4] || '00';
+                            const min = dateTimeMatch[5] || '00';
+                            const sec = dateTimeMatch[6] || '00';
+                            val = `${year}-${month}-${day} ${hour}:${min}:${sec}`;
+                        }
+                    }
+                    return val;
+                });
+
+                const line = formattedRow.join(this.delimiter) + this.recordDelim;
+                more = this.push(Buffer.from(line, 'utf8'));
+                this.currentIndex++;
+            }
+
+            // Report progress logic
+            const total = this.rows.length;
+
+
+            if (this.currentIndex > this.lastReportedIndex) {
+                const now = Date.now();
+                const isComplete = this.currentIndex >= total;
+                // Report if complete OR at least 1 second passed since last report
+                const shouldReport = isComplete || (now - this.lastReportTime >= 1000);
+
+                if (shouldReport) {
+                    const percent = Math.floor((this.currentIndex / total) * 100);
+                    const message = `Streaming data: ${percent}% (${this.currentIndex.toLocaleString()}/${total.toLocaleString()})`;
+
+                    const processedDelta = this.currentIndex - (this.lastReportedIndex < 0 ? 0 : this.lastReportedIndex);
+                    const increment = (processedDelta / total) * 100;
+
+                    if (message !== this.lastReportedMessage) {
+                        this.progressCallback?.(message, increment, false);
+                        this.lastReportedIndex = this.currentIndex;
+                        this.lastReportTime = now;
+                        this.lastReportedMessage = message;
+                    }
+                }
+            }
+
+            if (this.currentIndex >= this.rows.length) {
+                this.push(null);
+            }
+        } catch (e) {
+            this.emit('error', e);
+        }
+    }
+}
+
+/**
  * Import clipboard data to Netezza table
  */
 export async function importClipboardDataToNetezza(
@@ -277,7 +411,7 @@ export async function importClipboardDataToNetezza(
     progressCallback?: ProgressCallback
 ): Promise<ImportResult> {
     const startTime = Date.now();
-    let tempFilePath: string | null = null;
+    let virtualFileName: string | null = null;
     let connection: NzConnection | null = null;
 
     try {
@@ -367,13 +501,15 @@ export async function importClipboardDataToNetezza(
             }
 
             if ((i + 1) % 1000 === 0) {
-                progressCallback?.(`Analyzed ${(i + 1).toLocaleString()} rows...`);
+                progressCallback?.(`Analyzed ${(i + 1).toLocaleString()} rows...`, undefined, false);
+                await delay();
             }
         }
 
         progressCallback?.(`Analysis complete: ${dataRows.length.toLocaleString()} data rows`);
 
         // Create temp directory and data file
+        // Create temp directory (still useful for logs if needed, but not for data)
         const tempDir = path.join(require('os').tmpdir(), 'netezza_clipboard_logs');
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir, { recursive: true });
@@ -386,49 +522,30 @@ export async function importClipboardDataToNetezza(
         const escapechar = '\\';
         const valuesToEscape = [escapechar, recordDelim, '\r', delimiter];
 
-        // Create temp file with formatted data
-        tempFilePath = path.join(tempDir, `netezza_clipboard_import_${Math.floor(Math.random() * 1000)}.txt`);
-        progressCallback?.(`Creating temporary data file: ${tempFilePath}`);
+        // Create data stream (in-memory)
+        progressCallback?.('Preparing in-memory data stream...');
 
-        const outputLines: string[] = [];
-        for (let i = 0; i < dataRows.length; i++) {
-            const row = dataRows[i];
-            const formattedRow = row.map((value, j) => {
-                let val = formatValue(value, j, dataTypes, escapechar, valuesToEscape);
+        const dataStream = new ClipboardDataStream(
+            dataRows,
+            dataTypes,
+            delimiter,
+            recordDelim,
+            escapechar,
+            valuesToEscape,
+            decimalDelimiter,
+            progressCallback
+        );
 
-                // If it is a NUMERIC type and we are using comma as delimiter, replace it with dot for DB consistency
-                if (dataTypes[j].currentType.dbType === 'NUMERIC' && decimalDelimiter === ',') {
-                    val = val.replace(',', '.');
-                }
+        virtualFileName = `virtual_clipboard_import_${Date.now()}_${Math.floor(Math.random() * 1000)}.txt`;
+        progressCallback?.(`Registered virtual stream: ${virtualFileName}`);
 
-                // If DATETIME, check if we need to reformat dd.mm.yyyy
-                if (dataTypes[j].currentType.dbType === 'DATETIME') {
-                    const dateTimeMatch = val.match(
-                        /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/
-                    );
-                    if (dateTimeMatch) {
-                        const day = dateTimeMatch[1];
-                        const month = dateTimeMatch[2];
-                        const year = dateTimeMatch[3];
-                        const hour = dateTimeMatch[4] || '00';
-                        const min = dateTimeMatch[5] || '00';
-                        const sec = dateTimeMatch[6] || '00';
-                        val = `${year}-${month}-${day} ${hour}:${min}:${sec}`;
-                    }
-                }
-
-                return val;
-            });
-            outputLines.push(formattedRow.join(delimiter));
-
-            if ((i + 1) % 1000 === 0) {
-                progressCallback?.(`Processed ${(i + 1).toLocaleString()} rows...`);
-            }
+        // Register stream with driver static registry
+        const NzConnectionClass = require('../../libs/driver/src/NzConnection');
+        if (NzConnectionClass && NzConnectionClass.registerImportStream) {
+            NzConnectionClass.registerImportStream(virtualFileName, dataStream);
+        } else {
+            progressCallback?.('Warning: NzConnection driver does not support stream registry. Import might fail.');
         }
-
-        fs.writeFileSync(tempFilePath, outputLines.join(recordDelim), 'utf-8');
-        const pipeName = tempFilePath.replace(/\\/g, '/');
-        progressCallback?.(`Data file created: ${pipeName}`);
 
         // Generate CREATE TABLE SQL
         const columns: string[] = [];
@@ -440,7 +557,7 @@ export async function importClipboardDataToNetezza(
 
         const createSql = `CREATE TABLE ${targetTable} AS 
 (
-    SELECT * FROM EXTERNAL '${pipeName}'
+    SELECT * FROM EXTERNAL '${virtualFileName}'
     (
 ${columns.join(',\n')}
     )
@@ -473,8 +590,8 @@ ${columns.join(',\n')}
             password: connectionDetails.password
         };
 
-        const NzConnection = require('../../libs/driver/src/NzConnection');
-        connection = new NzConnection(config) as NzConnection;
+        const NzDriver = require('../../libs/driver/src/NzConnection');
+        connection = new NzDriver(config) as NzConnection;
         await connection.connect();
 
         try {
@@ -526,14 +643,11 @@ ${columns.join(',\n')}
             }
         }
 
-        // Clean up temp file
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-            try {
-                fs.unlinkSync(tempFilePath);
-                progressCallback?.('Temporary clipboard data file cleaned up');
-            } catch (e: unknown) {
-                const errorMsg = e instanceof Error ? e.message : String(e);
-                progressCallback?.(`Warning: Could not clean up temp file: ${errorMsg}`);
+        // Clean up registry
+        if (virtualFileName) {
+            const NzConnectionClass = require('../../libs/driver/src/NzConnection');
+            if (NzConnectionClass && NzConnectionClass.unregisterImportStream) {
+                NzConnectionClass.unregisterImportStream(virtualFileName);
             }
         }
     }

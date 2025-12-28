@@ -139,14 +139,18 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                     async progress => {
                         const { importClipboardDataToNetezza } = await import('../import/clipboardImporter');
 
+                        let lastLoggedMessage = '';
                         const result = await importClipboardDataToNetezza(
                             finalTableName,
                             connectionDetails,
                             formatOptions.value,
                             {},
-                            (message: string) => {
-                                progress.report({ message });
-                                outputChannel.appendLine(`[Clipboard Import] ${message}`);
+                            (message: string, increment?: number, logToOutput: boolean = true) => {
+                                progress.report({ message, increment });
+                                if (logToOutput && message !== lastLoggedMessage) {
+                                    outputChannel.appendLine(`[Clipboard Import] ${message}`);
+                                    lastLoggedMessage = message;
+                                }
                             }
                         );
 
@@ -266,13 +270,17 @@ export function registerImportCommands(deps: ImportCommandsDependencies): vscode
                     async progress => {
                         const { importDataToNetezza } = await import('../import/dataImporter');
 
+                        let lastLoggedMessage = '';
                         const result = await importDataToNetezza(
                             sourceFile,
                             finalTableName,
                             connectionDetails,
-                            (message: string) => {
-                                progress.report({ message });
-                                outputChannel.appendLine(`[Import] ${message}`);
+                            (message: string, increment?: number, logToOutput: boolean = true) => {
+                                progress.report({ message, increment });
+                                if (logToOutput && message !== lastLoggedMessage) {
+                                    outputChannel.appendLine(`[Import] ${message}`);
+                                    lastLoggedMessage = message;
+                                }
                             }
                         );
 

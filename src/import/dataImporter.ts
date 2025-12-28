@@ -6,7 +6,11 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { ConnectionDetails } from '../types';
+import { Readable } from 'stream';
+import { ConnectionDetails, NzConnection } from '../types';
+
+// Helper to unblock event loop
+const delay = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // XLSX import for Excel file support
 // Custom Excel Reader from ExcelHelpersTs
@@ -233,7 +237,102 @@ export interface ImportResult {
 /**
  * Progress callback function type
  */
-export type ProgressCallback = (message: string) => void;
+export type ProgressCallback = (message: string, increment?: number, logToOutput?: boolean) => void;
+
+
+/**
+ * Data Generator Stream
+ * Generates formatted rows on demand for Netezza import
+ */
+class DataGeneratorStream extends Readable {
+    private rows: string[][];
+    private currentIndex: number = 0;
+    private importer: NetezzaImporter;
+    public byteLength: number = 0; // Estimation
+    private progressCallback?: ProgressCallback;
+    private lastReportedIndex: number = -1;
+    private lastReportTime: number = 0;
+    private lastReportedMessage: string = '';
+
+    constructor(importer: NetezzaImporter, rows: string[][], progressCallback?: ProgressCallback) {
+        super();
+        this.importer = importer;
+        this.rows = rows;
+        this.progressCallback = progressCallback;
+        this.currentIndex = 0;
+        this.lastReportedIndex = -1;
+        this.lastReportTime = 0;
+        this.lastReportedMessage = '';
+
+        // Estimate byte size roughly (can be expensive to calculate exactly)
+        // We'll just sum raw lengths + delimiters as a rough guess for progress bar
+        try {
+            this.byteLength = rows.reduce((acc, row) => {
+                const rowLen = row.reduce((rAcc, val) => rAcc + (val ? val.length : 0), 0);
+                return acc + rowLen + row.length; // + delimiters
+            }, 0);
+        } catch {
+            this.byteLength = 1024 * 1024; // Default 1MB if calculation fails
+        }
+    }
+
+    _read(_size: number): void {
+        try {
+            // Push rows until we hit highWaterMark or end
+            let more = true;
+
+
+            while (more && this.currentIndex < this.rows.length) {
+                const row = this.rows[this.currentIndex];
+                const formattedRow = row.map((value, j) => this.importer.formatValue(value || '', j));
+                const line = formattedRow.join(this.importer.getDelimiter()) + this.importer.getRecordDelim();
+
+                more = this.push(Buffer.from(line, 'utf8'));
+                this.currentIndex++;
+            }
+
+            // Report progress logic
+            const total = this.rows.length;
+
+            // Should report if:
+            // 1. We are at the end
+            // 2. OR we have advanced significantly since last report AND enough percentage has passed
+            // 3. AND we haven't reported this exact index before (suppress duplicates)
+
+            if (this.currentIndex > this.lastReportedIndex) {
+                const now = Date.now();
+                const isComplete = this.currentIndex >= total;
+                // Report if complete OR at least 1 second passed since last report
+                const shouldReport = isComplete || (now - this.lastReportTime >= 1000);
+
+                if (shouldReport) {
+                    const percent = Math.floor((this.currentIndex / total) * 100);
+                    const message = `Importing: ${percent}% complete (${this.currentIndex.toLocaleString()} / ${total.toLocaleString()} rows)`;
+
+                    // Determine increment based on % change since last report? 
+                    // Or just use 0 if we assume previous increments were handled?
+                    // Better to calculate strict increment:
+                    const processedDelta = this.currentIndex - (this.lastReportedIndex < 0 ? 0 : this.lastReportedIndex);
+                    const increment = (processedDelta / total) * 100;
+
+                    if (message !== this.lastReportedMessage) {
+                        this.progressCallback?.(message, increment, false); // Don't log to Output
+                        this.lastReportedIndex = this.currentIndex;
+                        this.lastReportTime = now;
+                        this.lastReportedMessage = message;
+                    }
+                }
+            }
+
+            if (this.currentIndex >= this.rows.length) {
+                this.push(null); // End of stream
+            }
+        } catch (e) {
+            this.emit('error', e);
+        }
+    }
+}
+
 
 /**
  * Netezza Data Importer class
@@ -244,7 +343,7 @@ export class NetezzaImporter {
     private logDir: string;
 
     // Pipe settings
-    private pipeName: string;
+    private virtualFileName: string;
     private delimiter: string = '\t';
     private delimiterPlain: string = '\\t';
     private recordDelim: string = '\n';
@@ -274,15 +373,20 @@ export class NetezzaImporter {
         this.isExcelFile = ['.xlsx', '.xlsb'].includes(fileExt);
 
         // Pipe settings
-        const pipeNum = Math.floor(Math.random() * 1000);
-        this.pipeName = `\\\\.\\pipe\\NETEZZA_IMPORT_${pipeNum}`;
+        // Use a generic virtual filename that the modified driver will recognize
+        this.virtualFileName = `virtual_import_${Date.now()}_${Math.floor(Math.random() * 1000)}.txt`;
         this.valuesToEscape = [this.escapechar, this.recordDelim, '\r', this.delimiter];
 
-        // Ensure log directory exists
+        // Log dir is still useful for log files from Netezza if any (though mapped through stream now?)
+        // Actually, Netezza logs come back as data streams too in the new driver version
         if (!fs.existsSync(this.logDir)) {
             fs.mkdirSync(this.logDir, { recursive: true });
         }
     }
+
+    getDelimiter(): string { return this.delimiter; }
+    getRecordDelim(): string { return this.recordDelim; }
+
 
     /**
      * Auto-detect CSV delimiter
@@ -316,8 +420,8 @@ export class NetezzaImporter {
     private cleanColumnName(colName: string): string {
         let cleanName = String(colName).trim();
         cleanName = cleanName.replace(/[^0-9a-zA-Z]+/g, '_').toUpperCase();
-        if (!cleanName || /^\d/.test(cleanName)) {
-            cleanName = 'COL_' + cleanName;
+        if (!cleanName || /^\d/.test(cleanName) || cleanName.startsWith('_')) {
+            cleanName = 'COL' + (cleanName.startsWith('_') ? '' : '_') + cleanName;
         }
         return cleanName;
     }
@@ -406,7 +510,9 @@ export class NetezzaImporter {
             rowCount++;
 
             if (rowCount % 10000 === 0) {
-                progressCallback?.(`Processed ${rowCount.toLocaleString()} rows...`);
+                progressCallback?.(`Processed ${rowCount.toLocaleString()} rows...`, undefined, false);
+                // Unblock UI
+                await delay();
             }
         }
 
@@ -475,7 +581,9 @@ export class NetezzaImporter {
             }
 
             if (i % 10000 === 0) {
-                progressCallback?.(`Analyzed ${i.toLocaleString()} rows...`);
+                progressCallback?.(`Analyzed ${i.toLocaleString()} rows...`, undefined, false);
+                // Unblock UI
+                await delay();
             }
         }
 
@@ -500,7 +608,7 @@ export class NetezzaImporter {
     /**
      * Format value according to column type
      */
-    private formatValue(val: string, colIndex: number): string {
+    formatValue(val: string, colIndex: number): string {
         let result = this.escapeValue(val);
         if (colIndex < this.dataTypes.length && this.dataTypes[colIndex].currentType.dbType === 'DATETIME') {
             result = result.replace('T', ' ');
@@ -523,7 +631,7 @@ export class NetezzaImporter {
 
         return `CREATE TABLE ${this.targetTable} AS 
 (
-    SELECT * FROM EXTERNAL '${this.pipeName}'
+    SELECT * FROM EXTERNAL '${this.virtualFileName}'
     (
 ${columns.join(',\n')}
     )
@@ -544,11 +652,10 @@ ${columns.join(',\n')}
     }
 
     /**
-     * Create temporary data file for import (file-based approach, supports CSV/TXT and Excel)
+     * Create data stream (in-memory) from file content (CSV/Excel)
      */
-    async createDataFile(progressCallback?: ProgressCallback): Promise<string> {
-        const tempFile = path.join(this.logDir, `netezza_import_data_${Math.floor(Math.random() * 1000)}.txt`);
-        progressCallback?.(`Creating temporary data file: ${tempFile}`);
+    async createDataStream(progressCallback?: ProgressCallback): Promise<Readable> {
+        progressCallback?.('Preparing data stream...');
 
         try {
             let rows: string[][];
@@ -585,30 +692,21 @@ ${columns.join(',\n')}
                 }
             }
 
-            // Format and write data
-            const outputLines: string[] = [];
-            for (let i = 0; i < rows.length; i++) {
-                const row = rows[i];
-                const formattedRow = row.map((value, j) => this.formatValue(value || '', j));
-                outputLines.push(formattedRow.join(this.delimiter));
+            this.rowsCount = rows.length; // Ensure count is accurate
 
-                if ((i + 1) % 10000 === 0) {
-                    progressCallback?.(`Processed ${(i + 1).toLocaleString()} rows...`);
-                }
-            }
-
-            fs.writeFileSync(tempFile, outputLines.join(this.recordDelim), 'utf-8');
-
-            // Update pipe name to point to the file
-            this.pipeName = tempFile.replace(/\\/g, '/');
-            progressCallback?.(`Data file created: ${this.pipeName}`);
-
-            return tempFile;
+            return new DataGeneratorStream(this, rows, progressCallback);
         } catch (e: unknown) {
             const errorMsg = e instanceof Error ? e.message : String(e);
-            throw new Error(`Error creating data file: ${errorMsg}`);
+            progressCallback?.(`Error preparing stream: ${errorMsg}`);
+            throw e;
         }
     }
+
+    // Public getter for pipeName to register it
+    getVirtualFileName(): string {
+        return this.virtualFileName;
+    }
+
 
     /**
      * Get rows count
@@ -631,8 +729,6 @@ ${columns.join(',\n')}
         return this.csvDelimiter;
     }
 }
-
-import { NzConnection } from '../types';
 
 /**
  * Import data from a file to Netezza table
@@ -695,9 +791,20 @@ export async function importDataToNetezza(
         // Analyze data types
         await importer.analyzeDataTypes(progressCallback);
 
-        // Create data file (file-based approach for Node.js)
-        progressCallback?.('Using file-based import...');
-        const tempFile = await importer.createDataFile(progressCallback);
+        // Create data stream (in-memory)
+        progressCallback?.('Preparing in-memory data stream...');
+        const dataStream = await importer.createDataStream(progressCallback);
+        const virtualFileName = importer.getVirtualFileName();
+        progressCallback?.(`Registered virtual stream: ${virtualFileName}`);
+
+        // Register stream with driver static registry
+        // We need to access the class statically, so we require it
+        const NzConnectionClass = require('../../libs/driver/src/NzConnection');
+        if (NzConnectionClass && NzConnectionClass.registerImportStream) {
+            NzConnectionClass.registerImportStream(virtualFileName, dataStream);
+        } else {
+            progressCallback?.('Warning: NzConnection driver does not support stream registry. Import might fail.');
+        }
 
         // Generate SQL
         const createSql = importer.generateCreateTableSql();
@@ -715,8 +822,8 @@ export async function importDataToNetezza(
             password: connectionDetails.password
         };
 
-        const NzConnection = require('../../libs/driver/src/NzConnection');
-        connection = new NzConnection(config) as NzConnection;
+        const NzDriver = require('../../libs/driver/src/NzConnection');
+        connection = new NzDriver(config) as NzConnection;
         await connection!.connect();
 
         try {
@@ -744,15 +851,9 @@ export async function importDataToNetezza(
         } finally {
             await connection.close();
 
-            // Clean up temp file
-            try {
-                if (fs.existsSync(tempFile)) {
-                    fs.unlinkSync(tempFile);
-                    progressCallback?.('Temporary data file cleaned up');
-                }
-            } catch (e: unknown) {
-                const errorMsg = e instanceof Error ? e.message : String(e);
-                progressCallback?.(`Warning: Could not clean up temp file: ${errorMsg}`);
+            // Clean up registry
+            if (NzConnectionClass && NzConnectionClass.unregisterImportStream) {
+                NzConnectionClass.unregisterImportStream(virtualFileName);
             }
         }
 
