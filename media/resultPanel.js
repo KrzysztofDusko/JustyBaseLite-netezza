@@ -3070,8 +3070,8 @@ function renderRowView() {
         return;
     }
 
-    if (rowIndices.length > 2) {
-        content.innerHTML = '<div class="row-view-placeholder">Select 1 or 2 rows to compare</div>';
+    if (rowIndices.length > 10) {
+        content.innerHTML = '<div class="row-view-placeholder">Select 1 to 10 rows to compare</div>';
         return;
     }
 
@@ -3088,25 +3088,25 @@ function renderRowView() {
     html += '</tr></thead><tbody>';
 
     columns.forEach(col => {
-        const val1 = rows[rowIndices[0]].getValue(col.id);
-        const val2 = rowIndices.length > 1 ? rows[rowIndices[1]].getValue(col.id) : null;
+        // Collect values for this column across all selected rows
+        const values = rowIndices.map(rowIndex => {
+            const val = rows[rowIndex].getValue(col.id);
+            return val;
+        });
 
+        // Check for diffs (only if more than 1 row selected)
         let isDiff = false;
-        if (rowIndices.length === 2) {
-            // Simple strict equality check for diff
-            if (String(val1) !== String(val2)) {
-                isDiff = true;
-            }
+        if (rowIndices.length > 1) {
+            const firstVal = String(values[0]);
+            isDiff = values.some(v => String(v) !== firstVal);
         }
 
         html += `<tr class="${isDiff ? 'diff-cell' : ''}">`;
         html += `<td><b>${col.columnDef.header}</b><br><small style="opacity:0.6">${col.columnDef.dataType || ''}</small></td>`;
 
-        html += `<td class="${isDiff ? 'diff-cell-highlight' : ''}">${val1 ?? '<span class="null-value">NULL</span>'}</td>`;
-
-        if (rowIndices.length > 1) {
-            html += `<td class="${isDiff ? 'diff-cell-highlight' : ''}">${val2 ?? '<span class="null-value">NULL</span>'}</td>`;
-        }
+        values.forEach(val => {
+            html += `<td class="${isDiff ? 'diff-cell-highlight' : ''}">${val ?? '<span class="null-value">NULL</span>'}</td>`;
+        });
 
         html += '</tr>';
     });

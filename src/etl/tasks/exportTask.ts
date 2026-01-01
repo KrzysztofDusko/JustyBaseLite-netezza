@@ -3,39 +3,118 @@
  * Exports query results to CSV or XLSB files
  */
 
+import * as vscode from 'vscode';
 import { EtlNode, EtlNodeExecutionResult, ExportNodeConfig } from '../etlTypes';
-import { ExecutionContext, TaskExecutor } from '../etlExecutionEngine';
+import { ExecutionContext, IExportStrategy, IVariableResolver } from '../interfaces';
+import { BaseTaskExecutor } from './baseTaskExecutor';
 import { exportToCsv } from '../../export/csvExporter';
 import { exportQueryToXlsb } from '../../export/xlsbExporter';
+import { ConnectionDetails } from '../../types';
 
-export class ExportTaskExecutor implements TaskExecutor {
+/**
+ * CSV export strategy implementation
+ */
+class CsvExportStrategy implements IExportStrategy {
+    readonly format = 'csv' as const;
+
+    async export(
+        context: vscode.ExtensionContext,
+        connectionDetails: ConnectionDetails,
+        query: string,
+        outputPath: string,
+        _onProgress?: (message: string) => void,
+        timeout?: number
+    ): Promise<{ success: boolean; message?: string; rowsExported?: number }> {
+        try {
+            await exportToCsv(
+                context,
+                connectionDetails,
+                query,
+                outputPath,
+                undefined, // progress object not available here
+                timeout
+            );
+            return { success: true };
+        } catch (error) {
+            return {
+                success: false,
+                message: error instanceof Error ? error.message : String(error)
+            };
+        }
+    }
+}
+
+/**
+ * XLSB export strategy implementation
+ */
+class XlsbExportStrategy implements IExportStrategy {
+    readonly format = 'xlsb' as const;
+
+    async export(
+        _context: vscode.ExtensionContext,
+        connectionDetails: ConnectionDetails,
+        query: string,
+        outputPath: string,
+        onProgress?: (message: string) => void,
+        timeout?: number
+    ): Promise<{ success: boolean; message?: string; rowsExported?: number }> {
+        const result = await exportQueryToXlsb(
+            connectionDetails,
+            query,
+            outputPath,
+            false, // copyToClipboard
+            onProgress,
+            timeout
+        );
+
+        return {
+            success: result.success,
+            message: result.message,
+            rowsExported: result.details?.rows_exported
+        };
+    }
+}
+
+/**
+ * Export Task Executor
+ * Exports data to CSV or XLSB files using strategy pattern
+ */
+export class ExportTaskExecutor extends BaseTaskExecutor<ExportNodeConfig> {
+    private strategies: Map<string, IExportStrategy>;
+
+    constructor(
+        variableResolver?: IVariableResolver,
+        strategies?: Map<string, IExportStrategy>
+    ) {
+        super(variableResolver);
+        this.strategies = strategies || new Map<string, IExportStrategy>([
+            ['csv', new CsvExportStrategy()],
+            ['xlsb', new XlsbExportStrategy()]
+        ]);
+    }
+
+    /**
+     * Register a custom export strategy
+     */
+    registerStrategy(strategy: IExportStrategy): void {
+        this.strategies.set(strategy.format, strategy);
+    }
+
     async execute(
         node: EtlNode,
         context: ExecutionContext
     ): Promise<EtlNodeExecutionResult> {
-        const config = node.config as ExportNodeConfig;
+        const config = this.getConfig(node);
         const startTime = new Date();
 
-        // Validate configuration
-        if (!config.outputPath) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: 'Output path is required'
-            };
-        }
+        // Validate output path
+        const pathError = this.validateRequired(node.id, startTime, config.outputPath, 'Output path');
+        if (pathError) return pathError;
 
-        try {
+        return this.safeExecute(node.id, startTime, async () => {
             // Resolve variables in paths and query
-            let outputPath = config.outputPath;
-            let query = config.query || '';
-
-            for (const [key, value] of Object.entries(context.variables)) {
-                outputPath = outputPath.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
-                query = query.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
-            }
+            const outputPath = this.resolveVariables(config.outputPath, context);
+            let query = config.query ? this.resolveVariables(config.query, context) : '';
 
             // If no query, try to get from previous node
             if (!query && config.sourceNodeId) {
@@ -44,101 +123,57 @@ export class ExportTaskExecutor implements TaskExecutor {
                     rows?: unknown[][];
                 } | undefined;
 
-                if (prevOutput && prevOutput.rows) {
-                    // Convert in-memory data to export
-                    // For now, we'll need the query to execute
-                    return {
-                        nodeId: node.id,
-                        status: 'error',
+                if (prevOutput?.rows) {
+                    return this.createError(
+                        node.id,
                         startTime,
-                        endTime: new Date(),
-                        error: 'In-memory data export is not yet supported. Please specify a query.'
-                    };
+                        'In-memory data export is not yet supported. Please specify a query.'
+                    );
                 }
             }
 
             if (!query) {
-                return {
-                    nodeId: node.id,
-                    status: 'error',
+                return this.createError(
+                    node.id,
                     startTime,
-                    endTime: new Date(),
-                    error: 'No query or source node specified for export'
-                };
+                    'No query or source node specified for export'
+                );
             }
 
-            context.onProgress?.(`Exporting to ${config.format.toUpperCase()}: ${outputPath}`);
-
-            if (config.format === 'csv') {
-                await exportToCsv(
-                    context.extensionContext,
-                    context.connectionDetails,
-                    query,
-                    outputPath,
-                    undefined, // progress is not passed here but handled via onProgress if we refactor exportToCsv signature slightly, wait, exportToCsv calls progress.report.
-                    // But exportToCsv takes a vscode.Progress object, not a simple callback.
-                    // I will pass undefined for now for progress object if I cannot easily bridge it, 
-                    // OR I can create a fake progress object.
-                    // Actually, let's keep it simple and just pass timeout.
-                    // Wait, lines 73-78 call exportToCsv. I need to match the signature.
-                    // exportToCsv signature: (context, connectionDetails, query, filePath, progress?, timeout?)
-                    config.timeout
-                );
-            } else if (config.format === 'xlsb') {
-                const result = await exportQueryToXlsb(
-                    context.connectionDetails,
-                    query,
-                    outputPath,
-                    false, // copyToClipboard
-                    (message) => {
-                        context.onProgress?.(`[Export] ${message}`);
-                    },
-                    config.timeout
-                );
-
-                if (!result.success) {
-                    return {
-                        nodeId: node.id,
-                        status: 'error',
-                        startTime,
-                        endTime: new Date(),
-                        error: result.message
-                    };
-                }
-
-                return {
-                    nodeId: node.id,
-                    status: 'success',
+            // Get export strategy
+            const strategy = this.strategies.get(config.format);
+            if (!strategy) {
+                return this.createError(
+                    node.id,
                     startTime,
-                    endTime: new Date(),
-                    rowsAffected: result.details?.rows_exported,
+                    `Unsupported export format: ${config.format}`
+                );
+            }
+
+            this.reportProgress(context, `Exporting to ${config.format.toUpperCase()}: ${outputPath}`);
+
+            // Execute export
+            const result = await strategy.export(
+                context.extensionContext,
+                context.connectionDetails,
+                query,
+                outputPath,
+                (message) => this.reportProgress(context, `[Export] ${message}`),
+                config.timeout
+            );
+
+            if (result.success) {
+                return this.createSuccess(node.id, startTime, {
+                    rowsAffected: result.rowsExported,
                     output: {
                         filePath: outputPath,
                         format: config.format,
-                        rowsExported: result.details?.rows_exported
+                        rowsExported: result.rowsExported
                     }
-                };
+                });
+            } else {
+                return this.createError(node.id, startTime, result.message || 'Export failed');
             }
-
-            return {
-                nodeId: node.id,
-                status: 'success',
-                startTime,
-                endTime: new Date(),
-                output: {
-                    filePath: outputPath,
-                    format: config.format
-                }
-            };
-
-        } catch (error) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: String(error)
-            };
-        }
+        });
     }
 }

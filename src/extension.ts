@@ -6,7 +6,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQuery, cancelCurrentQuery } from './core/queryRunner';
+import { runQueryRaw, cancelCurrentQuery } from './core/queryRunner';
 import { ConnectionManager } from './core/connectionManager';
 import { LoginPanel } from './views/loginPanel';
 import { SchemaProvider } from './providers/schemaProvider';
@@ -149,7 +149,7 @@ export async function activate(context: vscode.ExtensionContext) {
         updateActiveConnectionStatusBar();
         if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
             metadataCache.triggerConnectionPrefetch(connectionName, q =>
-                runQuery(context, q, true, connectionName!, connectionManager)
+                runQueryRaw(context, q, true, connectionManager, connectionName!)
             );
         }
     });
@@ -159,7 +159,7 @@ export async function activate(context: vscode.ExtensionContext) {
         const connectionName = connectionManager.getDocumentConnection(documentUri);
         if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
             metadataCache.triggerConnectionPrefetch(connectionName, q =>
-                runQuery(context, q, true, connectionName!, connectionManager)
+                runQueryRaw(context, q, true, connectionManager, connectionName!)
             );
         }
     });

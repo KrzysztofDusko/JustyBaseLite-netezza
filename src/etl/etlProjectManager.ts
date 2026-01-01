@@ -11,18 +11,43 @@ import {
     generateNodeId,
     generateConnectionId
 } from './etlTypes';
+import { IProjectManager } from './interfaces';
+import { ProjectValidator, ValidationResult } from './utils/projectValidator';
 
-export class EtlProjectManager {
+/**
+ * ETL Project Manager
+ * Manages the lifecycle of ETL projects with singleton support for global state
+ * and constructor injection for testing
+ */
+export class EtlProjectManager implements IProjectManager {
     private static instance: EtlProjectManager;
     private currentProject: EtlProject | null = null;
     private projectPath: string | null = null;
     private isDirty: boolean = false;
+    private validator: ProjectValidator;
 
+    /**
+     * Constructor - can be used directly for testing
+     */
+    constructor(validator?: ProjectValidator) {
+        this.validator = validator || new ProjectValidator();
+    }
+
+    /**
+     * Get singleton instance for global usage
+     */
     static getInstance(): EtlProjectManager {
         if (!EtlProjectManager.instance) {
             EtlProjectManager.instance = new EtlProjectManager();
         }
         return EtlProjectManager.instance;
+    }
+
+    /**
+     * Reset singleton (useful for testing)
+     */
+    static resetInstance(): void {
+        EtlProjectManager.instance = undefined!;
     }
 
     /**
@@ -81,111 +106,18 @@ export class EtlProjectManager {
 
     /**
      * Validate project structure
+     * @returns Array of error messages (empty if valid)
      */
     validateProject(project: EtlProject): string[] {
-        const errors: string[] = [];
-
-        if (!project.name) {
-            errors.push('Project name is required');
-        }
-
-        if (!project.version) {
-            errors.push('Project version is required');
-        }
-
-        if (!Array.isArray(project.nodes)) {
-            errors.push('Nodes must be an array');
-        }
-
-        if (!Array.isArray(project.connections)) {
-            errors.push('Connections must be an array');
-        }
-
-        // Validate nodes
-        const nodeIds = new Set<string>();
-        for (const node of project.nodes || []) {
-            if (!node.id) {
-                errors.push('Node missing ID');
-            } else if (nodeIds.has(node.id)) {
-                errors.push(`Duplicate node ID: ${node.id}`);
-            } else {
-                nodeIds.add(node.id);
-            }
-
-            if (!node.type) {
-                errors.push(`Node ${node.id} missing type`);
-            }
-
-            if (!node.position || typeof node.position.x !== 'number' || typeof node.position.y !== 'number') {
-                errors.push(`Node ${node.id} has invalid position`);
-            }
-        }
-
-        // Validate connections
-        for (const conn of project.connections || []) {
-            if (!conn.from || !nodeIds.has(conn.from)) {
-                errors.push(`Connection ${conn.id} has invalid 'from' node: ${conn.from}`);
-            }
-            if (!conn.to || !nodeIds.has(conn.to)) {
-                errors.push(`Connection ${conn.id} has invalid 'to' node: ${conn.to}`);
-            }
-            if (conn.from === conn.to) {
-                errors.push(`Connection ${conn.id} cannot connect node to itself`);
-            }
-        }
-
-        // Check for cycles
-        const cycleErrors = this.detectCycles(project);
-        errors.push(...cycleErrors);
-
-        return errors;
+        const result = this.validator.validateProject(project);
+        return result.errors;
     }
 
     /**
-     * Detect cycles in the connection graph
+     * Get detailed validation result including warnings
      */
-    private detectCycles(project: EtlProject): string[] {
-        const errors: string[] = [];
-        const visited = new Set<string>();
-        const recStack = new Set<string>();
-
-        // Build adjacency list
-        const adj = new Map<string, string[]>();
-        for (const node of project.nodes) {
-            adj.set(node.id, []);
-        }
-        for (const conn of project.connections) {
-            adj.get(conn.from)?.push(conn.to);
-        }
-
-        const dfs = (nodeId: string): boolean => {
-            visited.add(nodeId);
-            recStack.add(nodeId);
-
-            for (const neighbor of adj.get(nodeId) || []) {
-                if (!visited.has(neighbor)) {
-                    if (dfs(neighbor)) {
-                        return true;
-                    }
-                } else if (recStack.has(neighbor)) {
-                    return true;
-                }
-            }
-
-            recStack.delete(nodeId);
-            return false;
-        };
-
-        for (const node of project.nodes) {
-            if (!visited.has(node.id)) {
-                if (dfs(node.id)) {
-                    errors.push('Project contains circular dependencies');
-                    break;
-                }
-            }
-        }
-
-        return errors;
+    validateProjectDetailed(project: EtlProject): ValidationResult {
+        return this.validator.validateProject(project);
     }
 
     /**
@@ -253,16 +185,18 @@ export class EtlProjectManager {
             throw new Error('Connection already exists');
         }
 
+        // Temporarily add connection to check for cycles
         this.currentProject.connections.push(connection);
-        this.isDirty = true;
 
         // Validate no cycles
-        const errors = this.detectCycles(this.currentProject);
-        if (errors.length > 0) {
+        const cycleErrors = this.validator.detectCycles(this.currentProject);
+        if (cycleErrors.length > 0) {
             // Rollback
             this.currentProject.connections.pop();
             throw new Error('Connection would create a cycle');
         }
+
+        this.isDirty = true;
     }
 
     /**
@@ -318,5 +252,30 @@ export class EtlProjectManager {
      */
     getIncomingConnections(nodeId: string): EtlConnection[] {
         return this.currentProject?.connections.filter(c => c.to === nodeId) || [];
+    }
+
+    /**
+     * Set project directly (for external updates)
+     */
+    setProject(project: EtlProject): void {
+        this.currentProject = project;
+        this.isDirty = true;
+    }
+
+    /**
+     * Mark project as dirty
+     */
+    markDirty(): void {
+        this.isDirty = true;
+    }
+
+    /**
+     * Get execution order for nodes
+     */
+    getTopologicalOrder(): string[] | null {
+        if (!this.currentProject) {
+            return null;
+        }
+        return this.validator.getTopologicalOrder(this.currentProject);
     }
 }

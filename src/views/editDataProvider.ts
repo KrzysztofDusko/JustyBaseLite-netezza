@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runQuery, runQueriesSequentially } from '../core/queryRunner';
+import { runQuery, runQueryRaw, runQueriesSequentially, queryResultToRows } from '../core/queryRunner';
 import { ConnectionManager } from '../core/connectionManager';
 import { getTableMetadata, toWebviewFormat } from '../providers/tableMetadataProvider';
 
@@ -191,15 +191,15 @@ export class EditDataProvider {
             panel.webview.postMessage({ command: 'setLoading', loading: true, message: 'Fetching data...' });
 
             // Use centralized tableMetadataProvider for metadata queries
-            const queryRunner = (query: string) => runQuery(context, query, true, connectionName, connectionManager);
+            const queryRunner = (query: string) => runQueryRaw(context, query, true, connectionManager, connectionName);
 
             const [dataResult, metadata] = await Promise.all([
-                runQuery(
+                runQueryRaw(
                     context,
                     `SELECT ROWID, * FROM ${fullTableName} LIMIT 50000`,
                     true,
-                    connectionName,
-                    connectionManager
+                    connectionManager,
+                    connectionName
                 ),
                 getTableMetadata(queryRunner, db, schema, table)
             ]);
@@ -211,31 +211,12 @@ export class EditDataProvider {
             // Parse Data
             let data: Record<string, unknown>[] = [];
             try {
-                // Robust JSON parsing
-                const raw = dataResult || '[]';
-                console.log(
-                    '[EditDataProvider] dataResult type:',
-                    typeof raw,
-                    'length:',
-                    typeof raw === 'string' ? raw.length : 'N/A'
-                );
-                console.log(
-                    '[EditDataProvider] dataResult preview:',
-                    typeof raw === 'string' ? raw.substring(0, 200) : 'array'
-                );
-
-                if (typeof raw === 'string') {
-                    if (raw.trim().startsWith('[')) {
-                        data = JSON.parse(raw) as Record<string, unknown>[];
-                    } else {
-                        // Not a JSON array, likely empty or message
-                        console.log('[EditDataProvider] dataResult is NOT JSON array:', raw.substring(0, 100));
-                        data = [];
-                    }
-                } else if (Array.isArray(raw)) {
-                    data = raw as Record<string, unknown>[];
+                if (dataResult && dataResult.data) {
+                    data = queryResultToRows(dataResult);
+                    console.log('[EditDataProvider] Parsed data rows:', data.length);
+                } else {
+                    console.log('[EditDataProvider] No data returned');
                 }
-                console.log('[EditDataProvider] Parsed data rows:', data.length);
             } catch (e: unknown) {
                 console.error('[EditDataProvider] Data Parse Error', e);
             }

@@ -4,12 +4,30 @@
  */
 
 import { EtlNode, EtlNodeExecutionResult, ContainerNodeConfig, EtlProject } from '../etlTypes';
-import { ExecutionContext, TaskExecutor, EtlExecutionEngine } from '../etlExecutionEngine';
+import { ExecutionContext, IExecutionEngine, IVariableResolver } from '../interfaces';
+import { BaseTaskExecutor } from './baseTaskExecutor';
 
-export class ContainerTaskExecutor implements TaskExecutor {
-    private engine: EtlExecutionEngine;
+/**
+ * Container execution output
+ */
+interface ContainerOutput {
+    tasksExecuted: number;
+    tasksSucceeded: number;
+    nestedResults: [string, EtlNodeExecutionResult][];
+}
 
-    constructor(engine: EtlExecutionEngine) {
+/**
+ * Container Task Executor
+ * Delegates nested task execution to the provided engine
+ */
+export class ContainerTaskExecutor extends BaseTaskExecutor<ContainerNodeConfig> {
+    private engine: IExecutionEngine;
+
+    constructor(
+        engine: IExecutionEngine,
+        variableResolver?: IVariableResolver
+    ) {
+        super(variableResolver);
         this.engine = engine;
     }
 
@@ -17,22 +35,18 @@ export class ContainerTaskExecutor implements TaskExecutor {
         node: EtlNode,
         context: ExecutionContext
     ): Promise<EtlNodeExecutionResult> {
-        const config = node.config as ContainerNodeConfig;
+        const config = this.getConfig(node);
         const startTime = new Date();
 
-        // Validate configuration
+        // Empty container is a no-op success
         if (!config.nodes || config.nodes.length === 0) {
-            return {
-                nodeId: node.id,
-                status: 'success',
-                startTime,
-                endTime: new Date(),
+            return this.createSuccess(node.id, startTime, {
                 output: 'Empty container - nothing to execute'
-            };
+            });
         }
 
-        try {
-            context.onProgress?.(`Entering container: ${node.name} (${config.nodes.length} tasks)`);
+        return this.safeExecute(node.id, startTime, async () => {
+            this.reportProgress(context, `Entering container: ${node.name} (${config.nodes.length} tasks)`);
 
             // Create a mini-project from the container's nodes
             const containerProject: EtlProject = {
@@ -42,72 +56,82 @@ export class ContainerTaskExecutor implements TaskExecutor {
                 connections: config.connections || []
             };
 
-            // Execute the container's tasks using the same engine
+            // Execute the container's tasks using the engine
             const result = await this.engine.execute(containerProject, context);
 
-            context.onProgress?.(`Exiting container: ${node.name}`);
+            this.reportProgress(context, `Exiting container: ${node.name}`);
 
-            if (result.status === 'completed') {
-                // Count successful tasks
-                let successCount = 0;
-                let totalRows = 0;
+            // Process results based on execution status
+            return this.processExecutionResult(node.id, startTime, config, result);
+        });
+    }
 
-                for (const nodeResult of result.nodeResults.values()) {
-                    if (nodeResult.status === 'success') {
-                        successCount++;
-                        if (nodeResult.rowsAffected) {
-                            totalRows += nodeResult.rowsAffected;
-                        }
-                    }
-                }
+    /**
+     * Process nested execution result and create container result
+     */
+    private processExecutionResult(
+        nodeId: string,
+        startTime: Date,
+        config: ContainerNodeConfig,
+        result: import('../etlTypes').EtlExecutionResult
+    ): EtlNodeExecutionResult {
+        if (result.status === 'completed') {
+            const { successCount, totalRows } = this.countSuccesses(result);
 
-                return {
-                    nodeId: node.id,
-                    status: 'success',
-                    startTime,
-                    endTime: new Date(),
-                    rowsAffected: totalRows,
-                    output: {
-                        tasksExecuted: config.nodes.length,
-                        tasksSucceeded: successCount,
-                        nestedResults: Array.from(result.nodeResults.entries())
-                    }
-                };
-            } else if (result.status === 'cancelled') {
-                return {
-                    nodeId: node.id,
-                    status: 'skipped',
-                    startTime,
-                    endTime: new Date(),
-                    error: 'Container execution was cancelled'
-                };
-            } else {
-                // Find the first error
-                let errorMessage = 'Container execution failed';
-                for (const nodeResult of result.nodeResults.values()) {
-                    if (nodeResult.status === 'error' && nodeResult.error) {
-                        errorMessage = nodeResult.error;
-                        break;
-                    }
-                }
-
-                return {
-                    nodeId: node.id,
-                    status: 'error',
-                    startTime,
-                    endTime: new Date(),
-                    error: errorMessage
-                };
-            }
-
-        } catch (error) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: String(error)
+            const output: ContainerOutput = {
+                tasksExecuted: config.nodes.length,
+                tasksSucceeded: successCount,
+                nestedResults: Array.from(result.nodeResults.entries())
             };
+
+            return this.createSuccess(nodeId, startTime, {
+                rowsAffected: totalRows,
+                output
+            });
         }
+
+        if (result.status === 'cancelled') {
+            return this.resultBuilder(nodeId)
+                .skipped()
+                .build();
+        }
+
+        // Failed - find first error
+        const errorMessage = this.findFirstError(result) || 'Container execution failed';
+        return this.createError(nodeId, startTime, errorMessage);
+    }
+
+    /**
+     * Count successful tasks and total rows
+     */
+    private countSuccesses(result: import('../etlTypes').EtlExecutionResult): {
+        successCount: number;
+        totalRows: number;
+    } {
+        let successCount = 0;
+        let totalRows = 0;
+
+        for (const nodeResult of result.nodeResults.values()) {
+            if (nodeResult.status === 'success') {
+                successCount++;
+                if (nodeResult.rowsAffected) {
+                    totalRows += nodeResult.rowsAffected;
+                }
+            }
+        }
+
+        return { successCount, totalRows };
+    }
+
+    /**
+     * Find the first error message in results
+     */
+    private findFirstError(result: import('../etlTypes').EtlExecutionResult): string | undefined {
+        for (const nodeResult of result.nodeResults.values()) {
+            if (nodeResult.status === 'error' && nodeResult.error) {
+                return nodeResult.error;
+            }
+        }
+        return undefined;
     }
 }

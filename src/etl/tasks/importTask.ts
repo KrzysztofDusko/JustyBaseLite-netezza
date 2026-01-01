@@ -3,117 +3,92 @@
  * Imports data from CSV or XLSB files into the database
  */
 
-import { EtlNode, EtlNodeExecutionResult, ImportNodeConfig } from '../etlTypes';
-import { ExecutionContext, TaskExecutor } from '../etlExecutionEngine';
 import * as fs from 'fs';
+import { EtlNode, EtlNodeExecutionResult, ImportNodeConfig } from '../etlTypes';
+import { ExecutionContext, IDataImporter, IVariableResolver } from '../interfaces';
+import { BaseTaskExecutor } from './baseTaskExecutor';
+import { ImportResult, importDataToNetezza } from '../../import/dataImporter';
+import { ConnectionDetails } from '../../types';
 
-// Import the importDataToNetezza function type
-import { ImportResult } from '../../import/dataImporter';
-
-// Define the function type for dynamic loading
-let importDataToNetezza: (
-    filePath: string,
-    targetTable: string,
-    connectionDetails: import('../../types').ConnectionDetails,
-    progressCallback?: (message: string, increment?: number) => void,
-    timeout?: number
-) => Promise<ImportResult>;
-
-try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const importerModule = require('../../import/dataImporter');
-    importDataToNetezza = importerModule.importDataToNetezza;
-} catch {
-    // Will be handled at execution time
+/**
+ * Default data importer implementation
+ */
+class DefaultDataImporter implements IDataImporter {
+    async importData(
+        filePath: string,
+        targetTable: string,
+        connectionDetails: ConnectionDetails,
+        progressCallback?: (message: string, increment?: number) => void,
+        timeout?: number
+    ): Promise<ImportResult> {
+        return importDataToNetezza(
+            filePath,
+            targetTable,
+            connectionDetails,
+            progressCallback,
+            timeout
+        );
+    }
 }
 
-export class ImportTaskExecutor implements TaskExecutor {
+/**
+ * Import Task Executor
+ * Imports data from files into database tables
+ */
+export class ImportTaskExecutor extends BaseTaskExecutor<ImportNodeConfig> {
+    private importer: IDataImporter;
+
+    constructor(
+        variableResolver?: IVariableResolver,
+        importer?: IDataImporter
+    ) {
+        super(variableResolver);
+        this.importer = importer || new DefaultDataImporter();
+    }
+
     async execute(
         node: EtlNode,
         context: ExecutionContext
     ): Promise<EtlNodeExecutionResult> {
-        const config = node.config as ImportNodeConfig;
+        const config = this.getConfig(node);
         const startTime = new Date();
 
-        // Validate configuration
-        if (!config.inputPath) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: 'Input path is required'
-            };
-        }
+        // Validate required fields
+        const inputError = this.validateRequired(node.id, startTime, config.inputPath, 'Input path');
+        if (inputError) return inputError;
 
-        if (!config.targetTable) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: 'Target table is required'
-            };
-        }
+        const tableError = this.validateRequired(node.id, startTime, config.targetTable, 'Target table');
+        if (tableError) return tableError;
 
-        try {
+        return this.safeExecute(node.id, startTime, async () => {
             // Resolve variables in paths
-            let inputPath = config.inputPath;
-            let targetTable = config.targetTable;
-            let targetSchema = config.targetSchema || '';
-
-            for (const [key, value] of Object.entries(context.variables)) {
-                inputPath = inputPath.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
-                targetTable = targetTable.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
-                targetSchema = targetSchema.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
-            }
+            const inputPath = this.resolveVariables(config.inputPath, context);
+            const targetTable = this.resolveVariables(config.targetTable, context);
+            const targetSchema = config.targetSchema
+                ? this.resolveVariables(config.targetSchema, context)
+                : '';
 
             // Check if file exists
             if (!fs.existsSync(inputPath)) {
-                return {
-                    nodeId: node.id,
-                    status: 'error',
-                    startTime,
-                    endTime: new Date(),
-                    error: `Input file not found: ${inputPath}`
-                };
+                return this.createError(node.id, startTime, `Input file not found: ${inputPath}`);
             }
 
-            context.onProgress?.(`Importing from ${config.format.toUpperCase()}: ${inputPath}`);
-            context.onProgress?.(`Target table: ${targetSchema ? targetSchema + '.' : ''}${targetTable}`);
+            this.reportProgress(context, `Importing from ${config.format.toUpperCase()}: ${inputPath}`);
+            this.reportProgress(context, `Target table: ${targetSchema ? targetSchema + '.' : ''}${targetTable}`);
 
-            if (!importDataToNetezza) {
-                return {
-                    nodeId: node.id,
-                    status: 'error',
-                    startTime,
-                    endTime: new Date(),
-                    error: 'importDataToNetezza function not available'
-                };
-            }
-
-            const result = await importDataToNetezza(
+            // Execute import
+            const result = await this.importer.importData(
                 inputPath,
                 targetTable,
                 context.connectionDetails,
-                (message, _percent) => {
-                    // percent is optional in the callback signature from ImportTaskExecutor's perspective, 
-                    // but dataImporter passes it? 
-                    // importDataToNetezza signature for progressCallback is (message: string, increment?: number, logToOutput?: boolean)
-                    // Wait, I need to check dataImporter signature again. 
-                    // export type ProgressCallback = (message: string, increment?: number, logToOutput?: boolean) => void;
-                    // So I should adapt it.
-                    context.onProgress?.(`[Import] ${message}`);
+                (message) => {
+                    this.reportProgress(context, `[Import] ${message}`);
                 },
                 config.timeout
             );
 
             if (result.success) {
-                return {
-                    nodeId: node.id,
-                    status: 'success',
-                    startTime,
-                    endTime: new Date(),
+                return this.createSuccess(node.id, startTime, {
                     rowsAffected: result.details?.rowsInserted,
                     output: {
                         filePath: inputPath,
@@ -121,25 +96,10 @@ export class ImportTaskExecutor implements TaskExecutor {
                         rowsProcessed: result.details?.rowsProcessed,
                         rowsInserted: result.details?.rowsInserted
                     }
-                };
+                });
             } else {
-                return {
-                    nodeId: node.id,
-                    status: 'error',
-                    startTime,
-                    endTime: new Date(),
-                    error: result.message
-                };
+                return this.createError(node.id, startTime, result.message);
             }
-
-        } catch (error) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: String(error)
-            };
-        }
+        });
     }
 }

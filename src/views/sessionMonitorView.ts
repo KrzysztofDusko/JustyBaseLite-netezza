@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../core/connectionManager';
-import { runQuery } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 
 interface Session {
     ID: number;
@@ -15,6 +15,7 @@ interface Session {
     PRIORITY: number;
     CID: number;
     CLIENT_OS_USERNAME: string;
+    [key: string]: unknown;
 }
 
 interface QueryInfo {
@@ -35,6 +36,7 @@ interface QueryInfo {
     QS_CURSNIPT: number;
     QS_RESROWS: number;
     QS_RESBYTES: number;
+    [key: string]: unknown;
 }
 
 interface StorageInfo {
@@ -44,6 +46,7 @@ interface StorageInfo {
     USED_MB: number;
     AVG_SKEW: number;
     TABLE_COUNT: number;
+    [key: string]: unknown;
 }
 
 interface ResourceData {
@@ -167,7 +170,7 @@ export class SessionMonitorView {
             }
 
             const sql = `DROP SESSION ${sessionId}`;
-            await runQuery(this._context, sql, true, undefined, this._connectionManager);
+            await runQueryRaw(this._context, sql, true, this._connectionManager, undefined);
 
             vscode.window.showInformationMessage(`Session ${sessionId} terminated successfully.`);
 
@@ -211,11 +214,11 @@ export class SessionMonitorView {
             ORDER BY CONNTIME DESC
         `;
         try {
-            const result = await runQuery(this._context, sql, true, undefined, this._connectionManager);
-            if (!result || result.startsWith('Query executed')) {
+            const result = await runQueryRaw(this._context, sql, true, this._connectionManager, undefined);
+            if (!result || !result.data) {
                 return [];
             }
-            return JSON.parse(result) as Session[];
+            return queryResultToRows<Session>(result);
         } catch (e) {
             console.error('Error fetching sessions:', e);
             return [];
@@ -235,11 +238,11 @@ export class SessionMonitorView {
             LIMIT 100
         `;
         try {
-            const result = await runQuery(this._context, sql, true, undefined, this._connectionManager);
-            if (!result || result.startsWith('Query executed')) {
+            const result = await runQueryRaw(this._context, sql, true, this._connectionManager, undefined);
+            if (!result || !result.data) {
                 return [];
             }
-            return JSON.parse(result) as QueryInfo[];
+            return queryResultToRows<QueryInfo>(result);
         } catch (e) {
             console.error('Error fetching queries:', e);
             return [];
@@ -259,11 +262,11 @@ export class SessionMonitorView {
             ORDER BY USED_MB DESC
         `;
         try {
-            const result = await runQuery(this._context, sql, true, undefined, this._connectionManager);
-            if (!result || result.startsWith('Query executed')) {
+            const result = await runQueryRaw(this._context, sql, true, this._connectionManager, undefined);
+            if (!result || !result.data) {
                 return [];
             }
-            return JSON.parse(result) as StorageInfo[];
+            return queryResultToRows<StorageInfo>(result);
         } catch (e) {
             console.error('Error fetching storage:', e);
             return [];
@@ -277,30 +280,30 @@ export class SessionMonitorView {
         let sysUtilSummary: unknown = null;
 
         try {
-            const graResult = await runQuery(
+            const graResult = await runQueryRaw(
                 this._context,
                 `SELECT * FROM _V_SCHED_GRA_EXT LIMIT 50`,
                 true,
-                undefined,
-                this._connectionManager
+                this._connectionManager,
+                undefined
             );
-            if (graResult && !graResult.startsWith('Query executed')) {
-                graData = JSON.parse(graResult);
+            if (graResult && graResult.data) {
+                graData = queryResultToRows<Record<string, unknown>>(graResult);
             }
         } catch (e) {
             console.warn('_V_SCHED_GRA_EXT not available:', e);
         }
 
         try {
-            const sysResult = await runQuery(
+            const sysResult = await runQueryRaw(
                 this._context,
                 `SELECT * FROM _V_SYSTEM_UTIL ORDER BY 1 DESC LIMIT 50`,
                 true,
-                undefined,
-                this._connectionManager
+                this._connectionManager,
+                undefined
             );
-            if (sysResult && !sysResult.startsWith('Query executed')) {
-                sysUtil = JSON.parse(sysResult);
+            if (sysResult && sysResult.data) {
+                sysUtil = queryResultToRows<Record<string, unknown>>(sysResult);
             }
         } catch (e) {
             console.warn('_V_SYSTEM_UTIL not available:', e);
@@ -308,7 +311,7 @@ export class SessionMonitorView {
 
         // Try to get summary/averages for system utilization
         try {
-            const summaryResult = await runQuery(
+            const summaryResult = await runQueryRaw(
                 this._context,
                 `SELECT 
                     ROUND(AVG(HOST_CPU) * 100, 1) AS AVG_HOST_CPU_PCT,
@@ -319,11 +322,11 @@ export class SessionMonitorView {
                     COUNT(*) AS SAMPLE_COUNT
                 FROM _V_SYSTEM_UTIL`,
                 true,
-                undefined,
-                this._connectionManager
+                this._connectionManager,
+                undefined
             );
-            if (summaryResult && !summaryResult.startsWith('Query executed')) {
-                const parsed = JSON.parse(summaryResult);
+            if (summaryResult && summaryResult.data) {
+                const parsed = queryResultToRows<Record<string, unknown>>(summaryResult);
                 sysUtilSummary = parsed.length > 0 ? parsed[0] : null;
             }
         } catch (e) {
@@ -331,6 +334,8 @@ export class SessionMonitorView {
         }
 
         return { gra: graData, systemUtil: sysUtil, sysUtilSummary };
+
+
     }
 
     private _update() {

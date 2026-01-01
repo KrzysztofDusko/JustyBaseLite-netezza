@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",

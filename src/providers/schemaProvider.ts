@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runQuery } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 import { ConnectionManager } from '../core/connectionManager';
 import { MetadataCache } from '../metadataCache';
 import { buildColumnMetadataQuery, parseColumnMetadata } from './tableMetadataProvider';
@@ -34,7 +34,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             console.log(`[SchemaProvider] Triggering connection prefetch for: ${connectionName}`);
             this.metadataCache.triggerConnectionPrefetch(connectionName, async query => {
                 try {
-                    return await runQuery(this.context, query, true, connectionName, this.connectionManager);
+                    return await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
                 } catch (e: unknown) {
                     console.error('[SchemaProvider] Prefetch query error:', e);
                     return undefined;
@@ -140,17 +140,17 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             }
 
             try {
-                const results = await runQuery(
+                const result = await runQueryRaw(
                     this.context,
                     'SELECT DATABASE FROM system.._v_database ORDER BY DATABASE',
                     true,
-                    element.connectionName,
-                    this.connectionManager
+                    this.connectionManager,
+                    element.connectionName
                 );
-                if (!results) {
+                if (!result) {
                     return [];
                 }
-                const databases = JSON.parse(results);
+                const databases = queryResultToRows<{ DATABASE: string }>(result);
 
                 // Update Cache
                 const cacheItems: DatabaseMetadata[] = databases.map((row: { DATABASE: string }) => ({
@@ -209,14 +209,14 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
 
             try {
                 const query = `SELECT DISTINCT OBJTYPE FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' ORDER BY OBJTYPE`;
-                const results = await runQuery(
+                const result = await runQueryRaw(
                     this.context,
                     query,
                     true,
-                    element.connectionName,
-                    this.connectionManager
+                    this.connectionManager,
+                    element.connectionName
                 );
-                const types = JSON.parse(results || '[]');
+                const types = result ? queryResultToRows<{ OBJTYPE: string }>(result) : [];
 
                 // Cache the type groups
                 if (element.connectionName && element.dbName) {
@@ -302,14 +302,14 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 } else {
                     query = `SELECT OBJNAME, SCHEMA, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' AND OBJTYPE = '${element.objType}' ORDER BY OBJNAME`;
                 }
-                const results = await runQuery(
+                const result = await runQueryRaw(
                     this.context,
                     query,
                     true,
-                    element.connectionName,
-                    this.connectionManager
+                    this.connectionManager,
+                    element.connectionName
                 );
-                const objects = JSON.parse(results || '[]');
+                const objects = result ? queryResultToRows<{ OBJNAME: string; SCHEMA?: string; OBJID?: number; DESCRIPTION?: string }>(result) : [];
 
                 // Write-back to cache to warm it up
                 // Group by Schema
@@ -337,7 +337,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         const fullKey = obj.SCHEMA
                             ? `${element.dbName}.${obj.SCHEMA}.${obj.OBJNAME}`
                             : `${element.dbName}..${obj.OBJNAME}`;
-                        entry.idMap.set(fullKey, obj.OBJID);
+                        if (obj.OBJID !== undefined) {
+                            entry.idMap.set(fullKey, obj.OBJID);
+                        }
                     }
                 }
 
@@ -405,12 +407,12 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 // Use centralized query builder from tableMetadataProvider
                 const query = buildColumnMetadataQuery(dbName, schemaName || '', tableName as string);
 
-                const results = await runQuery(
+                const results = await runQueryRaw(
                     this.context,
                     query,
                     true,
-                    element.connectionName,
-                    this.connectionManager
+                    this.connectionManager,
+                    element.connectionName
                 );
                 const parsedColumns = parseColumnMetadata(results);
 

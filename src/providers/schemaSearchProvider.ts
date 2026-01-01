@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runQuery } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 import { MetadataCache } from '../metadataCache';
 import { ConnectionManager } from '../core/connectionManager';
 import { searchInCode } from '../sql/sqlTextUtils';
@@ -132,10 +132,9 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 }
             }
 
-            // Trigger background prefetch for this connection
             if (!this.metadataCache.hasAllObjectsPrefetchTriggered(connectionName)) {
                 this.metadataCache.prefetchAllObjects(connectionName, async q =>
-                    runQuery(this.context, q, true, connectionName, this.connectionManager)
+                    runQueryRaw(this.context, q, true, this.connectionManager, connectionName)
                 );
             }
         }
@@ -186,28 +185,15 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         `;
 
         try {
-            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
+            const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
 
             if (searchId !== this.currentSearchId) {
                 statusBarDisposable.dispose();
                 return; // Old search, ignore
             }
 
-            if (resultJson) {
-                let results: unknown[] = [];
-                if (
-                    resultJson === 'Query executed successfully (no results).' ||
-                    resultJson.startsWith('Query executed successfully')
-                ) {
-                    results = [];
-                } else {
-                    // Start of Modification: explicit cast
-                    results = JSON.parse(resultJson) as unknown[];
-                    // SearchResultItem here refers to the final shape, but results from DB might be raw.
-                    // Actually the query returns columns matching SearchResultItem except connectionName.
-                    // So we can case to Partial<SearchResultItem> or similar.
-                    // But for now, unknown[] is safer than any[].
-                }
+            if (result && result.data && result.data.length > 0) {
+                const results = queryResultToRows<SearchResultItem & { [key: string]: unknown }>(result);
                 const mappedResults: SearchResultItem[] = [];
 
                 results.forEach((i) => {
@@ -288,29 +274,27 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             `;
 
             try {
-                const viewResultJson = await runQuery(
+                const viewResult = await runQueryRaw(
                     this.context,
                     viewQuery,
                     true,
-                    connectionName,
-                    this.connectionManager
+                    this.connectionManager,
+                    connectionName
                 );
-                if (viewResultJson && searchId === this.currentSearchId) {
-                    if (!viewResultJson.startsWith('Query executed successfully')) {
-                        const views = JSON.parse(viewResultJson);
-                        for (const view of views) {
-                            if (view.SOURCE && searchInCode(view.SOURCE, safeTerm)) {
-                                results.push({
-                                    NAME: view.NAME,
-                                    SCHEMA: view.SCHEMA,
-                                    DATABASE: view.DATABASE,
-                                    TYPE: 'VIEW',
-                                    PARENT: '',
-                                    DESCRIPTION: 'Found in view source (excluding comments/strings)',
-                                    MATCH_TYPE: 'SOURCE_CODE',
-                                    connectionName
-                                });
-                            }
+                if (viewResult && viewResult.data && searchId === this.currentSearchId) {
+                    const views = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(viewResult);
+                    for (const view of views) {
+                        if (view.SOURCE && searchInCode(view.SOURCE, safeTerm)) {
+                            results.push({
+                                NAME: view.NAME,
+                                SCHEMA: view.SCHEMA,
+                                DATABASE: view.DATABASE,
+                                TYPE: 'VIEW',
+                                PARENT: '',
+                                DESCRIPTION: 'Found in view source (excluding comments/strings)',
+                                MATCH_TYPE: 'SOURCE_CODE',
+                                connectionName
+                            });
                         }
                     }
                 }
@@ -325,29 +309,27 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             `;
 
             try {
-                const procResultJson = await runQuery(
+                const procResult = await runQueryRaw(
                     this.context,
                     procQuery,
                     true,
-                    connectionName,
-                    this.connectionManager
+                    this.connectionManager,
+                    connectionName
                 );
-                if (procResultJson && searchId === this.currentSearchId) {
-                    if (!procResultJson.startsWith('Query executed successfully')) {
-                        const procs = JSON.parse(procResultJson);
-                        for (const proc of procs) {
-                            if (proc.SOURCE && searchInCode(proc.SOURCE, safeTerm)) {
-                                results.push({
-                                    NAME: proc.NAME,
-                                    SCHEMA: proc.SCHEMA,
-                                    DATABASE: proc.DATABASE,
-                                    TYPE: 'PROCEDURE',
-                                    PARENT: '',
-                                    DESCRIPTION: 'Found in procedure source (excluding comments/strings)',
-                                    MATCH_TYPE: 'SOURCE_CODE',
-                                    connectionName
-                                });
-                            }
+                if (procResult && procResult.data && searchId === this.currentSearchId) {
+                    const procs = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(procResult);
+                    for (const proc of procs) {
+                        if (proc.SOURCE && searchInCode(proc.SOURCE, safeTerm)) {
+                            results.push({
+                                NAME: proc.NAME,
+                                SCHEMA: proc.SCHEMA,
+                                DATABASE: proc.DATABASE,
+                                TYPE: 'PROCEDURE',
+                                PARENT: '',
+                                DESCRIPTION: 'Found in procedure source (excluding comments/strings)',
+                                MATCH_TYPE: 'SOURCE_CODE',
+                                connectionName
+                            });
                         }
                     }
                 }

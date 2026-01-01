@@ -4,7 +4,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQuery } from '../../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../../core/queryRunner';
 import { SchemaItem } from '../../providers/schemaProvider';
 import { SchemaCommandsDependencies } from './types';
 
@@ -95,7 +95,7 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                     } else {
                         if (!metadataCache.hasConnectionPrefetchTriggered(targetConnectionName)) {
                             metadataCache.triggerConnectionPrefetch(targetConnectionName, async q =>
-                                runQuery(context, q, true, targetConnectionName, connectionManager)
+                                runQueryRaw(context, q, true, connectionManager, targetConnectionName)
                             );
                         }
                     }
@@ -128,23 +128,15 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                     `;
 
                     try {
-                        const objResults = await runQuery(
+                        const objResult = await runQueryRaw(
                             context,
                             query,
                             true,
-                            targetConnectionName,
-                            connectionManager
+                            connectionManager,
+                            targetConnectionName
                         );
-                        if (objResults) {
-                            let objects: { OBJNAME: string; OBJTYPE: string; SCHEMA: string; OBJID: number }[] = [];
-                            if (
-                                objResults === 'Query executed successfully (no results).' ||
-                                objResults.startsWith('Query executed successfully')
-                            ) {
-                                objects = [];
-                            } else {
-                                objects = JSON.parse(objResults);
-                            }
+                        if (objResult && objResult.data) {
+                            const objects = queryResultToRows<{ OBJNAME: string; OBJTYPE: string; SCHEMA: string; OBJID: number }>(objResult);
 
                             if (objects.length > 0) {
                                 const obj = objects[0];
@@ -152,15 +144,15 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                                 if (obj.OBJTYPE === 'PROCEDURE') {
                                     try {
                                         const sigQuery = `SELECT PROCEDURESIGNATURE FROM ${targetDb}.._V_PROCEDURE WHERE OBJID = ${obj.OBJID}`;
-                                        const sigRes = await runQuery(
+                                        const sigResult = await runQueryRaw(
                                             context,
                                             sigQuery,
                                             true,
-                                            targetConnectionName,
-                                            connectionManager
+                                            connectionManager,
+                                            targetConnectionName
                                         );
-                                        if (sigRes) {
-                                            const sigObj = JSON.parse(sigRes);
+                                        if (sigResult && sigResult.data && sigResult.data.length > 0) {
+                                            const sigObj = queryResultToRows<{ PROCEDURESIGNATURE: string }>(sigResult);
                                             if (sigObj.length > 0 && sigObj[0].PROCEDURESIGNATURE) {
                                                 obj.OBJNAME = sigObj[0].PROCEDURESIGNATURE;
                                             }
@@ -198,15 +190,15 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
 
                 // Fallback: search all databases
                 if (!targetDb) {
-                    const dbResults = await runQuery(
+                    const dbResultRaw = await runQueryRaw(
                         context,
                         'SELECT DATABASE FROM system.._v_database ORDER BY DATABASE',
                         true,
-                        targetConnectionName,
-                        connectionManager
+                        connectionManager,
+                        targetConnectionName
                     );
-                    if (dbResults) {
-                        const databases = JSON.parse(dbResults) as { DATABASE: string }[];
+                    if (dbResultRaw && dbResultRaw.data) {
+                        const databases = queryResultToRows<{ DATABASE: string }>(dbResultRaw);
                         for (const db of databases) {
                             const dbName = db.DATABASE;
                             try {
@@ -223,24 +215,15 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                                     LIMIT 1
                                 `;
 
-                                const objResults = await runQuery(
+                                const objResultRaw = await runQueryRaw(
                                     context,
                                     query,
                                     true,
-                                    targetConnectionName,
-                                    connectionManager
+                                    connectionManager,
+                                    targetConnectionName
                                 );
-                                if (objResults) {
-                                    let objects: { OBJNAME: string; OBJTYPE: string; SCHEMA: string; OBJID: number }[] =
-                                        [];
-                                    if (
-                                        objResults === 'Query executed successfully (no results).' ||
-                                        objResults.startsWith('Query executed successfully')
-                                    ) {
-                                        objects = [];
-                                    } else {
-                                        objects = JSON.parse(objResults);
-                                    }
+                                if (objResultRaw && objResultRaw.data) {
+                                    const objects = queryResultToRows<{ OBJNAME: string; OBJTYPE: string; SCHEMA: string; OBJID: number }>(objResultRaw);
 
                                     if (objects.length > 0) {
                                         const obj = objects[0];
@@ -248,15 +231,15 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                                         if (obj.OBJTYPE === 'PROCEDURE') {
                                             try {
                                                 const sigQuery = `SELECT PROCEDURESIGNATURE FROM ${dbName}.._V_PROCEDURE WHERE OBJID = ${obj.OBJID}`;
-                                                const sigRes = await runQuery(
+                                                const sigResult = await runQueryRaw(
                                                     context,
                                                     sigQuery,
                                                     true,
-                                                    targetConnectionName,
-                                                    connectionManager
+                                                    connectionManager,
+                                                    targetConnectionName
                                                 );
-                                                if (sigRes) {
-                                                    const sigObj = JSON.parse(sigRes);
+                                                if (sigResult && sigResult.data && sigResult.data.length > 0) {
+                                                    const sigObj = queryResultToRows<{ PROCEDURESIGNATURE: string }>(sigResult);
                                                     if (sigObj.length > 0 && sigObj[0].PROCEDURESIGNATURE) {
                                                         obj.OBJNAME = sigObj[0].PROCEDURESIGNATURE;
                                                     }

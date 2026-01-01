@@ -4,7 +4,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQuery } from '../../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../../core/queryRunner';
 import { SchemaCommandsDependencies, SchemaItemData } from './types';
 import { requireConnection, executeWithProgress } from './helpers';
 
@@ -32,14 +32,14 @@ export function registerViewCommands(deps: SchemaCommandsDependencies): vscode.D
                 }
 
                 const schemaQuery = `SELECT DISTINCT SCHEMA FROM ${database}.._V_TABLE ORDER BY SCHEMA`;
-                const schemasJson = await runQuery(context, schemaQuery, true, connectionName, connectionManager);
+                const schemaResult = await runQueryRaw(context, schemaQuery, true, connectionManager, connectionName);
 
-                if (!schemasJson) {
+                if (!schemaResult || !schemaResult.data) {
                     vscode.window.showErrorMessage('Could not retrieve schemas');
                     return;
                 }
 
-                const schemas = JSON.parse(schemasJson);
+                const schemas = queryResultToRows<{ SCHEMA: string }>(schemaResult);
                 if (schemas.length === 0) {
                     vscode.window.showWarningMessage('No tables found in this database');
                     return;

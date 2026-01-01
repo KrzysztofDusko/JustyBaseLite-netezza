@@ -201,3 +201,25 @@ button.primary:hover {
     font-size: 48px;
     margin-bottom: 16px;
 }
+
+.loading-indicator {
+    padding: 10px;
+    text-align: center;
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    border-top: 1px solid var(--vscode-panel-border);
+}
+
+.search-archive-prompt {
+    display: inline-flex;
+    margin-left: 8px;
+}
+
+/* Optimization for large lists */
+.history-item {
+    padding: 12px;
+    border-bottom: 1px solid var(--vscode-panel-border);
+    cursor: pointer;
+    content-visibility: auto; 
+    contain-intrinsic-size: 75px;
+}

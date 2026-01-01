@@ -9,8 +9,10 @@
 // @ts-ignore
 const vscode = acquireVsCodeApi();
 
-/** @type {Array<{id: string, query: string, host: string, database: string, schema: string, timestamp: string, is_favorite: boolean, tags?: string, description?: string}>} */
+/** @type {Array<{id: string, query: string, host: string, database: string, schema: string, timestamp: string, is_favorite: boolean, connectionName?: string, tags?: string, description?: string}>} */
 let allHistory = [];
+let isLoading = false;
+let isEndOfList = false;
 
 /**
  * Initialize the query history view
@@ -23,34 +25,44 @@ function init() {
 
 /**
  * Update the stats display
- * @param {{totalEntries: number, totalFileSizeMB: string}} stats
+ * @param {{totalEntries: number, totalFileSizeMB: string, activeEntries: number, archivedEntries: number}} stats
  */
 function updateStats(stats) {
     const statsEl = document.getElementById('stats');
     if (statsEl) {
-        statsEl.textContent = `${stats.totalEntries} entries · ${stats.totalFileSizeMB} MB`;
+        // Show active + archive info
+        let text = `${stats.activeEntries} active`;
+        if (stats.archivedEntries > 0) {
+            text += ` · ${stats.archivedEntries} archived`;
+        }
+        text += ` · ${stats.totalFileSizeMB} MB`;
+        statsEl.textContent = text;
     }
 }
 
 /**
  * Render the history list
  * @param {typeof allHistory} history
+ * @param {boolean} append
  */
-function renderHistory(history) {
+function renderHistory(history, append = false) {
     const container = document.getElementById('historyContainer');
     if (!container) return;
 
-    if (history.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <div class="empty-state-icon">📜</div>
-                <div>No query history found</div>
-            </div>
-        `;
-        return;
+    if (!append) {
+        container.innerHTML = '';
+        if (history.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">📜</div>
+                    <div>No query history found</div>
+                </div>
+            `;
+            return;
+        }
     }
 
-    container.innerHTML = history.map(entry => `
+    const html = history.map(entry => `
         <div class="history-item">
             <div class="history-item-header">
                 <div class="history-item-time">${formatTimestamp(entry.timestamp)}</div>
@@ -73,6 +85,13 @@ function renderHistory(history) {
             <div class="history-item-query" title="${escapeHtml(entry.query)}">${escapeHtml(entry.query)}</div>
         </div>
     `).join('');
+
+    if (append) {
+        container.insertAdjacentHTML('beforeend', html);
+    } else {
+        container.innerHTML = html;
+        container.scrollTop = 0; // Reset scroll on full new render
+    }
 }
 
 /**
@@ -91,16 +110,41 @@ function formatTimestamp(timestamp) {
  * @returns {string}
  */
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (!text) return '';
+    if (typeof text !== 'string') text = String(text);
+    return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
 }
 
 /**
  * Request history refresh
  */
 function refreshHistory() {
-    vscode.postMessage({ type: 'getHistory' });
+    vscode.postMessage({ type: 'refresh' });
+}
+
+function loadMore() {
+    if (isLoading || isEndOfList) return;
+    isLoading = true;
+    const indicator = document.getElementById('loadingIndicator');
+    if (indicator) indicator.style.display = 'block';
+    vscode.postMessage({ type: 'loadMore' });
+}
+
+function searchArchive() {
+    const searchInput = /** @type {HTMLInputElement} */ (document.getElementById('searchInput'));
+    const term = searchInput.value.trim();
+    if (!term) return;
+
+    // Clear current view to show we are searching archive
+    const container = document.getElementById('historyContainer');
+    if (container) container.innerHTML = '<div class="empty-state"><div>Searching Archive...</div></div>';
+
+    vscode.postMessage({ type: 'searchArchive', term: term });
 }
 
 /**
@@ -195,23 +239,52 @@ function attachEventListeners() {
     const container = document.getElementById('historyContainer');
     const searchInput = document.getElementById('searchInput');
 
-    // Search functionality
+    // Search functionality with Archive option
     if (searchInput) {
         searchInput.addEventListener('input', (e) => {
             const target = /** @type {HTMLInputElement} */ (e.target);
             const searchTerm = target.value.toLowerCase();
+
+            // If empty, reset
             if (!searchTerm) {
                 renderHistory(allHistory);
+                document.getElementById('searchArchiveBtn')?.remove();
                 return;
             }
 
+            // Local filter first
             const filtered = allHistory.filter(entry =>
                 entry.query.toLowerCase().includes(searchTerm) ||
                 entry.host.toLowerCase().includes(searchTerm) ||
-                entry.database.toLowerCase().includes(searchTerm) ||
-                entry.schema.toLowerCase().includes(searchTerm)
+                (entry.database && entry.database.toLowerCase().includes(searchTerm)) ||
+                (entry.schema && entry.schema.toLowerCase().includes(searchTerm))
             );
             renderHistory(filtered);
+
+            // Add "Search Archive" button check
+            let archiveBtn = document.getElementById('searchArchiveBtn');
+            if (!archiveBtn) {
+                archiveBtn = document.createElement('div');
+                archiveBtn.id = 'searchArchiveBtn';
+                archiveBtn.className = 'search-archive-prompt';
+                archiveBtn.innerHTML = `<button class="secondary">🔍 Search in Archive</button>`;
+                archiveBtn.onclick = () => searchArchive();
+
+                // insert after search input's container? Or just append to toolbar top
+                const toolbarTop = document.querySelector('.toolbar-top');
+                if (toolbarTop) toolbarTop.appendChild(archiveBtn);
+            }
+        });
+    }
+
+    // Infinite Scroll
+    if (container) {
+        container.addEventListener('scroll', () => {
+            const { scrollTop, scrollHeight, clientHeight } = container;
+            if (scrollTop + clientHeight >= scrollHeight - 50) {
+                // Near bottom
+                loadMore();
+            }
         });
     }
 
@@ -282,12 +355,45 @@ function attachEventListeners() {
 window.addEventListener('message', event => {
     const message = event.data;
     console.log('queryHistory webview: received message', message);
+
     switch (message.type) {
         case 'historyData':
-            allHistory = message.history;
+            isLoading = false;
+            document.getElementById('loadingIndicator').style.display = 'none';
             updateStats(message.stats);
-            renderHistory(allHistory);
+
+            if (message.reset) {
+                allHistory = message.history;
+                isEndOfList = false; // reset end flag
+                renderHistory(allHistory, false);
+            } else {
+                // Append
+                if (message.history && message.history.length > 0) {
+                    allHistory = [...allHistory, ...message.history];
+                    renderHistory(message.history, true); // Render only new items? No, renderHistory supports append.
+                } else {
+                    isEndOfList = true; // No more data
+                }
+            }
             break;
+
+        case 'archiveSearchResults':
+            isLoading = false;
+            allHistory = message.history; // Replace current view with archive results
+            updateStats(message.stats);
+            renderHistory(allHistory, false);
+            break;
+
+        case 'entryDeleted':
+            const id = message.id;
+            allHistory = allHistory.filter(e => e.id !== id);
+            renderHistory(allHistory, false);
+            break;
+
+        case 'updateStats':
+            updateStats(message.stats);
+            break;
+
         case 'debug':
             console.log('queryHistory debug:', message.msg, message);
             break;

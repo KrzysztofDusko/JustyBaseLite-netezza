@@ -4,7 +4,7 @@
  * and parallel/sequential execution based on connections
  */
 
-import * as vscode from 'vscode';
+
 import {
     EtlProject,
     EtlNode,
@@ -12,40 +12,35 @@ import {
     EtlNodeExecutionResult,
     EtlNodeStatus
 } from './etlTypes';
-import { ConnectionDetails } from '../types';
+import { ExecutionContext, ITaskExecutor, IExecutionEngine } from './interfaces';
+import { createSkippedResult } from './utils/resultFactory';
 
 /**
- * Execution context passed to task executors
+ * Re-export ExecutionContext for backward compatibility
  */
-export interface ExecutionContext {
-    extensionContext: vscode.ExtensionContext;
-    variables: Record<string, string>;
-    nodeOutputs: Map<string, unknown>;
-    connectionDetails: ConnectionDetails;
-    connectionManager?: import('./etlProjectManager').EtlProjectManager | unknown; // Optional connection manager
-    cancellationToken?: vscode.CancellationToken;
-    onProgress?: (message: string) => void;
-}
-
-/**
- * Base interface for task executors
- */
-export interface TaskExecutor {
-    execute(node: EtlNode, context: ExecutionContext): Promise<EtlNodeExecutionResult>;
-}
+export { ExecutionContext } from './interfaces';
+export type { ITaskExecutor as TaskExecutor } from './interfaces';
 
 /**
  * ETL Execution Engine
+ * Orchestrates the execution of ETL projects
  */
-export class EtlExecutionEngine {
+export class EtlExecutionEngine implements IExecutionEngine {
     private statusCallback?: (nodeId: string, status: EtlNodeStatus, message?: string) => void;
-    private executors: Map<string, TaskExecutor> = new Map();
+    private executors: Map<string, ITaskExecutor> = new Map();
 
     /**
      * Register a task executor for a node type
      */
-    registerExecutor(nodeType: string, executor: TaskExecutor): void {
+    registerExecutor(nodeType: string, executor: ITaskExecutor): void {
         this.executors.set(nodeType, executor);
+    }
+
+    /**
+     * Get registered executor for a node type
+     */
+    getExecutor(nodeType: string): ITaskExecutor | undefined {
+        return this.executors.get(nodeType);
     }
 
     /**
@@ -75,56 +70,19 @@ export class EtlExecutionEngine {
         }
 
         try {
-            // Build execution order (batches of nodes that can run in parallel)
-            const executionOrder = this.buildExecutionOrder(project);
-
             context.onProgress?.(`Starting ETL project: ${project.name}`);
-            context.onProgress?.(`Found ${project.nodes.length} tasks in ${executionOrder.length} execution batches`);
+            context.onProgress?.(`Found ${project.nodes.length} tasks`);
 
-            // Execute each batch
-            for (let batchIndex = 0; batchIndex < executionOrder.length; batchIndex++) {
-                const batch = executionOrder[batchIndex];
+            // Use dynamic execution based on connection types
+            await this.executeDynamic(project, context, result);
 
-                // Check for cancellation
-                if (context.cancellationToken?.isCancellationRequested) {
-                    result.status = 'cancelled';
-                    result.endTime = new Date();
-                    return result;
-                }
-
-                context.onProgress?.(`Executing batch ${batchIndex + 1}/${executionOrder.length} (${batch.length} tasks)`);
-
-                // Execute nodes in this batch in parallel
-                const batchResults = await Promise.all(
-                    batch.map(node => this.executeNode(node, context))
-                );
-
-                // Store results and check for errors
-                for (const nodeResult of batchResults) {
-                    result.nodeResults.set(nodeResult.nodeId, nodeResult);
-
-                    // Store output for downstream nodes
-                    if (nodeResult.output !== undefined) {
-                        context.nodeOutputs.set(nodeResult.nodeId, nodeResult.output);
-                    }
-
-                    // Stop if any node failed
-                    if (nodeResult.status === 'error') {
-                        context.onProgress?.(`Task ${nodeResult.nodeId} failed: ${nodeResult.error}`);
-                        result.status = 'failed';
-                        result.endTime = new Date();
-
-                        // Mark remaining nodes as skipped
-                        this.markRemainingAsSkipped(project, result, batchIndex, executionOrder);
-
-                        return result;
-                    }
-                }
-            }
-
-            result.status = 'completed';
+            // Determine final status
+            const hasErrors = Array.from(result.nodeResults.values()).some(r => r.status === 'error');
+            result.status = hasErrors ? 'failed' : 'completed';
             result.endTime = new Date();
-            context.onProgress?.(`ETL project completed successfully`);
+
+            const statusMsg = result.status === 'completed' ? 'completed successfully' : 'completed with errors';
+            context.onProgress?.(`ETL project ${statusMsg}`);
 
         } catch (error) {
             result.status = 'failed';
@@ -136,67 +94,108 @@ export class EtlExecutionEngine {
     }
 
     /**
-     * Build execution order using topological sort with batching
-     * Nodes in the same batch have no dependencies on each other
-     * and can be executed in parallel
+     * Execute nodes dynamically based on connection types and results
      */
-    private buildExecutionOrder(project: EtlProject): EtlNode[][] {
-        // Build adjacency list and in-degree map
-        const graph = new Map<string, string[]>();
-        const inDegree = new Map<string, number>();
+    private async executeDynamic(
+        project: EtlProject,
+        context: ExecutionContext,
+        result: EtlExecutionResult
+    ): Promise<void> {
+        const executed = new Set<string>();
+        const toExecute: string[] = [];
 
-        // Initialize all nodes
+        // Find nodes with no incoming connections (start nodes)
+        const hasIncoming = new Set(project.connections.map(c => c.to));
         for (const node of project.nodes) {
-            graph.set(node.id, []);
-            inDegree.set(node.id, 0);
-        }
-
-        // Build graph from connections
-        for (const conn of project.connections) {
-            const neighbors = graph.get(conn.from);
-            if (neighbors) {
-                neighbors.push(conn.to);
+            if (!hasIncoming.has(node.id)) {
+                toExecute.push(node.id);
             }
-            inDegree.set(conn.to, (inDegree.get(conn.to) || 0) + 1);
         }
 
-        // Kahn's algorithm for topological sort with batching
-        const batches: EtlNode[][] = [];
-        const nodeMap = new Map(project.nodes.map(n => [n.id, n]));
-        const processedNodes = new Set<string>();
+        // Execute nodes in order, following connections based on results
+        while (toExecute.length > 0) {
+            // Check for cancellation
+            if (context.cancellationToken?.isCancellationRequested) {
+                result.status = 'cancelled';
+                result.endTime = new Date();
 
-        while (processedNodes.size < project.nodes.length) {
-            // Find all nodes with in-degree 0 that haven't been processed
-            const batch: EtlNode[] = [];
+                // Mark remaining as skipped
+                for (const node of project.nodes) {
+                    if (!executed.has(node.id)) {
+                        result.nodeResults.set(node.id, createSkippedResult(node.id));
+                        this.statusCallback?.(node.id, 'skipped');
+                    }
+                }
+                return;
+            }
 
-            for (const [nodeId, degree] of inDegree) {
-                if (degree === 0 && !processedNodes.has(nodeId)) {
-                    const node = nodeMap.get(nodeId);
-                    if (node) {
-                        batch.push(node);
+            const nodeId = toExecute.shift()!;
+
+            // Skip if already executed
+            if (executed.has(nodeId)) {
+                continue;
+            }
+
+            const node = project.nodes.find(n => n.id === nodeId);
+            if (!node) {
+                continue;
+            }
+
+            // Execute the node
+            const nodeResult = await this.executeNode(node, context);
+            result.nodeResults.set(nodeId, nodeResult);
+            executed.add(nodeId);
+
+            // Store output for downstream nodes
+            if (nodeResult.output !== undefined) {
+                context.nodeOutputs.set(nodeId, nodeResult.output);
+            }
+
+            // Find outgoing connections
+            const outgoingConnections = project.connections.filter(c => c.from === nodeId);
+
+            // Determine which connections to follow based on result
+            for (const conn of outgoingConnections) {
+                const connType = conn.connectionType || 'success';
+                const shouldFollow =
+                    (nodeResult.status === 'success' && connType === 'success') ||
+                    (nodeResult.status === 'error' && connType === 'failure');
+
+                if (shouldFollow) {
+                    // Add to execution queue if not already there
+                    if (!executed.has(conn.to) && !toExecute.includes(conn.to)) {
+                        toExecute.push(conn.to);
+                    }
+                } else {
+                    // Mark skipped nodes connected via wrong connection type
+                    if (!executed.has(conn.to)) {
+                        // Check if this node should still be executed via other paths
+                        const hasOtherValidPaths = project.connections.some(c => {
+                            if (c.to !== conn.to || c.id === conn.id) return false;
+                            const sourceResult = result.nodeResults.get(c.from);
+                            if (!sourceResult) return true; // Not yet executed
+                            const cType = c.connectionType || 'success';
+                            return (sourceResult.status === 'success' && cType === 'success') ||
+                                (sourceResult.status === 'error' && cType === 'failure');
+                        });
+
+                        if (!hasOtherValidPaths && !toExecute.includes(conn.to)) {
+                            result.nodeResults.set(conn.to, createSkippedResult(conn.to));
+                            this.statusCallback?.(conn.to, 'skipped');
+                            executed.add(conn.to);
+                        }
                     }
                 }
             }
-
-            if (batch.length === 0) {
-                // This shouldn't happen if we validated for cycles
-                throw new Error('Cycle detected in ETL project');
-            }
-
-            batches.push(batch);
-
-            // Mark batch nodes as processed and update in-degrees
-            for (const node of batch) {
-                processedNodes.add(node.id);
-
-                // Decrease in-degree of neighbors
-                for (const neighbor of graph.get(node.id) || []) {
-                    inDegree.set(neighbor, (inDegree.get(neighbor) || 1) - 1);
-                }
-            }
         }
 
-        return batches;
+        // Mark any remaining nodes as skipped (disconnected nodes or unreachable)
+        for (const node of project.nodes) {
+            if (!executed.has(node.id)) {
+                result.nodeResults.set(node.id, createSkippedResult(node.id));
+                this.statusCallback?.(node.id, 'skipped');
+            }
+        }
     }
 
     /**
@@ -248,47 +247,9 @@ export class EtlExecutionEngine {
     }
 
     /**
-     * Mark remaining unprocessed nodes as skipped
-     */
-    private markRemainingAsSkipped(
-        _project: EtlProject,
-        result: EtlExecutionResult,
-        currentBatchIndex: number,
-        executionOrder: EtlNode[][]
-    ): void {
-        // Mark remaining nodes in current batch as skipped
-        const currentBatch = executionOrder[currentBatchIndex];
-        for (const node of currentBatch) {
-            if (!result.nodeResults.has(node.id)) {
-                result.nodeResults.set(node.id, {
-                    nodeId: node.id,
-                    status: 'skipped',
-                    startTime: new Date(),
-                    endTime: new Date()
-                });
-                this.statusCallback?.(node.id, 'skipped');
-            }
-        }
-
-        // Mark all nodes in remaining batches as skipped
-        for (let i = currentBatchIndex + 1; i < executionOrder.length; i++) {
-            for (const node of executionOrder[i]) {
-                result.nodeResults.set(node.id, {
-                    nodeId: node.id,
-                    status: 'skipped',
-                    startTime: new Date(),
-                    endTime: new Date()
-                });
-                this.statusCallback?.(node.id, 'skipped');
-            }
-        }
-    }
-
-    /**
      * Get previous node output (for nodes that depend on results)
      */
     getPreviousNodeOutput(context: ExecutionContext, nodeId: string): unknown {
-        // Find the incoming connections and get the first one with output
         return context.nodeOutputs.get(nodeId);
     }
 }

@@ -4,7 +4,10 @@
  */
 
 // ETL Node Types
-export type EtlNodeType = 'sql' | 'python' | 'container' | 'export' | 'import';
+export type EtlNodeType = 'sql' | 'python' | 'container' | 'export' | 'import' | 'variable';
+
+// Connection Types
+export type ConnectionType = 'success' | 'failure';
 
 // Position in the canvas
 export interface Position {
@@ -68,18 +71,38 @@ export interface ImportNodeConfig {
     timeout?: number;
 }
 
+// Variable Source Types
+export type VariableSource = 'prompt' | 'static' | 'sql';
+
+// Variable Node Configuration
+export interface VariableNodeConfig {
+    type: 'variable';
+    variableName: string;       // Variable name (without ${})
+    source: VariableSource;     // How to get the value
+    // For source='prompt'
+    promptMessage?: string;     // Message to show user
+    defaultValue?: string;      // Default value for prompt
+    // For source='static'
+    value?: string;             // Static value to set
+    // For source='sql'
+    query?: string;             // SQL query returning single value
+    timeout?: number;
+}
+
 export type EtlNodeConfig =
     | SqlNodeConfig
     | PythonNodeConfig
     | ContainerNodeConfig
     | ExportNodeConfig
-    | ImportNodeConfig;
+    | ImportNodeConfig
+    | VariableNodeConfig;
 
 // ETL Connection (Arrow)
 export interface EtlConnection {
     id: string;
     from: string;  // Source node ID
     to: string;    // Target node ID
+    connectionType?: ConnectionType;  // 'success' (default) or 'failure' for error handling
     label?: string;
     condition?: string;  // Optional condition expression
 }
@@ -128,6 +151,8 @@ export function getDefaultConfig(type: EtlNodeType): EtlNodeConfig {
             return { type: 'export', format: 'csv', outputPath: '' };
         case 'import':
             return { type: 'import', format: 'csv', inputPath: '', targetTable: '' };
+        case 'variable':
+            return { type: 'variable', variableName: '', source: 'prompt', promptMessage: 'Enter value' };
     }
 }
 

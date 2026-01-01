@@ -415,6 +415,54 @@ export async function runQuery(
 }
 
 /**
+ * Convert QueryResult (columns[] + data[][]) to array of typed objects.
+ * This avoids JSON serialization/deserialization overhead.
+ */
+export function queryResultToRows<T extends Record<string, unknown>>(result: QueryResult): T[] {
+    if (!result.columns || !result.data || result.data.length === 0) {
+        return [];
+    }
+
+    return result.data.map(row => {
+        const obj: Record<string, unknown> = {};
+        result.columns.forEach((col, index) => {
+            let value = row[index];
+            // Handle BigInt like JSON.stringify does
+            if (typeof value === 'bigint') {
+                if (value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER) {
+                    value = Number(value);
+                } else {
+                    value = value.toString();
+                }
+            }
+            obj[col.name] = value;
+        });
+        return obj as T;
+    });
+}
+
+/**
+ * Parse JSON result from runQuery() safely.
+ * Handles empty results and "Query executed successfully" messages.
+ * This is a transitional helper for legacy code using runQuery + JSON.parse.
+ * New code should use runQueryRaw + queryResultToRows instead.
+ */
+export function parseQueryJsonResult<T>(resultJson: string | undefined): T[] {
+    if (!resultJson) {
+        return [];
+    }
+    if (resultJson.startsWith('Query executed successfully') ||
+        resultJson === 'Query executed successfully (no results).') {
+        return [];
+    }
+    try {
+        return JSON.parse(resultJson) as T[];
+    } catch {
+        return [];
+    }
+}
+
+/**
  * Run EXPLAIN query and capture NOTICE messages as the result.
  * Netezza returns EXPLAIN output via NOTICE messages, not as regular query results.
  */

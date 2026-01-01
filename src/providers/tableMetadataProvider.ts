@@ -1,8 +1,4 @@
-/**
- * Table Metadata Provider
- * Centralized module for fetching table and column metadata from Netezza system views.
- * Replaces duplicated SQL queries across editDataProvider, schemaProvider, etc.
- */
+import { QueryResult, queryResultToRows } from '../core/queryRunner';
 
 /**
  * Column metadata structure
@@ -36,6 +32,7 @@ export interface RawColumnRow {
     DESCRIPTION: string;
     IS_PK: number | string;
     IS_FK: number | string;
+    [key: string]: unknown;
 }
 
 /**
@@ -112,15 +109,14 @@ export function parseColumnRow(row: RawColumnRow): ColumnMetadata {
 /**
  * Parse table comment from query result
  */
-export function parseTableComment(resultJson: string | undefined): string | null {
-    if (!resultJson) return null;
-    try {
-        const rows = JSON.parse(resultJson);
-        if (rows.length > 0 && rows[0].DESCRIPTION) {
-            return rows[0].DESCRIPTION;
-        }
-    } catch {
-        // Ignore parse errors
+/**
+ * Parse table comment from query result
+ */
+export function parseTableComment(result: QueryResult | undefined): string | null {
+    if (!result) return null;
+    const rows = queryResultToRows<{ DESCRIPTION: string }>(result);
+    if (rows.length > 0 && rows[0].DESCRIPTION) {
+        return rows[0].DESCRIPTION;
     }
     return null;
 }
@@ -128,10 +124,13 @@ export function parseTableComment(resultJson: string | undefined): string | null
 /**
  * Parse column metadata from query result
  */
-export function parseColumnMetadata(resultJson: string | undefined): ColumnMetadata[] {
-    if (!resultJson) return [];
+/**
+ * Parse column metadata from query result
+ */
+export function parseColumnMetadata(result: QueryResult | undefined): ColumnMetadata[] {
+    if (!result) return [];
     try {
-        const rows: RawColumnRow[] = JSON.parse(resultJson);
+        const rows = queryResultToRows<RawColumnRow>(result);
         return rows.map(parseColumnRow);
     } catch (e) {
         console.error('[TableMetadataProvider] Error parsing column metadata:', e);
@@ -149,7 +148,7 @@ export function parseColumnMetadata(resultJson: string | undefined): ColumnMetad
  * @returns TableMetadata object with normalized data
  */
 export async function getTableMetadata(
-    runQueryFn: (query: string) => Promise<string | undefined>,
+    runQueryFn: (query: string) => Promise<QueryResult | undefined>,
     database: string,
     schema: string,
     tableName: string

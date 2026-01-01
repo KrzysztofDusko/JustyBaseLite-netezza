@@ -4,7 +4,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQuery } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 import { ConnectionManager } from '../core/connectionManager';
 
 /**
@@ -87,13 +87,25 @@ export async function getForeignKeysForSchema(
     const relationships = new Map<string, RelationshipEdge>();
 
     try {
-        const resultJson = await runQuery(context, sql, true, connectionName, connectionManager);
+        const resultRaw = await runQueryRaw(context, sql, true, connectionManager, connectionName);
 
-        if (!resultJson) {
+        if (!resultRaw || !resultRaw.data) {
             return [];
         }
 
-        const rows = JSON.parse(resultJson);
+        const rows = queryResultToRows<{
+            CONSTRAINTNAME: string;
+            SCHEMA: string;
+            FROM_TABLE: string;
+            FROM_COLUMN: string;
+            PKDATABASE: string;
+            PKSCHEMA: string;
+            TO_TABLE: string;
+            TO_COLUMN: string;
+            UPDT_TYPE: string;
+            DEL_TYPE: string;
+            CONSEQ: number;
+        } & { [key: string]: unknown }>(resultRaw);
 
         for (const row of rows) {
             const constraintName = row.CONSTRAINTNAME;
@@ -176,9 +188,9 @@ export async function getTablesInSchema(
 
     try {
         // Get tables
-        const tablesJson = await runQuery(context, tablesSql, true, connectionName, connectionManager);
-        if (tablesJson) {
-            const tablesRows = JSON.parse(tablesJson);
+        const tablesResult = await runQueryRaw(context, tablesSql, true, connectionManager, connectionName);
+        if (tablesResult && tablesResult.data) {
+            const tablesRows = queryResultToRows<{ TABLENAME: string; OWNER: string } & { [key: string]: unknown }>(tablesResult);
             for (const row of tablesRows) {
                 const tableName = row.TABLENAME;
                 tables.set(tableName, {
@@ -193,9 +205,9 @@ export async function getTablesInSchema(
         }
 
         // Get columns
-        const columnsJson = await runQuery(context, columnsSql, true, connectionName, connectionManager);
-        if (columnsJson) {
-            const columnsRows = JSON.parse(columnsJson);
+        const columnsResult = await runQueryRaw(context, columnsSql, true, connectionManager, connectionName);
+        if (columnsResult && columnsResult.data) {
+            const columnsRows = queryResultToRows<{ TABLENAME: string; ATTNAME: string; FORMAT_TYPE: string } & { [key: string]: unknown }>(columnsResult);
             for (const row of columnsRows) {
                 const table = tables.get(row.TABLENAME);
                 if (table) {
@@ -210,9 +222,9 @@ export async function getTablesInSchema(
         }
 
         // Get primary keys
-        const pkJson = await runQuery(context, pkSql, true, connectionName, connectionManager);
-        if (pkJson) {
-            const pkRows = JSON.parse(pkJson);
+        const pkResult = await runQueryRaw(context, pkSql, true, connectionManager, connectionName);
+        if (pkResult && pkResult.data) {
+            const pkRows = queryResultToRows<{ RELATION: string; ATTNAME: string } & { [key: string]: unknown }>(pkResult);
             for (const row of pkRows) {
                 const table = tables.get(row.RELATION);
                 if (table) {

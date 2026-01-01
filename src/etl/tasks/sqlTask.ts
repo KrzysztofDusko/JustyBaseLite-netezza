@@ -4,113 +4,139 @@
  */
 
 import { EtlNode, EtlNodeExecutionResult, SqlNodeConfig } from '../etlTypes';
-import { ExecutionContext, TaskExecutor } from '../etlExecutionEngine';
-import { NzConnection, NzDataReader } from '../../types';
+import { ExecutionContext, IConnectionFactory, IVariableResolver } from '../interfaces';
+import { BaseTaskExecutor } from './baseTaskExecutor';
+import { NzConnection, NzDataReader, ConnectionDetails } from '../../types';
 
-export class SqlTaskExecutor implements TaskExecutor {
+/**
+ * Default connection factory using the driver
+ */
+class DefaultConnectionFactory implements IConnectionFactory {
+    async createConnection(details: ConnectionDetails): Promise<NzConnection> {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const NzConnectionClass = require('../../../libs/driver/src/NzConnection');
+        const connection = new NzConnectionClass({
+            host: details.host,
+            port: details.port || 5480,
+            database: details.database,
+            user: details.user,
+            password: details.password
+        }) as NzConnection;
+
+        await connection.connect();
+        return connection;
+    }
+}
+
+/**
+ * SQL query execution result data
+ */
+interface SqlQueryResult {
+    columns: string[];
+    rows: unknown[][];
+}
+
+/**
+ * SQL Task Executor
+ * Executes SQL queries and returns results
+ */
+export class SqlTaskExecutor extends BaseTaskExecutor<SqlNodeConfig> {
+    private connectionFactory: IConnectionFactory;
+
+    constructor(
+        variableResolver?: IVariableResolver,
+        connectionFactory?: IConnectionFactory
+    ) {
+        super(variableResolver);
+        this.connectionFactory = connectionFactory || new DefaultConnectionFactory();
+    }
+
     async execute(
         node: EtlNode,
         context: ExecutionContext
     ): Promise<EtlNodeExecutionResult> {
-        const config = node.config as SqlNodeConfig;
+        const config = this.getConfig(node);
         const startTime = new Date();
 
-        if (!config.query || config.query.trim() === '') {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: 'SQL query is empty'
-            };
+        // Validate query
+        const queryError = this.validateRequired(node.id, startTime, config.query?.trim(), 'SQL query');
+        if (queryError) {
+            return queryError;
         }
 
-        let connection: NzConnection | null = null;
-
-        try {
+        return this.safeExecute(node.id, startTime, async () => {
             // Resolve variables in the query
-            let query = config.query;
-            for (const [key, value] of Object.entries(context.variables)) {
-                query = query.replace(new RegExp(`\\$\\{${key}\\}`, 'g'), value);
+            const query = this.resolveVariables(config.query, context);
+
+            this.reportProgress(context, `Executing SQL: ${query.substring(0, 100)}${query.length > 100 ? '...' : ''}`);
+
+            // Validate connection details
+            if (!context.connectionDetails) {
+                return this.createError(node.id, startTime, 'No connection details available in context');
             }
 
-            context.onProgress?.(`Executing SQL: ${query.substring(0, 100)}${query.length > 100 ? '...' : ''}`);
+            let connection: NzConnection | null = null;
+            try {
+                // Create connection using factory
+                connection = await this.connectionFactory.createConnection(context.connectionDetails);
 
-            // Use connection details from context
-            const connDetails = context.connectionDetails;
-            if (!connDetails) {
-                throw new Error('No connection details available in context');
-            }
+                // Execute the query
+                const result = await this.executeQuery(connection, query, config.timeout);
 
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const NzConnectionClass = require('../../../libs/driver/src/NzConnection');
-            connection = new NzConnectionClass({
-                host: connDetails.host,
-                port: connDetails.port || 5480,
-                database: connDetails.database,
-                user: connDetails.user,
-                password: connDetails.password
-            }) as NzConnection;
-
-            await connection.connect();
-
-            // Execute the query
-            const cmd = connection.createCommand(query);
-
-            if (config.timeout) {
-                cmd.commandTimeout = config.timeout;
-            }
-
-            const reader: NzDataReader = await cmd.executeReader();
-
-            // Collect results
-            const columns: string[] = [];
-            for (let i = 0; i < reader.fieldCount; i++) {
-                columns.push(reader.getName(i));
-            }
-
-            const rows: unknown[][] = [];
-            let rowCount = 0;
-
-            while (await reader.read()) {
-                const row: unknown[] = [];
-                for (let i = 0; i < reader.fieldCount; i++) {
-                    row.push(reader.getValue(i));
-                }
-                rows.push(row);
-                rowCount++;
-            }
-
-            // Close reader
-            if (reader.close) {
-                await reader.close();
-            }
-
-            return {
-                nodeId: node.id,
-                status: 'success',
-                startTime,
-                endTime: new Date(),
-                rowsAffected: rowCount,
-                output: { columns, rows }
-            };
-
-        } catch (error) {
-            return {
-                nodeId: node.id,
-                status: 'error',
-                startTime,
-                endTime: new Date(),
-                error: String(error)
-            };
-        } finally {
-            if (connection) {
-                try {
-                    await connection.close();
-                } catch {
-                    // Ignore close errors
+                return this.createSuccess(node.id, startTime, {
+                    rowsAffected: result.rows.length,
+                    output: result
+                });
+            } finally {
+                // Always close connection
+                if (connection) {
+                    try {
+                        await connection.close();
+                    } catch {
+                        // Ignore close errors
+                    }
                 }
             }
+        });
+    }
+
+    /**
+     * Execute query and collect results
+     */
+    private async executeQuery(
+        connection: NzConnection,
+        query: string,
+        timeout?: number
+    ): Promise<SqlQueryResult> {
+        const cmd = connection.createCommand(query);
+
+        if (timeout) {
+            cmd.commandTimeout = timeout;
         }
+
+        const reader: NzDataReader = await cmd.executeReader();
+
+        // Collect column names
+        const columns: string[] = [];
+        for (let i = 0; i < reader.fieldCount; i++) {
+            columns.push(reader.getName(i));
+        }
+
+        // Collect rows
+        const rows: unknown[][] = [];
+        while (await reader.read()) {
+            const row: unknown[] = [];
+            for (let i = 0; i < reader.fieldCount; i++) {
+                row.push(reader.getValue(i));
+            }
+            rows.push(row);
+        }
+
+        // Close reader
+        if (reader.close) {
+            await reader.close();
+        }
+
+        return { columns, rows };
     }
 }

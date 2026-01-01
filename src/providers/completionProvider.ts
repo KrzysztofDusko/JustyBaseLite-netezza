@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runQuery } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 import { MetadataCache } from '../metadataCache';
 import { ConnectionManager } from '../core/connectionManager';
 import { DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from '../metadata/types';
@@ -40,7 +40,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         // Trigger background prefetch for this connection if not already done
         if (connectionName && !this.metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
             this.metadataCache.triggerConnectionPrefetch(connectionName, q =>
-                runQuery(this.context, q, true, connectionName!, this.connectionManager)
+                runQueryRaw(this.context, q, true, this.connectionManager, connectionName!)
             );
         }
 
@@ -430,10 +430,10 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
 
         try {
             const query = 'SELECT DATABASE FROM system.._v_database ORDER BY DATABASE';
-            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
-            if (!resultJson) return [];
+            const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
+            if (!result) return [];
 
-            const results = JSON.parse(resultJson) as { DATABASE: string }[];
+            const results = queryResultToRows<{ DATABASE: string }>(result);
             const items: DatabaseMetadata[] = results.map(row => ({
                 DATABASE: row.DATABASE,
                 label: row.DATABASE,
@@ -471,12 +471,12 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const statusBarDisposable = vscode.window.setStatusBarMessage(`Fetching schemas for ${dbName}...`);
         try {
             const query = `SELECT SCHEMA FROM ${dbName}.._V_SCHEMA ORDER BY SCHEMA`;
-            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
-            if (!resultJson) {
+            const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
+            if (!result) {
                 return [];
             }
 
-            const results = JSON.parse(resultJson) as { SCHEMA: string | null }[];
+            const results = queryResultToRows<{ SCHEMA: string | null }>(result);
             const items: SchemaMetadata[] = results
                 .filter(row => row.SCHEMA != null && row.SCHEMA !== '')
                 .map(row => {
@@ -546,10 +546,10 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 query = `SELECT OBJNAME, OBJID, SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
             }
 
-            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
-            if (!resultJson) return [];
+            const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
+            if (!result) return [];
 
-            const results = JSON.parse(resultJson) as { OBJNAME: string; OBJID: number; SCHEMA?: string }[];
+            const results = queryResultToRows<{ OBJNAME: string; OBJID: number; SCHEMA?: string }>(result);
             const idMapForKey = new Map<string, number>();
 
             const items: TableMetadata[] = results.map(row => {
@@ -640,10 +640,10 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 `;
             }
 
-            const resultJson = await runQuery(this.context, query, true, connectionName, this.connectionManager);
-            if (!resultJson) return [];
+            const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
+            if (!result) return [];
 
-            const results = JSON.parse(resultJson) as { ATTNAME: string; FORMAT_TYPE: string }[];
+            const results = queryResultToRows<{ ATTNAME: string; FORMAT_TYPE: string }>(result);
 
             const items: ColumnMetadata[] = results.map(row => ({
                 ATTNAME: row.ATTNAME,
@@ -655,22 +655,22 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
 
             this.metadataCache.setColumns(connectionName, cacheKey, items);
 
-            // Trigger background prefetch of all other columns in same schema (non-blocking)
+            // Trigger background prefetch of all other columns in same schema (non-blocking, immediate)
             if (dbName) {
                 const context = this.context;
                 const cache = this.metadataCache;
-                setTimeout(async () => {
+                setImmediate(async () => {
                     try {
                         await cache.prefetchColumnsForSchema(
                             connectionName,
                             dbName,
                             schemaName,
-                            q => runQuery(context, q, true, connectionName!, this.connectionManager)
+                            q => runQueryRaw(context, q, true, this.connectionManager, connectionName!)
                         );
                     } catch (e: unknown) {
                         console.error('[SqlCompletion] Background column prefetch error:', e);
                     }
-                }, 100);
+                });
             }
 
             return items.map(item => {

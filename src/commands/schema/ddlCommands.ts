@@ -4,7 +4,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQuery } from '../../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../../core/queryRunner';
 import { SchemaCommandsDependencies, SchemaItemData } from './types';
 import { executeWithProgress } from './helpers';
 
@@ -127,9 +127,9 @@ export function registerDDLCommands(deps: SchemaCommandsDependencies): vscode.Di
                                 ? `SELECT DISTINCT SCHEMA, PROCEDURESIGNATURE AS OBJNAME FROM ${item.dbName}.._V_PROCEDURE WHERE DATABASE = '${item.dbName!.toUpperCase()}' ORDER BY SCHEMA, PROCEDURESIGNATURE`
                                 : `SELECT SCHEMA, OBJNAME FROM ${item.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${item.dbName!.toUpperCase()}' AND ${typeFilter} ORDER BY SCHEMA, OBJNAME`;
 
-                        const result = await runQuery(context, query, true, item.connectionName, connectionManager);
-                        if (result && !result.startsWith('Query executed successfully')) {
-                            const objects = JSON.parse(result);
+                        const result = await runQueryRaw(context, query, true, connectionManager, item.connectionName);
+                        if (result && result.data && result.data.length > 0) {
+                            const objects = queryResultToRows<{ OBJNAME: string; SCHEMA: string } & { [key: string]: unknown }>(result);
                             for (const obj of objects) {
                                 const objName = obj.OBJNAME;
                                 const objSchema = obj.SCHEMA;

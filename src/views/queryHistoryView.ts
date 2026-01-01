@@ -4,6 +4,8 @@ import { QueryHistoryManager } from '../core/queryHistoryManager';
 export class QueryHistoryView implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.queryHistory';
     private _view?: vscode.WebviewView;
+    private _currentOffset = 0;
+    private static readonly PAGE_SIZE = 50;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
@@ -25,13 +27,19 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
         // Send initial history to webview immediately (in case the webview load message is missed)
-        this.sendHistoryToWebview();
+        this.sendHistoryToWebview(true);
 
         // Handle messages from the webview
         webviewView.webview.onDidReceiveMessage(async data => {
             switch (data.type) {
                 case 'refresh':
                     this.refresh();
+                    break;
+                case 'loadMore':
+                    await this.loadMore();
+                    break;
+                case 'searchArchive':
+                    await this.searchArchive(data.term);
                     break;
                 case 'clearAll':
                     await this.clearAllHistory();
@@ -47,7 +55,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
                     await this.executeQuery(data.query);
                     break;
                 case 'getHistory':
-                    await this.sendHistoryToWebview();
+                    await this.sendHistoryToWebview(true);
                     break;
                 case 'toggleFavorite':
                     await this.toggleFavorite(data.id);
@@ -73,24 +81,50 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
 
     public refresh() {
         if (this._view) {
-            this.sendHistoryToWebview();
+            this.sendHistoryToWebview(true);
         }
     }
 
-    private async sendHistoryToWebview() {
+    private async loadMore() {
+        if (!this._view) return;
+        this._currentOffset += QueryHistoryView.PAGE_SIZE;
+        this.sendHistoryToWebview(false); // false = append
+    }
+
+    private async searchArchive(term: string) {
+        if (!this._view) return;
+
+        const historyManager = new QueryHistoryManager(this._context);
+        const results = await historyManager.searchArchive(term);
+        const stats = await historyManager.getStats();
+
+        this._view.webview.postMessage({
+            type: 'archiveSearchResults',
+            history: results,
+            stats: stats,
+            term: term
+        });
+    }
+
+    private async sendHistoryToWebview(reset: boolean = false) {
         if (!this._view) {
             return;
         }
 
+        if (reset) {
+            this._currentOffset = 0;
+        }
+
         const historyManager = new QueryHistoryManager(this._context);
-        const history = await historyManager.getHistory();
+        const history = await historyManager.getHistory(QueryHistoryView.PAGE_SIZE, this._currentOffset);
         const stats = await historyManager.getStats();
 
-        console.log('QueryHistoryView: sending history to webview, entries=', history.length);
+        console.log(`QueryHistoryView: sending history to webview, entries=${history.length}, offset=${this._currentOffset}, reset=${reset}`);
         this._view.webview.postMessage({
             type: 'historyData',
             history: history,
-            stats: stats
+            stats: stats,
+            reset: reset
         });
     }
 
@@ -120,7 +154,15 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         if (answer === 'Delete') {
             const historyManager = new QueryHistoryManager(this._context);
             await historyManager.deleteEntry(id);
-            this.refresh();
+            // Don't full refresh, just let UI remove it or refresh current view?
+            // Simple refresh for now.
+            this._view?.webview.postMessage({
+                type: 'entryDeleted',
+                id: id
+            });
+            // Update stats
+            const stats = await historyManager.getStats();
+            this._view?.webview.postMessage({ type: 'updateStats', stats: stats });
         }
     }
 
@@ -131,14 +173,14 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             language: 'sql'
         });
         await vscode.window.showTextDocument(doc);
-
-        // Optionally execute it immediately
-        // vscode.commands.executeCommand('netezza.runQuery');
     }
 
     private async toggleFavorite(id: string) {
         const historyManager = new QueryHistoryManager(this._context);
         await historyManager.toggleFavorite(id);
+        // We could refresh, but better to just update UI state locally in webview if possible.
+        // For now, let's keep it consistent by refreshing visible data? 
+        // Or specific message 'entryUpdated'.
         this.refresh();
     }
 
@@ -151,11 +193,25 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
 
     private async requestEdit(id: string) {
         const historyManager = new QueryHistoryManager(this._context);
-        const history = await historyManager.getHistory();
-        const entry = history.find(e => e.id === id);
+        const history = await historyManager.getHistory(); // Note: this gets only active page 0 if we changed it? 
+        // Wait, getHistory now has limit. calling without limit gives ALL active.
+        // We will assume the user clicks on an entry that IS loaded in UI.
+        // Finding it in backend might need full search if we only fetched partial?
+        // Actually getHistory() without args returns cache which is ALL Active. 
+        // So this is safe for Active items.
+        // Archive items? They might not be in cache. 
+        // But let's assume one step at a time.
+
+        let entry = history.find(e => e.id === id);
+
+        // If not found (maybe archived?), try searchArchive via manager is too slow...
+        // For now, edit works on Active.
 
         if (!entry) {
-            vscode.window.showErrorMessage('Entry not found');
+            // Try to see if it was passed in the UI data? The UI has the data.
+            // But we need current state.
+            // Simplification: Edit only works for active history for now.
+            vscode.window.showErrorMessage('Entry not found (might be archived)');
             return;
         }
 
@@ -213,7 +269,8 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             type: 'historyData',
             history: favorites,
             stats: stats,
-            filter: 'favorites'
+            filter: 'favorites',
+            reset: true // Favorites are usually few, assume full list fits or scrollable enough
         });
     }
 
@@ -230,7 +287,8 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             type: 'historyData',
             history: entries,
             stats: stats,
-            filter: `tag: ${tag}`
+            filter: `tag: ${tag}`,
+            reset: true
         });
     }
 
@@ -267,6 +325,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             <div>No query history yet</div>
         </div>
     </div>
+    <div id="loadingIndicator" class="loading-indicator" style="display:none;">Loading more...</div>
 
     <script src="${scriptUri}"></script>
 </body>

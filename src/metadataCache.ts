@@ -12,7 +12,7 @@
 import * as vscode from 'vscode';
 import { CacheStorage } from './metadata/cacheStorage';
 import { CachePersistence } from './metadata/persistence';
-import { CachePrefetcher, QueryRunnerFn } from './metadata/prefetch';
+import { CachePrefetcher, QueryRunnerRawFn } from './metadata/prefetch';
 import { searchCache } from './metadata/search';
 import { PerKeyEntry, CacheType, SearchResult, CachedObjectInfo, ObjectWithSchema, DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from './metadata/types';
 
@@ -152,12 +152,12 @@ export class MetadataCache {
         connectionName: string,
         dbName: string,
         schemaName: string | undefined,
-        runQueryFn: QueryRunnerFn
+        runQueryFn: QueryRunnerRawFn
     ): Promise<void> {
         return this.prefetcher.prefetchColumnsForSchema(connectionName, dbName, schemaName, runQueryFn);
     }
 
-    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerFn): Promise<void> {
+    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
         return this.prefetcher.prefetchAllObjects(connectionName, runQueryFn);
     }
 
@@ -169,7 +169,7 @@ export class MetadataCache {
         return this.prefetcher.hasConnectionPrefetchTriggered(connectionName);
     }
 
-    triggerConnectionPrefetch(connectionName: string, runQueryFn: QueryRunnerFn): void {
+    triggerConnectionPrefetch(connectionName: string, runQueryFn: QueryRunnerRawFn): void {
         this.prefetcher.triggerConnectionPrefetch(connectionName, runQueryFn);
     }
 

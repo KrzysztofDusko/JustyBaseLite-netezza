@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { ConnectionManager } from '../core/connectionManager';
-import { runQuery } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 
 export interface ImportCommandsDependencies {
     context: vscode.ExtensionContext;
@@ -32,10 +32,10 @@ async function generateAutoTableName(
 ): Promise<string | null> {
     try {
         const currentDbQuery = 'SELECT CURRENT_CATALOG, CURRENT_SCHEMA';
-        const currentDbResult = await runQuery(context, currentDbQuery, true, connectionName, connectionManager);
+        const currentDbResult = await runQueryRaw(context, currentDbQuery, true, connectionManager, connectionName);
 
-        if (currentDbResult) {
-            const dbInfo = JSON.parse(currentDbResult) as { CURRENT_CATALOG?: string; CURRENT_SCHEMA?: string }[];
+        if (currentDbResult && currentDbResult.data) {
+            const dbInfo = queryResultToRows<{ CURRENT_CATALOG?: string; CURRENT_SCHEMA?: string }>(currentDbResult);
             if (dbInfo && dbInfo.length > 0) {
                 const database = dbInfo[0].CURRENT_CATALOG || 'SYSTEM';
                 const schema = dbInfo[0].CURRENT_SCHEMA || 'ADMIN';

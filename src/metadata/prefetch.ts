@@ -6,11 +6,35 @@
 import { CacheStorage } from './cacheStorage';
 import { extractLabel } from './helpers';
 import { TableMetadata, ColumnMetadata } from './types';
+import { QueryResult } from '../types';
 
 /**
- * Type for query execution function
+ * Type for query execution function (legacy - returns JSON string)
  */
 export type QueryRunnerFn = (query: string) => Promise<string | undefined>;
+
+/**
+ * Type for raw query execution function (returns QueryResult directly - no JSON serialization)
+ */
+export type QueryRunnerRawFn = (query: string) => Promise<QueryResult | undefined>;
+
+/**
+ * Convert QueryResult (columns[] + data[][]) to array of typed objects
+ * This replaces JSON.parse() and avoids double serialization/deserialization
+ */
+function queryResultToRows<T extends Record<string, unknown>>(result: QueryResult): T[] {
+    if (!result.columns || !result.data || result.data.length === 0) {
+        return [];
+    }
+
+    return result.data.map(row => {
+        const obj: Record<string, unknown> = {};
+        result.columns.forEach((col, index) => {
+            obj[col.name] = row[index];
+        });
+        return obj as T;
+    });
+}
 
 interface RawObjectRow {
     OBJNAME: string;
@@ -18,6 +42,7 @@ interface RawObjectRow {
     SCHEMA: string;
     DBNAME: string;
     OBJTYPE?: string;
+    [key: string]: unknown;
 }
 
 interface RawColumnRow {
@@ -27,14 +52,17 @@ interface RawColumnRow {
     ATTNUM?: number;
     SCHEMA?: string;
     DBNAME?: string;
+    [key: string]: unknown;
 }
 
 interface RawSchemaRow {
     SCHEMA: string;
+    [key: string]: unknown;
 }
 
 interface RawDatabaseRow {
     DATABASE: string;
+    [key: string]: unknown;
 }
 
 /**
@@ -55,7 +83,7 @@ export class CachePrefetcher {
         connectionName: string,
         dbName: string,
         schemaName: string | undefined,
-        runQueryFn: QueryRunnerFn
+        runQueryFn: QueryRunnerRawFn
     ): Promise<void> {
         const prefetchKey = schemaName ? `${dbName}.${schemaName}` : `${dbName}..`;
         const fullPrefetchKey = `${connectionName}|${prefetchKey}`;
@@ -87,51 +115,45 @@ export class CachePrefetcher {
                 return;
             }
 
-            const BATCH_SIZE = 10;
-            for (let i = 0; i < tablesToFetch.length; i += BATCH_SIZE) {
-                const batch = tablesToFetch.slice(i, i + BATCH_SIZE);
-                const tableList = batch.map(t => `'${t}'`).join(',');
+            const dbPrefix = `${dbName}..`;
+            const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
 
-                const dbPrefix = `${dbName}..`;
-                const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
+            const query = `
+                SELECT O.OBJNAME AS TABLENAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
+                FROM ${dbPrefix}_V_RELATION_COLUMN C
+                JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
+                WHERE UPPER(O.DBNAME) = UPPER('${dbName}')
+                ${schemaClause}
+                AND O.OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
+                ORDER BY O.OBJNAME, C.ATTNUM
+            `;
 
-                const query = `
-                    SELECT O.OBJNAME AS TABLENAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
-                    FROM ${dbPrefix}_V_RELATION_COLUMN C
-                    JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                    WHERE UPPER(O.OBJNAME) IN (${tableList.toUpperCase()}) 
-                    ${schemaClause}
-                    AND UPPER(O.DBNAME) = UPPER('${dbName}')
-                    ORDER BY O.OBJNAME, C.ATTNUM
-                `;
-
-                try {
-                    const resultJson = await runQueryFn(query);
-                    if (resultJson) {
-                        const results = JSON.parse(resultJson) as RawColumnRow[];
-                        const columnsByTable = new Map<string, ColumnMetadata[]>();
-                        for (const row of results) {
-                            const tableName = row.TABLENAME;
-                            if (!columnsByTable.has(tableName)) {
-                                columnsByTable.set(tableName, []);
-                            }
-                            columnsByTable.get(tableName)!.push({
-                                ATTNAME: row.ATTNAME,
-                                FORMAT_TYPE: row.FORMAT_TYPE,
-                                label: row.ATTNAME, // Add label to satisfy extractLabel
-                                kind: 5,
-                                detail: row.FORMAT_TYPE
-                            });
+            try {
+                const result = await runQueryFn(query);
+                if (result) {
+                    const results = queryResultToRows<RawColumnRow>(result);
+                    const columnsByTable = new Map<string, ColumnMetadata[]>();
+                    for (const row of results) {
+                        const tableName = row.TABLENAME;
+                        if (!columnsByTable.has(tableName)) {
+                            columnsByTable.set(tableName, []);
                         }
-
-                        for (const [tableName, columns] of columnsByTable) {
-                            const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
-                            this.storage.setColumns(connectionName, columnKey, columns);
-                        }
+                        columnsByTable.get(tableName)!.push({
+                            ATTNAME: row.ATTNAME,
+                            FORMAT_TYPE: row.FORMAT_TYPE,
+                            label: row.ATTNAME, // Add label to satisfy extractLabel
+                            kind: 5,
+                            detail: row.FORMAT_TYPE
+                        });
                     }
-                } catch (e: unknown) {
-                    console.error(`[CachePrefetcher] Error fetching batch columns:`, e);
+
+                    for (const [tableName, columns] of columnsByTable) {
+                        const columnKey = `${dbName}.${schemaName || ''}.${tableName}`;
+                        this.storage.setColumns(connectionName, columnKey, columns);
+                    }
                 }
+            } catch (e: unknown) {
+                console.error(`[CachePrefetcher] Error fetching columns:`, e);
             }
         } finally {
             this.columnPrefetchInProgress.delete(fullPrefetchKey);
@@ -140,7 +162,7 @@ export class CachePrefetcher {
 
     // ========== All Objects Prefetch ==========
 
-    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerFn): Promise<void> {
+    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
         const key = `ALL_OBJECTS|${connectionName}`;
         if (this.allObjectsPrefetchTriggeredSet.has(key)) {
             return;
@@ -157,10 +179,10 @@ export class CachePrefetcher {
                 ORDER BY DBNAME, SCHEMA, OBJNAME
             `;
 
-            const resultJson = await runQueryFn(tablesQuery);
-            if (!resultJson) return;
+            const result = await runQueryFn(tablesQuery);
+            if (!result) return;
 
-            const results = JSON.parse(resultJson) as RawObjectRow[];
+            const results = queryResultToRows<RawObjectRow>(result);
             const tablesByKey = new Map<string, { tables: TableMetadata[]; idMap: Map<string, number> }>();
 
             for (const row of results) {
@@ -205,7 +227,7 @@ export class CachePrefetcher {
         return this.connectionPrefetchTriggered.has(connectionName);
     }
 
-    triggerConnectionPrefetch(connectionName: string, runQueryFn: QueryRunnerFn): void {
+    triggerConnectionPrefetch(connectionName: string, runQueryFn: QueryRunnerRawFn): void {
         if (
             this.connectionPrefetchTriggered.has(connectionName) ||
             this.connectionPrefetchInProgress.has(connectionName)
@@ -225,18 +247,17 @@ export class CachePrefetcher {
             });
     }
 
-    private async executeConnectionPrefetch(connectionName: string, runQueryFn: QueryRunnerFn): Promise<void> {
+    private async executeConnectionPrefetch(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
         // 1. Fetch all databases
         const databases = await this.prefetchDatabases(connectionName, runQueryFn);
         if (!databases || databases.length === 0) {
             return;
         }
 
-        // 2. For each database, fetch schemas
-        for (const dbName of databases) {
-            await this.prefetchSchemasForDb(connectionName, dbName, runQueryFn);
-            await new Promise(resolve => setTimeout(resolve, 50));
-        }
+        // 2. For each database, fetch schemas (parallel)
+        await Promise.all(
+            databases.map(dbName => this.prefetchSchemasForDb(connectionName, dbName, runQueryFn))
+        );
 
         // 3. Fetch all tables and views
         await this.prefetchAllTablesAndViews(connectionName, runQueryFn);
@@ -245,7 +266,7 @@ export class CachePrefetcher {
         await this.prefetchAllColumnsForConnection(connectionName, runQueryFn);
     }
 
-    private async prefetchDatabases(connectionName: string, runQueryFn: QueryRunnerFn): Promise<string[]> {
+    private async prefetchDatabases(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<string[]> {
         if (this.storage.getDatabases(connectionName)) {
             const cached = this.storage.getDatabases(connectionName);
             return cached?.map((item) => extractLabel(item)).filter(Boolean) as string[] || [];
@@ -253,10 +274,10 @@ export class CachePrefetcher {
 
         try {
             const query = 'SELECT DATABASE FROM system.._v_database ORDER BY DATABASE';
-            const resultJson = await runQueryFn(query);
-            if (!resultJson) return [];
+            const result = await runQueryFn(query);
+            if (!result) return [];
 
-            const results = JSON.parse(resultJson) as RawDatabaseRow[];
+            const results = queryResultToRows<RawDatabaseRow>(result);
             const items = results.map((row) => ({
                 DATABASE: row.DATABASE,
                 label: row.DATABASE,
@@ -275,7 +296,7 @@ export class CachePrefetcher {
     private async prefetchSchemasForDb(
         connectionName: string,
         dbName: string,
-        runQueryFn: QueryRunnerFn
+        runQueryFn: QueryRunnerRawFn
     ): Promise<void> {
         if (this.storage.getSchemas(connectionName, dbName)) {
             return;
@@ -283,10 +304,10 @@ export class CachePrefetcher {
 
         try {
             const query = `SELECT SCHEMA FROM ${dbName}.._V_SCHEMA ORDER BY SCHEMA`;
-            const resultJson = await runQueryFn(query);
-            if (!resultJson) return;
+            const result = await runQueryFn(query);
+            if (!result) return;
 
-            const results = JSON.parse(resultJson) as RawSchemaRow[];
+            const results = queryResultToRows<RawSchemaRow>(result);
             const items = results
                 .filter(row => row.SCHEMA != null && row.SCHEMA !== '')
                 .map(row => ({
@@ -305,7 +326,7 @@ export class CachePrefetcher {
         }
     }
 
-    private async prefetchAllTablesAndViews(connectionName: string, runQueryFn: QueryRunnerFn): Promise<void> {
+    private async prefetchAllTablesAndViews(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
         try {
             const query = `
                 SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE
@@ -314,10 +335,10 @@ export class CachePrefetcher {
                 ORDER BY DBNAME, SCHEMA, OBJNAME
             `;
 
-            const resultJson = await runQueryFn(query);
-            if (!resultJson) return;
+            const result = await runQueryFn(query);
+            if (!result) return;
 
-            const results = JSON.parse(resultJson) as RawObjectRow[];
+            const results = queryResultToRows<RawObjectRow>(result);
             const tablesByKey = new Map<string, { tables: TableMetadata[]; idMap: Map<string, number> }>();
 
             for (const row of results) {
@@ -356,7 +377,7 @@ export class CachePrefetcher {
 
     private async prefetchAllColumnsForConnection(
         connectionName: string,
-        runQueryFn: QueryRunnerFn
+        runQueryFn: QueryRunnerRawFn
     ): Promise<void> {
         try {
             const connPrefix = `${connectionName}|`;
@@ -385,71 +406,73 @@ export class CachePrefetcher {
                 return;
             }
 
-            const BATCH_SIZE = 50;
             let fetchedCount = 0;
+            const prefetchStartTime = Date.now();
 
-            for (let i = 0; i < allTables.length; i += BATCH_SIZE) {
-                const batch = allTables.slice(i, i + BATCH_SIZE);
-
-                const batchByDb = new Map<string, typeof batch>();
-                for (const item of batch) {
-                    if (!batchByDb.has(item.db)) {
-                        batchByDb.set(item.db, []);
-                    }
-                    batchByDb.get(item.db)!.push(item);
+            const tablesByDb = new Map<string, typeof allTables>();
+            for (const item of allTables) {
+                if (!tablesByDb.has(item.db)) {
+                    tablesByDb.set(item.db, []);
                 }
-
-                for (const [dbName, dbBatch] of batchByDb) {
-                    const conditions = dbBatch
-                        .map(t => `(UPPER(O.SCHEMA) = UPPER('${t.schema}') AND UPPER(O.OBJNAME) = UPPER('${t.name}'))`)
-                        .join(' OR ');
-
-                    const query = `
-                        SELECT O.OBJNAME AS TABLENAME, O.SCHEMA, O.DBNAME, 
-                               C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
-                        FROM ${dbName}.._V_RELATION_COLUMN C
-                        JOIN ${dbName}.._V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                        WHERE O.DBNAME = '${dbName}' 
-                        AND (${conditions})
-                        ORDER BY O.SCHEMA, O.OBJNAME, C.ATTNUM
-                    `;
-
-                    try {
-                        const resultJson = await runQueryFn(query);
-                        if (resultJson) {
-                            const results = JSON.parse(resultJson) as RawColumnRow[];
-                            const columnsByKey = new Map<string, ColumnMetadata[]>();
-
-                            for (const row of results) {
-                                const key = `${row.DBNAME}.${row.SCHEMA || ''}.${row.TABLENAME}`;
-                                if (!columnsByKey.has(key)) {
-                                    columnsByKey.set(key, []);
-                                }
-                                columnsByKey.get(key)!.push({
-                                    ATTNAME: row.ATTNAME,
-                                    FORMAT_TYPE: row.FORMAT_TYPE,
-                                    label: row.ATTNAME,
-                                    kind: 5,
-                                    detail: row.FORMAT_TYPE
-                                });
-                            }
-
-                            for (const [key, columns] of columnsByKey) {
-                                if (!this.storage.getColumns(connectionName, key)) {
-                                    this.storage.setColumns(connectionName, key, columns);
-                                    fetchedCount++;
-                                }
-                            }
-                        }
-                    } catch (e: unknown) {
-                        console.error(`[CachePrefetcher] Error fetching batch columns for DB ${dbName}:`, e);
-                    }
-                }
-
-                await new Promise(resolve => setTimeout(resolve, 10));
+                tablesByDb.get(item.db)!.push(item);
             }
 
-            console.log(`[CachePrefetcher] Prefetched columns for ${fetchedCount} tables/views (Batched)`);
+            // Process all databases in parallel
+            const dbPromises = Array.from(tablesByDb.entries()).map(async ([dbName, dbBatch]) => {
+                const query = `
+                    SELECT O.OBJNAME AS TABLENAME, O.SCHEMA, O.DBNAME, 
+                           C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
+                    FROM ${dbName}.._V_RELATION_COLUMN C
+                    JOIN ${dbName}.._V_OBJECT_DATA O ON C.OBJID = O.OBJID
+                    WHERE O.DBNAME = '${dbName}' 
+                    AND O.OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
+                    ORDER BY O.SCHEMA, O.OBJNAME, C.ATTNUM
+                `;
+
+                try {
+                    const queryStartTime = Date.now();
+                    const result = await runQueryFn(query);
+                    const queryDuration = Date.now() - queryStartTime;
+
+                    if (result) {
+                        const parseStartTime = Date.now();
+                        const results = queryResultToRows<RawColumnRow>(result);
+                        const parseDuration = Date.now() - parseStartTime;
+
+                        const columnsByKey = new Map<string, ColumnMetadata[]>();
+
+                        for (const row of results) {
+                            const key = `${row.DBNAME}.${row.SCHEMA || ''}.${row.TABLENAME}`;
+                            if (!columnsByKey.has(key)) {
+                                columnsByKey.set(key, []);
+                            }
+                            columnsByKey.get(key)!.push({
+                                ATTNAME: row.ATTNAME,
+                                FORMAT_TYPE: row.FORMAT_TYPE,
+                                label: row.ATTNAME,
+                                kind: 5,
+                                detail: row.FORMAT_TYPE
+                            });
+                        }
+
+                        for (const [key, columns] of columnsByKey) {
+                            if (!this.storage.getColumns(connectionName, key)) {
+                                this.storage.setColumns(connectionName, key, columns);
+                                fetchedCount++;
+                            }
+                        }
+
+                        console.log(`[CachePrefetcher] DB ${dbName}: ${dbBatch.length} tables (expected), ${results.length} columns (total fetched) | query=${queryDuration}ms, parse=${parseDuration}ms`);
+                    }
+                } catch (e: unknown) {
+                    console.error(`[CachePrefetcher] Error fetching columns for DB ${dbName}:`, e);
+                }
+            });
+
+            await Promise.all(dbPromises);
+
+            const totalDuration = Date.now() - prefetchStartTime;
+            console.log(`[CachePrefetcher] Prefetched columns for ${fetchedCount} tables/views in ${totalDuration}ms`);
         } catch (e: unknown) {
             console.error(`[CachePrefetcher] prefetchAllColumnsForConnection error:`, e);
         }
