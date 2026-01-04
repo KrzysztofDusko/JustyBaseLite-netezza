@@ -184,18 +184,16 @@ export class ConnectionManager {
         let existing = this._persistentConnections.get(targetName);
 
         if (!existing) {
-            // Use JsNzDriver with ConnectionDetails directly
-            const NzConnection = require('../../libs/driver/src/NzConnection');
+            // Use typed factory function for proper type safety
+            const { createNzConnection } = require('./nzConnectionFactory');
 
-            const config = {
+            const conn = createNzConnection({
                 host: details.host,
                 port: details.port || 5480,
                 database: details.database,
                 user: details.user,
                 password: details.password
-            };
-
-            const conn = new NzConnection(config) as NzConnection;
+            }) as NzConnection;
             await conn.connect();
             existing = conn;
 
@@ -225,6 +223,9 @@ export class ConnectionManager {
 
     dispose() {
         this.closeAllPersistentConnections();
+        this._onDidChangeConnections.dispose();
+        this._onDidChangeActiveConnection.dispose();
+        this._onDidChangeDocumentConnection.dispose();
     }
 
     // Per-document connection management

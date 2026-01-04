@@ -448,6 +448,81 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     vscode.window.showErrorMessage(`Error copying to Excel: ${errorMsg}`);
                 }
             }
+        ),
+
+        // Export Current Result to XLSX and Open (from datagrid)
+        vscode.commands.registerCommand(
+            'netezza.exportCurrentResultToXlsxAndOpen',
+            async (csvContent: string | (CsvExportItem & { isActive?: boolean })[], sql?: string) => {
+                try {
+                    if (!csvContent || (Array.isArray(csvContent) && csvContent.length === 0)) {
+                        vscode.window.showErrorMessage('No data to export');
+                        return;
+                    }
+
+                    let dataToExport = csvContent;
+
+                    if (Array.isArray(csvContent) && csvContent.length > 1) {
+                        const choice = await vscode.window.showQuickPick(
+                            ['Export All Results', 'Export Active Result Only'],
+                            { placeHolder: 'Multiple results available. What would you like to export?' }
+                        );
+
+                        if (!choice) return;
+
+                        if (choice === 'Export Active Result Only') {
+                            const activeItem = csvContent.find(item => item.isActive);
+                            if (activeItem) {
+                                dataToExport = [activeItem];
+                            } else {
+                                dataToExport = [csvContent[0]];
+                            }
+                        }
+                    }
+
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const tempPath = path.join(os.tmpdir(), `netezza_results_${timestamp}.xlsx`);
+
+                    const startTime = Date.now();
+
+                    await vscode.window.withProgress(
+                        {
+                            location: vscode.ProgressLocation.Notification,
+                            title: 'Creating Excel XLSX file...',
+                            cancellable: false
+                        },
+                        async progress => {
+                            const { exportCsvToXlsx } = await import('../export/xlsxExporter');
+
+                            const result = await exportCsvToXlsx(
+                                dataToExport,
+                                tempPath,
+                                false,
+                                { source: 'Query Results Panel', sql },
+                                (message: string) => {
+                                    progress.report({ message });
+                                    outputChannel.appendLine(`[CSV to XLSX] ${message}`);
+                                }
+                            );
+
+                            if (!result.success) {
+                                throw new Error(result.message);
+                            }
+                        }
+                    );
+
+                    const duration = Date.now() - startTime;
+                    outputChannel.appendLine(
+                        `[${new Date().toLocaleTimeString()}] Export Current Result to XLSX completed in ${duration}ms`
+                    );
+
+                    await vscode.env.openExternal(vscode.Uri.file(tempPath));
+                    vscode.window.showInformationMessage(`Results exported and opened: ${tempPath}`);
+                } catch (err: unknown) {
+                    const errorMsg = err instanceof Error ? err.message : String(err);
+                    vscode.window.showErrorMessage(`Error exporting to Excel XLSX: ${errorMsg}`);
+                }
+            }
         )
     ];
 }

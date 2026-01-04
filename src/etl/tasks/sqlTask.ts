@@ -13,7 +13,7 @@ import { NzConnection, NzDataReader, ConnectionDetails } from '../../types';
  */
 class DefaultConnectionFactory implements IConnectionFactory {
     async createConnection(details: ConnectionDetails): Promise<NzConnection> {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
+         
         const NzConnectionClass = require('../../../libs/driver/src/NzConnection');
         const connection = new NzConnectionClass({
             host: details.host,

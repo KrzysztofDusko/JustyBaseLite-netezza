@@ -51,6 +51,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'copyAsExcel':
                     this.copyAsExcel(message.data, message.sql);
                     return;
+                case 'openInExcelXlsx':
+                    this.openInExcelXlsx(message.data, message.sql);
+                    return;
                 case 'exportJson':
                     this.exportJson(message.data);
                     return;
@@ -539,6 +542,15 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
     private async copyAsExcel(data: unknown, sql?: string) {
         vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', data, sql);
+    }
+
+    private async openInExcelXlsx(data: unknown, sql?: string) {
+        try {
+            await vscode.commands.executeCommand('netezza.exportCurrentResultToXlsxAndOpen', data, sql);
+        } catch (error: unknown) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Failed to export to XLSX: ${errorMsg}. Please try reloading the window.`);
+        }
     }
 
     private async exportJson(content: string) {

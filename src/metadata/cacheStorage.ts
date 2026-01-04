@@ -3,13 +3,26 @@
  * Manages in-memory cache data structures and CRUD operations
  */
 
+import * as vscode from 'vscode';
 import { PerKeyEntry, CacheType, CachedObjectInfo, ObjectWithSchema, DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from './types';
 import { extractLabel, buildIdLookupKey } from './helpers';
+
+/** Default cache TTL in hours */
+const DEFAULT_CACHE_TTL_HOURS = 4;
 
 /**
  * Manages all in-memory cache data structures for metadata
  */
 export class CacheStorage {
+    // TTL for in-memory cache entries (configurable, default 4 hours)
+    private readonly CACHE_TTL: number;
+
+    constructor() {
+        const config = vscode.workspace.getConfiguration('netezza');
+        const ttlHours = config.get<number>('cacheTTL', DEFAULT_CACHE_TTL_HOURS);
+        this.CACHE_TTL = ttlHours * 60 * 60 * 1000; // Convert hours to milliseconds
+    }
+
     // In-memory caches with per-key timestamps
     private dbCache: Map<string, { data: DatabaseMetadata[]; timestamp: number }> = new Map();
     public schemaCache: Map<string, PerKeyEntry<SchemaMetadata[]>> = new Map();
@@ -20,6 +33,13 @@ export class CacheStorage {
 
     // Callback for scheduling saves
     private onDataChange?: (cacheType: CacheType) => void;
+
+    /**
+     * Check if a cache entry is still valid (not expired)
+     */
+    private isEntryValid(timestamp: number): boolean {
+        return Date.now() - timestamp < this.CACHE_TTL;
+    }
 
     /**
      * Set callback to be called when data changes (for persistence)
@@ -43,7 +63,13 @@ export class CacheStorage {
     // ========== Database Cache ==========
 
     getDatabases(connectionName: string): DatabaseMetadata[] | undefined {
-        return this.dbCache.get(connectionName)?.data;
+        const entry = this.dbCache.get(connectionName);
+        if (!entry) return undefined;
+        if (!this.isEntryValid(entry.timestamp)) {
+            this.dbCache.delete(connectionName);
+            return undefined;
+        }
+        return entry.data;
     }
 
     setDatabases(connectionName: string, data: DatabaseMetadata[]): void {
@@ -55,7 +81,13 @@ export class CacheStorage {
 
     getSchemas(connectionName: string, dbName: string): SchemaMetadata[] | undefined {
         const key = `${connectionName}|${dbName}`;
-        return this.schemaCache.get(key)?.data;
+        const entry = this.schemaCache.get(key);
+        if (!entry) return undefined;
+        if (!this.isEntryValid(entry.timestamp)) {
+            this.schemaCache.delete(key);
+            return undefined;
+        }
+        return entry.data;
     }
 
     setSchemas(connectionName: string, dbName: string, data: SchemaMetadata[]): void {
@@ -69,7 +101,14 @@ export class CacheStorage {
     getTables(connectionName: string, key: string): TableMetadata[] | undefined {
         // incoming key is DB.SCHEMA or DB..
         const fullKey = `${connectionName}|${key}`;
-        return this.tableCache.get(fullKey)?.data;
+        const entry = this.tableCache.get(fullKey);
+        if (!entry) return undefined;
+        if (!this.isEntryValid(entry.timestamp)) {
+            this.tableCache.delete(fullKey);
+            this.tableIdMap.delete(fullKey); // Also clean up related ID map
+            return undefined;
+        }
+        return entry.data;
     }
 
     /**
@@ -147,7 +186,13 @@ export class CacheStorage {
 
     getColumns(connectionName: string, key: string): ColumnMetadata[] | undefined {
         const fullKey = `${connectionName}|${key}`;
-        return this.columnCache.get(fullKey)?.data;
+        const entry = this.columnCache.get(fullKey);
+        if (!entry) return undefined;
+        if (!this.isEntryValid(entry.timestamp)) {
+            this.columnCache.delete(fullKey);
+            return undefined;
+        }
+        return entry.data;
     }
 
     setColumns(connectionName: string, key: string, data: ColumnMetadata[]): void {
@@ -213,9 +258,9 @@ export class CacheStorage {
             // Match database
             if (entryDbName.toUpperCase() !== dbName.toUpperCase()) continue;
 
-            // Match schema if provided
+            // Match schema if provided (and not null/undefined/empty)
             if (
-                schemaName !== undefined &&
+                schemaName != null &&
                 schemaName !== '' &&
                 entrySchemaName?.toUpperCase() !== schemaName.toUpperCase()
             )

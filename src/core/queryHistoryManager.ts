@@ -327,7 +327,9 @@ export class QueryHistoryManager {
                     } else {
                         archivedEntries = -1; // Unknown/Many
                     }
-                } catch { }
+                } catch (e) {
+                    console.debug('[QueryHistoryManager] Error reading archive for stats:', e);
+                }
             }
 
             return {

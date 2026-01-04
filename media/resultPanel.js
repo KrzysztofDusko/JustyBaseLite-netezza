@@ -2353,6 +2353,21 @@ function openInExcel() {
     });
 }
 
+function openInExcelXlsx() {
+    const data = getAllGridsExportData();
+    if (data.length === 0) return;
+
+    vscode.postMessage({
+        command: 'info',
+        text: 'Starting Excel (XLSX) export...'
+    });
+
+    vscode.postMessage({
+        command: 'openInExcelXlsx',
+        data: data
+    });
+}
+
 function copyAsExcel() {
     const data = getAllGridsExportData();
     if (data.length === 0) return;
@@ -2404,6 +2419,9 @@ function executeSplitExport() {
     switch (currentExportFormat) {
         case 'excel':
             openInExcel();
+            break;
+        case 'xlsx':
+            openInExcelXlsx();
             break;
         case 'csv':
             exportToCsv();
@@ -2457,8 +2475,9 @@ function selectExportFormat(format) {
         // The menu item says "Excel (XLSB)", the button said "Excel".
         // Let's just use what's in the menu item, it's fine.
         btn.innerHTML = selectedItem.innerHTML;
-        // Maybe trim (XLSB) if we want shorter button?
+        // Trim format specifier for shorter button text
         if (format === 'excel') btn.innerHTML = btn.innerHTML.replace(' (XLSB)', '');
+        if (format === 'xlsx') btn.innerHTML = btn.innerHTML.replace(' (XLSX)', '');
     }
 
     // Hide menu

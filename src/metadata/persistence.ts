@@ -4,25 +4,33 @@
  */
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { CacheStorage } from './cacheStorage';
 import { CacheType, PerKeyEntry, DatabaseMetadata, SchemaMetadata, TableMetadata } from './types';
 import { exportMap, exportTableIdMap } from './helpers';
+
+/** Default cache TTL in hours */
+const DEFAULT_CACHE_TTL_HOURS = 4;
 
 /**
  * Handles persistence of cache data to disk
  */
 export class CachePersistence {
-    private readonly CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+    private readonly CACHE_TTL: number; // In milliseconds
     private cacheFilePath: string | undefined;
 
     // Debounce support for saves
-    private savePending: boolean = false;
     private saveTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
     constructor(
         private context: vscode.ExtensionContext,
         private storage: CacheStorage
     ) {
+        // Initialize cache TTL from configuration
+        const config = vscode.workspace.getConfiguration('netezza');
+        const ttlHours = config.get<number>('cacheTTL', DEFAULT_CACHE_TTL_HOURS);
+        this.CACHE_TTL = ttlHours * 60 * 60 * 1000; // Convert hours to milliseconds
+
         if (this.context.storageUri) {
             this.cacheFilePath = vscode.Uri.joinPath(this.context.storageUri, 'schema-cache.json').fsPath;
             this.ensureStorageDir();
@@ -64,7 +72,6 @@ export class CachePersistence {
         if (!this.cacheFilePath) return;
 
         try {
-            const fs = require('fs');
             if (fs.existsSync(this.cacheFilePath)) {
                 const raw = await fs.promises.readFile(this.cacheFilePath, 'utf-8');
                 const json = JSON.parse(raw);
@@ -135,23 +142,24 @@ export class CachePersistence {
 
     /**
      * Schedule a debounced save operation
+     * Properly resets timeout on each call to ensure latest changes are saved
      */
     scheduleSave(_cacheType: CacheType): void {
-        if (!this.savePending) {
-            this.savePending = true;
-            this.saveTimeoutId = setTimeout(() => this.flushSave(), 2000); // 2s debounce
+        // Clear existing timeout to reset the debounce timer
+        if (this.saveTimeoutId) {
+            clearTimeout(this.saveTimeoutId);
         }
+        this.saveTimeoutId = setTimeout(() => this.flushSave(), 2000); // 2s debounce
     }
 
     /**
      * Immediately flush pending saves to disk
      */
     async flushSave(): Promise<void> {
-        this.savePending = false;
+        this.saveTimeoutId = undefined;
         if (!this.cacheFilePath) return;
 
         try {
-            const fs = require('fs');
 
             const data = {
                 dbCache: exportMap(this.storage.getDbCacheMap()),
@@ -176,13 +184,11 @@ export class CachePersistence {
             clearTimeout(this.saveTimeoutId);
             this.saveTimeoutId = undefined;
         }
-        this.savePending = false;
 
         this.storage.clearAll();
 
         if (this.cacheFilePath) {
             try {
-                const fs = require('fs');
                 if (fs.existsSync(this.cacheFilePath)) {
                     await fs.promises.unlink(this.cacheFilePath);
                 }

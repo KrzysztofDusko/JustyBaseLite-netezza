@@ -160,23 +160,23 @@ async function getConnection(
         const connection = await connManager.getPersistentConnection(resolvedConnectionName);
         return { connection, shouldCloseConnection: false };
     } else {
-        const NzConnection = require('../../libs/driver/src/NzConnection');
+        const { createNzConnection } = require('./nzConnectionFactory');
         const details = await connManager.getConnection(resolvedConnectionName);
         if (!details) {
             throw new Error(`Connection '${resolvedConnectionName}' not found`);
         }
-        const config = {
+        const connection = createNzConnection({
             host: details.host,
             port: details.port || 5480,
             database: details.database,
             user: details.user,
             password: details.password
-        };
-        const connection = new NzConnection(config) as NzConnection;
+        }) as NzConnection;
         await connection.connect();
         return { connection, shouldCloseConnection: true };
     }
 }
+
 
 async function consumeRestAndCancel(reader: NzDataReader, cmd: NzCommand): Promise<void> {
     const startTime = Date.now();
@@ -567,31 +567,18 @@ export async function runQueriesSequentially(
     }
 
     try {
-        // Connect with fetchArray option to get results as arrays
-        let connection;
-        let shouldCloseConnection = true;
-
-        // Get details (needed for creating connection and history)
+        // Get details (needed for history logging)
         const details = await connManager.getConnection(resolvedConnectionName);
         if (!details) {
             throw new Error(`Connection '${resolvedConnectionName}' not found`);
         }
 
-        if (keepConnectionOpen) {
-            connection = await connManager.getPersistentConnection(resolvedConnectionName);
-            shouldCloseConnection = false; // Don't close persistent connection
-        } else {
-            const NzConnection = require('../../libs/driver/src/NzConnection');
-            const config = {
-                host: details.host,
-                port: details.port || 5480,
-                database: details.database,
-                user: details.user,
-                password: details.password
-            };
-            connection = new NzConnection(config);
-            await connection.connect();
-        }
+        // Use shared getConnection helper to eliminate code duplication
+        const { connection, shouldCloseConnection } = await getConnection(
+            connManager,
+            resolvedConnectionName,
+            keepConnectionOpen
+        );
 
         // Attach listener for notices
         // Attach listener for notices
@@ -1001,24 +988,12 @@ export async function runQueriesWithStreaming(
             throw new Error(`Connection '${resolvedConnectionName}' not found`);
         }
 
-        let connection;
-        let shouldCloseConnection = true;
-
-        if (keepConnectionOpen) {
-            connection = await connManager.getPersistentConnection(resolvedConnectionName);
-            shouldCloseConnection = false;
-        } else {
-            const NzConnection = require('../../libs/driver/src/NzConnection');
-            const config = {
-                host: details.host,
-                port: details.port || 5480,
-                database: details.database,
-                user: details.user,
-                password: details.password
-            };
-            connection = new NzConnection(config);
-            await connection.connect();
-        }
+        // Use shared getConnection helper to eliminate code duplication
+        const { connection, shouldCloseConnection } = await getConnection(
+            connManager,
+            resolvedConnectionName,
+            keepConnectionOpen
+        );
 
         // Attach listener for notices
         connection.on('notice', (msg: unknown) => {

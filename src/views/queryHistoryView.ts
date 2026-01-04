@@ -202,7 +202,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         // Archive items? They might not be in cache. 
         // But let's assume one step at a time.
 
-        let entry = history.find(e => e.id === id);
+        const entry = history.find(e => e.id === id);
 
         // If not found (maybe archived?), try searchArchive via manager is too slow...
         // For now, edit works on Active.

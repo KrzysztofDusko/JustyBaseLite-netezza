@@ -114,7 +114,7 @@ export class ExportTaskExecutor extends BaseTaskExecutor<ExportNodeConfig> {
         return this.safeExecute(node.id, startTime, async () => {
             // Resolve variables in paths and query
             const outputPath = this.resolveVariables(config.outputPath, context);
-            let query = config.query ? this.resolveVariables(config.query, context) : '';
+            const query = config.query ? this.resolveVariables(config.query, context) : '';
 
             // If no query, try to get from previous node
             if (!query && config.sourceNodeId) {

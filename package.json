@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -623,6 +623,13 @@
           "minimum": 1000,
           "maximum": 50000,
           "description": "Number of rows per chunk when streaming mode is enabled. Larger chunks are more efficient but use more memory."
+        },
+        "netezza.cacheTTL": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 168,
+          "description": "Metadata cache time-to-live in hours. Cached schema, tables, and columns will be refreshed after this period. Default: 4 hours."
         }
       }
     },

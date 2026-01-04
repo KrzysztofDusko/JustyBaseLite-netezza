@@ -15,7 +15,7 @@ export const window = {
 
 export const workspace = {
     getConfiguration: jest.fn(() => ({
-        get: jest.fn()
+        get: jest.fn((_key: string, defaultValue?: unknown) => defaultValue)
     }))
 };
 

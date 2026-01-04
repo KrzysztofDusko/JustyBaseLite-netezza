@@ -58,6 +58,9 @@ export class ResultsHtmlGenerator {
                         <div class="split-btn-menu-item" onclick="selectExportFormat('excel')">
                             ${icons.excel} Excel (XLSB)
                         </div>
+                        <div class="split-btn-menu-item" onclick="selectExportFormat('xlsx')">
+                            ${icons.excel} Excel (XLSX)
+                        </div>
                         <div class="split-btn-menu-item" onclick="selectExportFormat('csv')">
                             ${icons.csv} CSV
                         </div>
