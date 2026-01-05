@@ -34,7 +34,7 @@ export async function requireConnection(
  */
 export async function executeWithProgress<T>(
     title: string,
-    task: () => Promise<T>
+    task: (progress: vscode.Progress<{ message?: string; increment?: number }>) => Promise<T>
 ): Promise<T> {
     return vscode.window.withProgress(
         {

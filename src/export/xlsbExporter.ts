@@ -22,6 +22,18 @@ import { NzConnection, ConnectionDetails } from '../types';
  */
 function convertToNumberIfNumericString(val: unknown): unknown {
     if (typeof val === 'string' && val.length > 0) {
+        // PRECISION SAFETY: Don't convert very long strings to numbers
+        if (val.length > 15) {
+            return val;
+        }
+
+        // LEADING ZERO SAFETY: Don't convert strings with leading zeros (e.g. "0123")
+        // unless it is exactly "0" or a decimal starting with "0." (e.g. "0.123")
+        // Regex checks for: Optional sign, then "0", then at least one more digit.
+        if (/^-?0\d+/.test(val)) {
+            return val;
+        }
+
         // Check if it's a numeric string (including negatives and decimals)
         // Match: optional minus, digits, optional decimal part
         if (/^-?\d+(\.\d+)?$/.test(val)) {
@@ -43,6 +55,7 @@ function convertToNumberIfNumericString(val: unknown): unknown {
 function convertRowNumericStrings(row: unknown[]): unknown[] {
     return row.map(convertToNumberIfNumericString);
 }
+
 
 /**
  * Progress callback function type
@@ -132,8 +145,23 @@ export async function exportQueryToXlsb(
 
                 // Prepare headers for XLSB
                 const headers: string[] = [];
+                const colIsNumeric: boolean[] = [];
+
+                // Numeric types whitelist
+                const numericTypes = new Set(['INT8', 'INT2', 'INT4', 'NUMERIC', 'FLOAT4', 'FLOAT8']);
+
                 for (let i = 0; i < reader.fieldCount; i++) {
-                    headers.push(reader.getName(i));
+                    const colName = reader.getName(i);
+                    headers.push(colName);
+
+                    // Determine if column is numeric based on database type
+                    try {
+                        const typeName = reader.getTypeName(i);
+                        colIsNumeric.push(numericTypes.has(typeName));
+                    } catch (e) {
+                        // Fallback to safe default (treat as string) if type unknown
+                        colIsNumeric.push(false);
+                    }
                 }
 
                 const columnCount = headers.length;
@@ -148,10 +176,17 @@ export async function exportQueryToXlsb(
                 while (await reader.read()) {
                     const row: unknown[] = [];
                     for (let i = 0; i < reader.fieldCount; i++) {
-                        row.push(reader.getValue(i));
+                        let val = reader.getValue(i);
+
+                        // Apply conversion ONLY if column is strictly numeric in database
+                        if (colIsNumeric[i]) {
+                            val = convertToNumberIfNumericString(val);
+                        }
+
+                        row.push(val);
                     }
-                    // Convert numeric strings to numbers and write immediately
-                    writer.writeRow(convertRowNumericStrings(row));
+                    // Write row immediately
+                    writer.writeRow(row);
                     rowCount++;
 
                     // Progress update every 10000 rows
@@ -255,6 +290,25 @@ export interface CsvExportItem {
     csv: string;
     sql?: string; // Made optional as not all items might have SQL
     name: string;
+}
+
+/**
+ * Structured export item with column types (used by Grid export)
+ */
+export interface StructuredExportItem {
+    columns: { name: string; type?: string }[];
+    rows: unknown[][];
+    sql?: string;
+    name: string;
+}
+
+/** Numeric types whitelist for type-aware conversion */
+const numericTypes = new Set(['INT8', 'INT2', 'INT4', 'NUMERIC', 'FLOAT4', 'FLOAT8', 'INTEGER', 'BIGINT', 'SMALLINT', 'DECIMAL', 'REAL', 'DOUBLE PRECISION']);
+
+/** Check if a value should be converted to number based on column type */
+function shouldConvertToNumber(type?: string): boolean {
+    if (!type) return false;
+    return numericTypes.has(type.toUpperCase());
 }
 
 export async function exportCsvToXlsb(
@@ -415,6 +469,124 @@ export async function exportCsvToXlsb(
         };
 
         // Copy to clipboard logic if needed
+        if (copyToClipboard) {
+            if (progressCallback) {
+                progressCallback('Copying file to clipboard...');
+            }
+            const clipboardSuccess = await copyFileToClipboard(outputPath);
+            if (exportResult.details) {
+                exportResult.details.clipboard_success = clipboardSuccess;
+            }
+        }
+
+        return exportResult;
+    } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+            success: false,
+            message: `Export failed: ${errorMsg}`
+        };
+    }
+}
+
+/**
+ * Export structured data (with column types) to XLSB file.
+ * This is used by Grid exports where we have type metadata from the database.
+ * @param items Structured export items with columns, rows, and type metadata
+ * @param outputPath Path where to save the XLSB file
+ * @param copyToClipboard If true, also copy file to clipboard (Windows only)
+ * @param progressCallback Optional callback for progress updates
+ * @returns Export result with success status and details
+ */
+export async function exportStructuredToXlsb(
+    items: StructuredExportItem[],
+    outputPath: string,
+    copyToClipboard: boolean = false,
+    progressCallback?: ProgressCallback
+): Promise<ExportResult> {
+    try {
+        if (progressCallback) {
+            progressCallback('Initializing XLSB writer...');
+        }
+
+        const writer = new XlsbWriter(outputPath);
+        let totalRows = 0;
+        let totalColumns = 0;
+        const sqlItems: { name: string; sql: string }[] = [];
+
+        for (const item of items) {
+            const sheetName = item.name || 'Sheet';
+            if (progressCallback) {
+                progressCallback(`Processing sheet "${sheetName}"...`);
+            }
+
+            const headers = item.columns.map(c => c.name);
+            const colIsNumeric = item.columns.map(c => shouldConvertToNumber(c.type));
+
+            totalColumns = Math.max(totalColumns, headers.length);
+
+            // Start sheet with headers
+            writer.startSheet(sheetName, headers.length, headers, { doAutofilter: true });
+
+            // Write rows with type-aware conversion
+            for (const row of item.rows) {
+                const processedRow = row.map((val, i) => {
+                    if (colIsNumeric[i]) {
+                        // Column is numeric type - apply conversion
+                        return convertToNumberIfNumericString(val);
+                    }
+                    // Column is text type - keep as is
+                    return val;
+                });
+                writer.writeRow(processedRow);
+                totalRows++;
+            }
+
+            writer.endSheet();
+
+            if (item.sql) {
+                sqlItems.push({ name: sheetName, sql: item.sql });
+            }
+        }
+
+        // Add SQL Code sheet if we have any SQL
+        if (sqlItems.length > 0) {
+            writer.startSheet('SQL Code', 1, undefined, { doAutofilter: false });
+            sqlItems.forEach(item => {
+                writer.writeRow([`--- SQL for ${item.name} ---`]);
+                item.sql.split('\n').forEach(line => {
+                    writer.writeRow([line]);
+                });
+                writer.writeRow(['']); // Spacer
+            });
+            writer.endSheet();
+        }
+
+        if (progressCallback) {
+            progressCallback('Finalizing XLSB file...');
+        }
+        await writer.finalize();
+
+        const stats = fs.statSync(outputPath);
+        const fileSizeMb = stats.size / (1024 * 1024);
+
+        if (progressCallback) {
+            progressCallback(`XLSB file created successfully`);
+            progressCallback(`  - Rows: ${totalRows.toLocaleString()}`);
+            progressCallback(`  - File size: ${fileSizeMb.toFixed(1)} MB`);
+        }
+
+        const exportResult: ExportResult = {
+            success: true,
+            message: `Successfully exported ${totalRows} rows to ${outputPath}`,
+            details: {
+                rows_exported: totalRows,
+                columns: totalColumns,
+                file_size_mb: parseFloat(fileSizeMb.toFixed(1)),
+                file_path: outputPath
+            }
+        };
+
         if (copyToClipboard) {
             if (progressCallback) {
                 progressCallback('Copying file to clipboard...');

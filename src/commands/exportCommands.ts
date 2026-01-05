@@ -6,7 +6,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import { ConnectionManager } from '../core/connectionManager';
-import { CsvExportItem } from '../export/xlsbExporter';
+import { CsvExportItem, StructuredExportItem } from '../export/xlsbExporter';
 
 export interface ExportCommandsDependencies {
     context: vscode.ExtensionContext;
@@ -337,21 +337,43 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                             cancellable: false
                         },
                         async progress => {
-                            const { exportCsvToXlsb } = await import('../export/xlsbExporter');
+                            // Detect if data is structured (has columns/rows) vs CSV (has csv property)
+                            const isStructuredData = Array.isArray(dataToExport) &&
+                                dataToExport.length > 0 &&
+                                'columns' in dataToExport[0] &&
+                                'rows' in dataToExport[0];
 
-                            const result = await exportCsvToXlsb(
-                                dataToExport,
-                                tempPath,
-                                false,
-                                { source: 'Query Results Panel', sql },
-                                (message: string) => {
-                                    progress.report({ message });
-                                    outputChannel.appendLine(`[CSV to XLSB] ${message}`);
+                            if (isStructuredData) {
+                                // Use type-aware structured export
+                                const { exportStructuredToXlsb } = await import('../export/xlsbExporter');
+                                const result = await exportStructuredToXlsb(
+                                    dataToExport as unknown as (StructuredExportItem & { isActive?: boolean })[],
+                                    tempPath,
+                                    false,
+                                    (message: string) => {
+                                        progress.report({ message });
+                                        outputChannel.appendLine(`[Structured to XLSB] ${message}`);
+                                    }
+                                );
+                                if (!result.success) {
+                                    throw new Error(result.message);
                                 }
-                            );
-
-                            if (!result.success) {
-                                throw new Error(result.message);
+                            } else {
+                                // Legacy CSV export (fallback)
+                                const { exportCsvToXlsb } = await import('../export/xlsbExporter');
+                                const result = await exportCsvToXlsb(
+                                    dataToExport,
+                                    tempPath,
+                                    false,
+                                    { source: 'Query Results Panel', sql },
+                                    (message: string) => {
+                                        progress.report({ message });
+                                        outputChannel.appendLine(`[CSV to XLSB] ${message}`);
+                                    }
+                                );
+                                if (!result.success) {
+                                    throw new Error(result.message);
+                                }
                             }
                         }
                     );
@@ -412,21 +434,43 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                             cancellable: false
                         },
                         async progress => {
-                            const { exportCsvToXlsb } = await import('../export/xlsbExporter');
+                            // Detect if data is structured (has columns/rows) vs CSV (has csv property)
+                            const isStructuredData = Array.isArray(dataToExport) &&
+                                dataToExport.length > 0 &&
+                                'columns' in dataToExport[0] &&
+                                'rows' in dataToExport[0];
 
-                            const result = await exportCsvToXlsb(
-                                dataToExport,
-                                tempPath,
-                                true,
-                                { source: 'Query Results Panel', sql },
-                                (message: string) => {
-                                    progress.report({ message });
-                                    outputChannel.appendLine(`[Clipboard XLSB] ${message}`);
+                            if (isStructuredData) {
+                                // Use type-aware structured export
+                                const { exportStructuredToXlsb } = await import('../export/xlsbExporter');
+                                const result = await exportStructuredToXlsb(
+                                    dataToExport as unknown as (StructuredExportItem & { isActive?: boolean })[],
+                                    tempPath,
+                                    true, // copyToClipboard=true
+                                    (message: string) => {
+                                        progress.report({ message });
+                                        outputChannel.appendLine(`[Clipboard Structured XLSB] ${message}`);
+                                    }
+                                );
+                                if (!result.success) {
+                                    throw new Error(result.message);
                                 }
-                            );
-
-                            if (!result.success) {
-                                throw new Error(result.message);
+                            } else {
+                                // Legacy CSV export (fallback)
+                                const { exportCsvToXlsb } = await import('../export/xlsbExporter');
+                                const result = await exportCsvToXlsb(
+                                    dataToExport,
+                                    tempPath,
+                                    true, // copyToClipboard=true
+                                    { source: 'Query Results Panel', sql },
+                                    (message: string) => {
+                                        progress.report({ message });
+                                        outputChannel.appendLine(`[Clipboard XLSB] ${message}`);
+                                    }
+                                );
+                                if (!result.success) {
+                                    throw new Error(result.message);
+                                }
                             }
                         }
                     );
@@ -492,21 +536,43 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                             cancellable: false
                         },
                         async progress => {
-                            const { exportCsvToXlsx } = await import('../export/xlsxExporter');
+                            // Detect if data is structured (has columns/rows) vs CSV (has csv property)
+                            const isStructuredData = Array.isArray(dataToExport) &&
+                                dataToExport.length > 0 &&
+                                'columns' in dataToExport[0] &&
+                                'rows' in dataToExport[0];
 
-                            const result = await exportCsvToXlsx(
-                                dataToExport,
-                                tempPath,
-                                false,
-                                { source: 'Query Results Panel', sql },
-                                (message: string) => {
-                                    progress.report({ message });
-                                    outputChannel.appendLine(`[CSV to XLSX] ${message}`);
+                            if (isStructuredData) {
+                                // Use type-aware structured export
+                                const { exportStructuredToXlsx } = await import('../export/xlsxExporter');
+                                const result = await exportStructuredToXlsx(
+                                    dataToExport as unknown as (StructuredExportItem & { isActive?: boolean })[],
+                                    tempPath,
+                                    false,
+                                    (message: string) => {
+                                        progress.report({ message });
+                                        outputChannel.appendLine(`[Structured to XLSX] ${message}`);
+                                    }
+                                );
+                                if (!result.success) {
+                                    throw new Error(result.message);
                                 }
-                            );
-
-                            if (!result.success) {
-                                throw new Error(result.message);
+                            } else {
+                                // Legacy CSV export (fallback)
+                                const { exportCsvToXlsx } = await import('../export/xlsxExporter');
+                                const result = await exportCsvToXlsx(
+                                    dataToExport,
+                                    tempPath,
+                                    false,
+                                    { source: 'Query Results Panel', sql },
+                                    (message: string) => {
+                                        progress.report({ message });
+                                        outputChannel.appendLine(`[CSV to XLSX] ${message}`);
+                                    }
+                                );
+                                if (!result.success) {
+                                    throw new Error(result.message);
+                                }
                             }
                         }
                     );

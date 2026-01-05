@@ -61,6 +61,8 @@ export interface TableMetadata {
     TABLENAME?: string;
     OBJID?: number;
     SCHEMA?: string;
+    OWNER?: string;
+    DESCRIPTION?: string;
     kind?: number;
     objType?: string;
     TYPE?: string;
@@ -89,4 +91,6 @@ export interface ObjectWithSchema {
     item: TableMetadata;
     schema: string;
     objId?: number;
+    owner?: string;
+    description?: string;
 }

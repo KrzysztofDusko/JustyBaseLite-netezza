@@ -285,9 +285,14 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                                 element.dbName,
                                 element.objType,
                                 obj.schema,
-                                obj.objId, // Now includes objId from cache
-                                undefined,
-                                element.connectionName
+                                obj.objId,
+                                obj.description, // description from cache
+                                element.connectionName,
+                                undefined, // parentName
+                                undefined, // customIconPath
+                                undefined, // isPk
+                                undefined, // isFk
+                                obj.owner  // owner from cache
                             );
                         });
                     }
@@ -298,9 +303,9 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                 let query: string;
                 if (element.objType === 'PROCEDURE') {
                     // Start of Modification for Procedures
-                    query = `SELECT PROCEDURESIGNATURE AS OBJNAME, SCHEMA, OBJID::INT AS OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_PROCEDURE WHERE DATABASE = '${element.dbName}' ORDER BY PROCEDURESIGNATURE`;
+                    query = `SELECT PROCEDURESIGNATURE AS OBJNAME, SCHEMA, OBJID::INT AS OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION, OWNER FROM ${element.dbName}.._V_PROCEDURE WHERE DATABASE = '${element.dbName}' ORDER BY PROCEDURESIGNATURE`;
                 } else {
-                    query = `SELECT OBJNAME, SCHEMA, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' AND OBJTYPE = '${element.objType}' ORDER BY OBJNAME`;
+                    query = `SELECT OBJNAME, SCHEMA, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION, OWNER FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' AND OBJTYPE = '${element.objType}' ORDER BY OBJNAME`;
                 }
                 const result = await runQueryRaw(
                     this.context,
@@ -309,7 +314,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     this.connectionManager,
                     element.connectionName
                 );
-                const objects = result ? queryResultToRows<{ OBJNAME: string; SCHEMA?: string; OBJID?: number; DESCRIPTION?: string }>(result) : [];
+                const objects = result ? queryResultToRows<{ OBJNAME: string; SCHEMA?: string; OBJID?: number; DESCRIPTION?: string; OWNER?: string }>(result) : [];
 
                 // Write-back to cache to warm it up
                 // Group by Schema
@@ -343,7 +348,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                     }
                 }
 
-                return objects.map((obj: { OBJNAME: string; SCHEMA?: string; OBJID?: number; DESCRIPTION?: string }) => {
+                return objects.map((obj: { OBJNAME: string; SCHEMA?: string; OBJID?: number; DESCRIPTION?: string; OWNER?: string }) => {
                     const expandableTypes = ['TABLE', 'VIEW', 'EXTERNAL TABLE', 'SYSTEM VIEW', 'SYSTEM TABLE'];
                     const isExpandable = expandableTypes.includes(element.objType || '');
                     return new SchemaItem(
@@ -355,7 +360,12 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
                         obj.SCHEMA,
                         obj.OBJID,
                         obj.DESCRIPTION,
-                        element.connectionName
+                        element.connectionName,
+                        undefined, // parentName
+                        undefined, // customIconPath
+                        undefined, // isPk
+                        undefined, // isFk
+                        obj.OWNER  // owner
                     );
                 });
             } catch (e: unknown) {
@@ -473,7 +483,8 @@ export class SchemaItem extends vscode.TreeItem {
         public readonly parentName?: string, // Add parent (Table) name for stable ID
         customIconPath?: vscode.Uri,
         public readonly isPk?: boolean,
-        public readonly isFk?: boolean
+        public readonly isFk?: boolean,
+        public readonly owner?: string
     ) {
         super(label, collapsibleState);
 
@@ -487,6 +498,9 @@ export class SchemaItem extends vscode.TreeItem {
         }
         if (schema && contextValue.startsWith('netezza:')) {
             tooltipText += `\n\nSchema: ${schema}`;
+        }
+        if (owner && contextValue.startsWith('netezza:')) {
+            tooltipText += `\nOwner: ${owner}`;
         }
 
         if (this.isPk) tooltipText += `\n🔑 Primary Key`;

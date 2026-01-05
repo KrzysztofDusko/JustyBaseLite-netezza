@@ -36,6 +36,7 @@ interface QueryInfo {
     QS_CURSNIPT: number;
     QS_RESROWS: number;
     QS_RESBYTES: number;
+    USERNAME?: string;
     [key: string]: unknown;
 }
 
@@ -150,7 +151,7 @@ export class SessionMonitorView {
         if (enabled) {
             this._refreshInterval = setInterval(() => {
                 this._fetchAndSendData();
-            }, 30000); // 30 seconds
+            }, 120000); // 2 minutes
         } else if (this._refreshInterval) {
             clearInterval(this._refreshInterval);
             this._refreshInterval = undefined;
@@ -227,14 +228,16 @@ export class SessionMonitorView {
 
     private async _fetchQueries(): Promise<QueryInfo[]> {
         const sql = `
-            SELECT QS_SESSIONID, QS_PLANID, QS_CLIENTID, QS_CLIIPADDR,
-                   SUBSTR(QS_SQL, 1, 300) AS QS_SQL, 
-                   QS_STATE, QS_TSUBMIT, QS_TSTART, 
-                   QS_PRIORITY, QS_PRITXT, QS_ESTCOST, 
-                   QS_ESTDISK, QS_ESTMEM, QS_SNIPPETS, QS_CURSNIPT,
-                   QS_RESROWS, QS_RESBYTES
-            FROM _V_QRYSTAT
-            ORDER BY QS_TSTART DESC
+            SELECT Q.QS_SESSIONID, Q.QS_PLANID, Q.QS_CLIENTID, Q.QS_CLIIPADDR,
+                   SUBSTR(Q.QS_SQL, 1, 300) AS QS_SQL, 
+                   Q.QS_STATE, Q.QS_TSUBMIT, Q.QS_TSTART, 
+                   Q.QS_PRIORITY, Q.QS_PRITXT, Q.QS_ESTCOST, 
+                   Q.QS_ESTDISK, Q.QS_ESTMEM, Q.QS_SNIPPETS, Q.QS_CURSNIPT,
+                   Q.QS_RESROWS, Q.QS_RESBYTES,
+                   S.USERNAME
+            FROM _V_QRYSTAT Q
+            LEFT JOIN _V_SESSION S ON Q.QS_SESSIONID = S.ID
+            ORDER BY Q.QS_TSTART DESC
             LIMIT 100
         `;
         try {
@@ -365,7 +368,7 @@ export class SessionMonitorView {
             <h2>🖥️ Session Monitor Dashboard</h2>
             <div class="header-actions">
                 <label class="auto-refresh">
-                    <input type="checkbox" id="autoRefresh"> Auto-refresh (30s)
+                    <input type="checkbox" id="autoRefresh"> Auto-refresh (2 min)
                 </label>
                 <button id="refreshBtn" class="btn btn-primary">🔄 Refresh</button>
             </div>
@@ -386,6 +389,9 @@ export class SessionMonitorView {
         <div class="tab-content" id="sessions">
             <div class="section-header">
                 <h3>Active Sessions</h3>
+                <div class="filter-controls">
+                    <input type="text" id="sessionUserFilter" placeholder="Filter by User..." class="filter-input">
+                </div>
                 <span class="count" id="sessionCount">0 sessions</span>
             </div>
             <div class="table-container">
@@ -412,6 +418,9 @@ export class SessionMonitorView {
         <div class="tab-content hidden" id="queries">
             <div class="section-header">
                 <h3>Running Queries</h3>
+                <div class="filter-controls">
+                    <input type="text" id="queryUserFilter" placeholder="Filter by User..." class="filter-input">
+                </div>
                 <span class="count" id="queryCount">0 queries</span>
             </div>
             <div class="table-container">
@@ -419,6 +428,7 @@ export class SessionMonitorView {
                     <thead>
                         <tr>
                             <th>Session</th>
+                            <th>User</th>
                             <th>Plan ID</th>
                             <th>State</th>
                             <th>Priority</th>

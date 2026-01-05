@@ -38,10 +38,42 @@ export interface CsvExportItem {
 }
 
 /**
+ * Structured export item with column types (used by Grid export)
+ */
+export interface StructuredExportItem {
+    columns: { name: string; type?: string }[];
+    rows: unknown[][];
+    sql?: string;
+    name: string;
+}
+
+/** Numeric types whitelist for type-aware conversion */
+const numericTypes = new Set(['INT8', 'INT2', 'INT4', 'NUMERIC', 'FLOAT4', 'FLOAT8', 'INTEGER', 'BIGINT', 'SMALLINT', 'DECIMAL', 'REAL', 'DOUBLE PRECISION']);
+
+/** Check if a value should be converted to number based on column type */
+function shouldConvertToNumber(type?: string): boolean {
+    if (!type) return false;
+    return numericTypes.has(type.toUpperCase());
+}
+
+/**
  * Convert a value to number if it's a numeric string (for proper Excel formatting).
  */
 function convertToNumberIfNumericString(val: unknown): unknown {
     if (typeof val === 'string' && val.length > 0) {
+        // PRECISION SAFETY: Don't convert very long strings to numbers as JS/Excel
+        // will lose precision (IEEE 754 double precision only has ~15-17 significant digits).
+        // e.g. "11111111111111111111" would become 1.1111111111111112e+19
+        if (val.length > 15) {
+            return val;
+        }
+
+        // LEADING ZERO SAFETY: Don't convert strings with leading zeros (e.g. "0123")
+        // unless it is exactly "0" or a decimal starting with "0." (e.g. "0.123")
+        if (/^-?0\d+/.test(val)) {
+            return val;
+        }
+
         if (/^-?\d+(\.\d+)?$/.test(val)) {
             const num = parseFloat(val);
             if (Number.isFinite(num)) {
@@ -213,6 +245,122 @@ export async function exportCsvToXlsx(
         };
 
         // Copy to clipboard logic if needed
+        if (copyToClipboard) {
+            if (progressCallback) {
+                progressCallback('Copying file to clipboard...');
+            }
+            const clipboardSuccess = await copyFileToClipboard(outputPath);
+            if (exportResult.details) {
+                exportResult.details.clipboard_success = clipboardSuccess;
+            }
+        }
+
+        return exportResult;
+    } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+            success: false,
+            message: `Export failed: ${errorMsg}`
+        };
+    }
+}
+
+/**
+ * Export structured data (with column types) to XLSX file.
+ * This is used by Grid exports where we have type metadata from the database.
+ * @param items Structured export items with columns, rows, and type metadata
+ * @param outputPath Path where to save the XLSX file
+ * @param copyToClipboard If true, also copy file to clipboard (Windows only)
+ * @param progressCallback Optional callback for progress updates
+ * @returns Export result with success status and details
+ */
+export async function exportStructuredToXlsx(
+    items: StructuredExportItem[],
+    outputPath: string,
+    copyToClipboard: boolean = false,
+    progressCallback?: ProgressCallback
+): Promise<ExportResult> {
+    try {
+        if (progressCallback) {
+            progressCallback('Initializing XLSX writer...');
+        }
+
+        const writer = new XlsxWriter(outputPath);
+        let totalRows = 0;
+        let totalColumns = 0;
+        const sqlItems: { name: string; sql: string }[] = [];
+
+        for (const item of items) {
+            const sheetName = item.name || 'Sheet';
+            if (progressCallback) {
+                progressCallback(`Processing sheet "${sheetName}"...`);
+            }
+
+            const headers = item.columns.map(c => c.name);
+            const colIsNumeric = item.columns.map(c => shouldConvertToNumber(c.type));
+
+            totalColumns = Math.max(totalColumns, headers.length);
+
+            // Build rows with type-aware conversion
+            const rows: unknown[][] = item.rows.map(row =>
+                row.map((val, i) => {
+                    if (colIsNumeric[i]) {
+                        return convertToNumberIfNumericString(val);
+                    }
+                    return val;
+                })
+            );
+
+            // Add sheet and write data
+            writer.addSheet(sheetName);
+            writer.writeSheet(rows, headers, true);
+
+            totalRows += rows.length;
+
+            if (item.sql) {
+                sqlItems.push({ name: sheetName, sql: item.sql });
+            }
+        }
+
+        // Add SQL Code sheet if we have any SQL
+        if (sqlItems.length > 0) {
+            writer.addSheet('SQL Code');
+            const sqlRows: unknown[][] = [];
+            sqlItems.forEach(item => {
+                sqlRows.push([`--- SQL for ${item.name} ---`]);
+                item.sql.split('\n').forEach(line => {
+                    sqlRows.push([line]);
+                });
+                sqlRows.push(['']);
+            });
+            writer.writeSheet(sqlRows, null, false);
+        }
+
+        if (progressCallback) {
+            progressCallback('Finalizing XLSX file...');
+        }
+        await writer.finalize();
+
+        const stats = fs.statSync(outputPath);
+        const fileSizeMb = stats.size / (1024 * 1024);
+
+        if (progressCallback) {
+            progressCallback(`XLSX file created successfully`);
+            progressCallback(`  - Rows: ${totalRows.toLocaleString()}`);
+            progressCallback(`  - File size: ${fileSizeMb.toFixed(1)} MB`);
+        }
+
+        const exportResult: ExportResult = {
+            success: true,
+            message: `Successfully exported ${totalRows} rows to ${outputPath}`,
+            details: {
+                rows_exported: totalRows,
+                columns: totalColumns,
+                file_size_mb: parseFloat(fileSizeMb.toFixed(1)),
+                file_path: outputPath
+            }
+        };
+
         if (copyToClipboard) {
             if (progressCallback) {
                 progressCallback('Copying file to clipboard...');

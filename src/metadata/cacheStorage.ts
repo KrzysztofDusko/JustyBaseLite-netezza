@@ -174,7 +174,7 @@ export class CacheStorage {
                             objId = idMapEntry.data.get(lookupKey);
                         }
 
-                        results.push({ item, schema: entrySchemaName, objId });
+                        results.push({ item, schema: entrySchemaName, objId, owner: item.OWNER, description: item.DESCRIPTION });
                     }
                 }
             }
@@ -199,6 +199,31 @@ export class CacheStorage {
         const fullKey = `${connectionName}|${key}`;
         this.columnCache.set(fullKey, { data, timestamp: Date.now() });
         this.onDataChange?.('column');
+    }
+
+    /**
+     * Get columns for a table from any schema.
+     * Used for double-dot pattern (DB..TABLE) where schema is not specified.
+     * Returns the first matching columns found for the table name.
+     */
+    getColumnsAnySchema(connectionName: string, dbName: string, tableName: string): ColumnMetadata[] | undefined {
+        const prefix = `${connectionName}|${dbName}.`;
+        const upperTableName = tableName.toUpperCase();
+
+        for (const [key, entry] of this.columnCache) {
+            if (key.startsWith(prefix)) {
+                // Key format: "CONN|DB.SCHEMA.TABLE"
+                // Extract table name from key
+                const parts = key.split('.');
+                if (parts.length >= 3) {
+                    const keyTableName = parts[parts.length - 1].toUpperCase();
+                    if (keyTableName === upperTableName && this.isEntryValid(entry.timestamp)) {
+                        return entry.data;
+                    }
+                }
+            }
+        }
+        return undefined;
     }
 
     // ========== Table ID Lookup ==========

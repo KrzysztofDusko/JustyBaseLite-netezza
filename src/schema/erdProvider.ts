@@ -143,9 +143,11 @@ export async function getTablesInSchema(
     connectionManager: ConnectionManager,
     connectionName: string,
     database: string,
-    schema: string
+    schema: string,
+    progress?: vscode.Progress<{ message?: string; increment?: number }>
 ): Promise<TableNode[]> {
     // Get all tables in schema
+    progress?.report({ message: 'Fetching tables list...' });
     const tablesSql = `
         SELECT 
             T.TABLENAME,
@@ -205,6 +207,7 @@ export async function getTablesInSchema(
         }
 
         // Get columns
+        progress?.report({ message: 'Fetching columns...' });
         const columnsResult = await runQueryRaw(context, columnsSql, true, connectionManager, connectionName);
         if (columnsResult && columnsResult.data) {
             const columnsRows = queryResultToRows<{ TABLENAME: string; ATTNAME: string; FORMAT_TYPE: string } & { [key: string]: unknown }>(columnsResult);
@@ -222,6 +225,7 @@ export async function getTablesInSchema(
         }
 
         // Get primary keys
+        progress?.report({ message: 'Fetching primary keys...' });
         const pkResult = await runQueryRaw(context, pkSql, true, connectionManager, connectionName);
         if (pkResult && pkResult.data) {
             const pkRows = queryResultToRows<{ RELATION: string; ATTNAME: string } & { [key: string]: unknown }>(pkResult);
@@ -251,11 +255,12 @@ export async function buildERDData(
     connectionManager: ConnectionManager,
     connectionName: string,
     database: string,
-    schema: string
+    schema: string,
+    progress?: vscode.Progress<{ message?: string; increment?: number }>
 ): Promise<ERDData> {
     // Get all tables and relationships
     const [tables, relationships] = await Promise.all([
-        getTablesInSchema(context, connectionManager, connectionName, database, schema),
+        getTablesInSchema(context, connectionManager, connectionName, database, schema, progress),
         getForeignKeysForSchema(context, connectionManager, connectionName, database, schema)
     ]);
 

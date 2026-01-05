@@ -7,6 +7,17 @@
 // Using unique names to avoid TypeScript duplicate function errors across test files
 function _convertToNumberIfNumericString(val: unknown): unknown {
     if (typeof val === 'string' && val.length > 0) {
+        // PRECISION SAFETY: Don't convert very long strings to numbers
+        if (val.length > 15) {
+            return val;
+        }
+
+        // LEADING ZERO SAFETY: Don't convert strings with leading zeros (e.g. "0123")
+        // unless it is exactly "0" or a decimal starting with "0." (e.g. "0.123")
+        if (/^-?0\d+/.test(val)) {
+            return val;
+        }
+
         // Check if it's a numeric string (including negatives and decimals)
         if (/^-?\d+(\.\d+)?$/.test(val)) {
             const num = parseFloat(val);
@@ -57,6 +68,16 @@ describe('export/xlsbExporter', () => {
 
             it('should convert large integer string to number', () => {
                 expect(_convertToNumberIfNumericString('9999999')).toBe(9999999);
+            });
+
+            it('should NOT convert very long integer string (precision safety)', () => {
+                const longNum = '11111111111111111111'; // 20 chars
+                expect(_convertToNumberIfNumericString(longNum)).toBe(longNum);
+            });
+
+            it('should NOT convert string with leading zeros (leading zero safety)', () => {
+                expect(_convertToNumberIfNumericString('0123')).toBe('0123');
+                expect(_convertToNumberIfNumericString('-0123')).toBe('-0123');
             });
         });
 
@@ -122,12 +143,9 @@ describe('export/xlsbExporter', () => {
 
         describe('edge cases', () => {
             it('should not convert string with leading zeros (except after decimal)', () => {
-                // '0123' should be treated as non-numeric (could be octal intent)
-                // But the regex /^-?\d+(\.\d+)?$/ would match it...
-                // Let's check actual behavior
+                // '0123' should be preserved as string to keep leading zero
                 const result = _convertToNumberIfNumericString('0123');
-                // parseFloat('0123') = 123, but the string matches the regex
-                expect(result).toBe(123);
+                expect(result).toBe('0123');
             });
 
             it('should not convert string with plus sign', () => {

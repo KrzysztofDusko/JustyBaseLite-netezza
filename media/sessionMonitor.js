@@ -2,12 +2,24 @@
 (function () {
     const vscode = acquireVsCodeApi();
 
+    // State
+    let currentData = {
+        sessions: [],
+        queries: [],
+        storage: [],
+        resources: {}
+    };
+
     // DOM Elements
     const refreshBtn = document.getElementById('refreshBtn');
     const autoRefreshCheckbox = document.getElementById('autoRefresh');
     const loadingOverlay = document.getElementById('loadingOverlay');
     const tabButtons = document.querySelectorAll('.tab-btn');
     const tabContents = document.querySelectorAll('.tab-content');
+
+    // Filter Inputs
+    const sessionUserFilter = document.getElementById('sessionUserFilter');
+    const queryUserFilter = document.getElementById('queryUserFilter');
 
     // Event Listeners
     refreshBtn.addEventListener('click', () => {
@@ -16,6 +28,15 @@
 
     autoRefreshCheckbox.addEventListener('change', (e) => {
         vscode.postMessage({ command: 'toggleAutoRefresh', enabled: e.target.checked });
+    });
+
+    // Filter listeners
+    sessionUserFilter.addEventListener('input', () => {
+        renderSessions();
+    });
+
+    queryUserFilter.addEventListener('input', () => {
+        renderQueries();
     });
 
     // Tab switching
@@ -50,19 +71,29 @@
     });
 
     function renderData(data) {
-        if (data.sessions) renderSessions(data.sessions);
-        if (data.queries) renderQueries(data.queries);
+        currentData = { ...currentData, ...data };
+
+        if (data.sessions) renderSessions();
+        if (data.queries) renderQueries();
         if (data.storage) renderStorage(data.storage);
         if (data.resources) renderResources(data.resources);
     }
 
-    function renderSessions(sessions) {
+    function renderSessions() {
+        const sessions = currentData.sessions || [];
+        const filterValue = sessionUserFilter.value.toLowerCase();
+
+        const filteredSessions = sessions.filter(s => {
+            if (!filterValue) return true;
+            return (s.USERNAME || '').toLowerCase().includes(filterValue);
+        });
+
         const tbody = document.querySelector('#sessionsTable tbody');
         const countEl = document.getElementById('sessionCount');
 
-        countEl.textContent = `${sessions.length} sessions`;
+        countEl.textContent = `${filteredSessions.length} sessions`;
 
-        if (sessions.length === 0) {
+        if (filteredSessions.length === 0) {
             tbody.innerHTML = `<tr><td colspan="10" class="empty-state">
                 <div class="empty-state-icon">📋</div>
                 No active sessions found
@@ -70,7 +101,7 @@
             return;
         }
 
-        tbody.innerHTML = sessions.map(s => `
+        tbody.innerHTML = filteredSessions.map(s => `
             <tr>
                 <td>${s.ID || ''}</td>
                 <td>${s.PID || ''}</td>
@@ -96,23 +127,32 @@
         });
     }
 
-    function renderQueries(queries) {
+    function renderQueries() {
+        const queries = currentData.queries || [];
+        const filterValue = queryUserFilter.value.toLowerCase();
+
+        const filteredQueries = queries.filter(q => {
+            if (!filterValue) return true;
+            return (q.USERNAME || '').toLowerCase().includes(filterValue);
+        });
+
         const tbody = document.querySelector('#queriesTable tbody');
         const countEl = document.getElementById('queryCount');
 
-        countEl.textContent = `${queries.length} queries`;
+        countEl.textContent = `${filteredQueries.length} queries`;
 
-        if (queries.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="9" class="empty-state">
+        if (filteredQueries.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="10" class="empty-state">
                 <div class="empty-state-icon">⏱️</div>
                 No running queries
             </td></tr>`;
             return;
         }
 
-        tbody.innerHTML = queries.map(q => `
+        tbody.innerHTML = filteredQueries.map(q => `
             <tr>
                 <td>${q.QS_SESSIONID || ''}</td>
+                <td><strong>${q.USERNAME || ''}</strong></td>
                 <td>${q.QS_PLANID || ''}</td>
                 <td><span class="status-badge status-${(q.QS_STATE || '').toLowerCase()}">${q.QS_STATE || ''}</span></td>
                 <td>${q.QS_PRITXT || q.QS_PRIORITY || ''}</td>

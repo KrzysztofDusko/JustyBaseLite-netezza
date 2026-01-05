@@ -42,6 +42,8 @@ interface RawObjectRow {
     SCHEMA: string;
     DBNAME: string;
     OBJTYPE?: string;
+    OWNER?: string;
+    DESCRIPTION?: string;
     [key: string]: unknown;
 }
 
@@ -53,6 +55,12 @@ interface RawColumnRow {
     SCHEMA?: string;
     DBNAME?: string;
     [key: string]: unknown;
+}
+
+interface RawColumnRowWithPkFk extends RawColumnRow {
+    IS_PK: number | string;
+    IS_FK: number | string;
+    DESCRIPTION?: string;
 }
 
 interface RawSchemaRow {
@@ -118,20 +126,34 @@ export class CachePrefetcher {
             const dbPrefix = `${dbName}..`;
             const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
 
+            // Enhanced query with PK/FK information and description
             const query = `
-                SELECT O.OBJNAME AS TABLENAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
+                SELECT 
+                    O.OBJNAME AS TABLENAME,
+                    C.ATTNAME,
+                    C.FORMAT_TYPE,
+                    C.ATTNUM,
+                    COALESCE(C.DESCRIPTION, '') AS DESCRIPTION,
+                    MAX(CASE WHEN K.CONTYPE = 'p' THEN 1 ELSE 0 END) AS IS_PK,
+                    MAX(CASE WHEN K.CONTYPE = 'f' THEN 1 ELSE 0 END) AS IS_FK
                 FROM ${dbPrefix}_V_RELATION_COLUMN C
                 JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
+                LEFT JOIN ${dbPrefix}_V_RELATION_KEYDATA K 
+                    ON UPPER(K.RELATION) = UPPER(O.OBJNAME) 
+                    AND UPPER(K.SCHEMA) = UPPER(O.SCHEMA)
+                    AND UPPER(K.ATTNAME) = UPPER(C.ATTNAME)
+                    AND K.CONTYPE IN ('p', 'f')
                 WHERE UPPER(O.DBNAME) = UPPER('${dbName}')
                 ${schemaClause}
                 AND O.OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
+                GROUP BY O.OBJNAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM, C.DESCRIPTION
                 ORDER BY O.OBJNAME, C.ATTNUM
             `;
 
             try {
                 const result = await runQueryFn(query);
                 if (result) {
-                    const results = queryResultToRows<RawColumnRow>(result);
+                    const results = queryResultToRows<RawColumnRowWithPkFk>(result);
                     const columnsByTable = new Map<string, ColumnMetadata[]>();
                     for (const row of results) {
                         const tableName = row.TABLENAME;
@@ -141,9 +163,12 @@ export class CachePrefetcher {
                         columnsByTable.get(tableName)!.push({
                             ATTNAME: row.ATTNAME,
                             FORMAT_TYPE: row.FORMAT_TYPE,
-                            label: row.ATTNAME, // Add label to satisfy extractLabel
+                            label: row.ATTNAME,
                             kind: 5,
-                            detail: row.FORMAT_TYPE
+                            detail: row.FORMAT_TYPE,
+                            documentation: row.DESCRIPTION || '',
+                            isPk: Number(row.IS_PK) === 1,
+                            isFk: Number(row.IS_FK) === 1
                         });
                     }
 
@@ -173,7 +198,7 @@ export class CachePrefetcher {
 
         try {
             const tablesQuery = `
-                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE
+                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, COALESCE(DESCRIPTION, '') AS DESCRIPTION
                 FROM _V_OBJECT_DATA 
                 WHERE OBJTYPE IN ('TABLE', 'VIEW') 
                 ORDER BY DBNAME, SCHEMA, OBJNAME
@@ -194,11 +219,13 @@ export class CachePrefetcher {
                 entry.tables.push({
                     OBJNAME: row.OBJNAME,
                     label: row.OBJNAME,
-                    kind: row.OBJTYPE === 'VIEW' ? 18 : 6, // 18=View, 6=Table (using 6 to match prefetchAllTablesAndViews logic)
+                    kind: row.OBJTYPE === 'VIEW' ? 18 : 6,
                     detail: row.SCHEMA ? (row.OBJTYPE === 'VIEW' ? 'View' : 'Table') : `${row.OBJTYPE === 'VIEW' ? 'View' : 'Table'} (${row.SCHEMA})`,
-                    objType: row.OBJTYPE, // Explicitly set objType
+                    objType: row.OBJTYPE,
                     OBJID: row.OBJID,
-                    SCHEMA: row.SCHEMA
+                    SCHEMA: row.SCHEMA,
+                    OWNER: row.OWNER,
+                    DESCRIPTION: row.DESCRIPTION
                 });
 
                 const fullKey = row.SCHEMA
@@ -329,7 +356,7 @@ export class CachePrefetcher {
     private async prefetchAllTablesAndViews(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
         try {
             const query = `
-                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE
+                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, COALESCE(DESCRIPTION, '') AS DESCRIPTION
                 FROM _V_OBJECT_DATA 
                 WHERE OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
                 ORDER BY DBNAME, SCHEMA, OBJNAME
@@ -354,7 +381,8 @@ export class CachePrefetcher {
                     kind: row.OBJTYPE === 'VIEW' ? 18 : 6,
                     detail: row.SCHEMA ? row.OBJTYPE : `${row.OBJTYPE} (${row.SCHEMA})`,
                     objType: row.OBJTYPE,
-                    // sortText: row.OBJNAME // Add to interface or use loose property
+                    OWNER: row.OWNER,
+                    DESCRIPTION: row.DESCRIPTION
                 });
 
                 const fullKey = row.SCHEMA
@@ -419,13 +447,28 @@ export class CachePrefetcher {
 
             // Process all databases in parallel
             const dbPromises = Array.from(tablesByDb.entries()).map(async ([dbName, dbBatch]) => {
+                // Enhanced query with PK/FK information and description
                 const query = `
-                    SELECT O.OBJNAME AS TABLENAME, O.SCHEMA, O.DBNAME, 
-                           C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM
+                    SELECT 
+                        O.OBJNAME AS TABLENAME, 
+                        O.SCHEMA, 
+                        O.DBNAME, 
+                        C.ATTNAME, 
+                        C.FORMAT_TYPE, 
+                        C.ATTNUM,
+                        COALESCE(C.DESCRIPTION, '') AS DESCRIPTION,
+                        MAX(CASE WHEN K.CONTYPE = 'p' THEN 1 ELSE 0 END) AS IS_PK,
+                        MAX(CASE WHEN K.CONTYPE = 'f' THEN 1 ELSE 0 END) AS IS_FK
                     FROM ${dbName}.._V_RELATION_COLUMN C
                     JOIN ${dbName}.._V_OBJECT_DATA O ON C.OBJID = O.OBJID
+                    LEFT JOIN ${dbName}.._V_RELATION_KEYDATA K 
+                        ON UPPER(K.RELATION) = UPPER(O.OBJNAME) 
+                        AND UPPER(K.SCHEMA) = UPPER(O.SCHEMA)
+                        AND UPPER(K.ATTNAME) = UPPER(C.ATTNAME)
+                        AND K.CONTYPE IN ('p', 'f')
                     WHERE O.DBNAME = '${dbName}' 
                     AND O.OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
+                    GROUP BY O.OBJNAME, O.SCHEMA, O.DBNAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM, C.DESCRIPTION
                     ORDER BY O.SCHEMA, O.OBJNAME, C.ATTNUM
                 `;
 
@@ -436,7 +479,7 @@ export class CachePrefetcher {
 
                     if (result) {
                         const parseStartTime = Date.now();
-                        const results = queryResultToRows<RawColumnRow>(result);
+                        const results = queryResultToRows<RawColumnRowWithPkFk>(result);
                         const parseDuration = Date.now() - parseStartTime;
 
                         const columnsByKey = new Map<string, ColumnMetadata[]>();
@@ -451,7 +494,10 @@ export class CachePrefetcher {
                                 FORMAT_TYPE: row.FORMAT_TYPE,
                                 label: row.ATTNAME,
                                 kind: 5,
-                                detail: row.FORMAT_TYPE
+                                detail: row.FORMAT_TYPE,
+                                documentation: row.DESCRIPTION || '',
+                                isPk: Number(row.IS_PK) === 1,
+                                isFk: Number(row.IS_FK) === 1
                             });
                         }
 

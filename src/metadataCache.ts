@@ -103,6 +103,10 @@ export class MetadataCache {
         return this.storage.getColumns(connectionName, key);
     }
 
+    getColumnsAnySchema(connectionName: string, dbName: string, tableName: string): ColumnMetadata[] | undefined {
+        return this.storage.getColumnsAnySchema(connectionName, dbName, tableName);
+    }
+
     setColumns(connectionName: string, key: string, data: ColumnMetadata[]): void {
         this.storage.setColumns(connectionName, key, data);
     }

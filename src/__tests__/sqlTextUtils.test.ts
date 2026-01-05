@@ -2,7 +2,7 @@
  * Unit tests for sql/sqlTextUtils.ts
  */
 
-import { stripCommentsAndLiterals, searchInCode } from '../sql/sqlTextUtils';
+import { stripCommentsAndLiterals, searchInCode, stripComments, searchInCodeWithMode } from '../sql/sqlTextUtils';
 
 describe('sql/sqlTextUtils', () => {
     describe('stripCommentsAndLiterals', () => {
@@ -139,6 +139,59 @@ FROM table1`;
         it('should return false when term not found', () => {
             const sql = 'SELECT * FROM orders';
             expect(searchInCode(sql, 'users')).toBe(false);
+        });
+    });
+});
+
+describe('sql/sqlTextUtils - new functions', () => {
+    describe('stripComments', () => {
+        it('should remove single-line comments but keep string literals', () => {
+            const sql = "SELECT 'hello' FROM t -- comment";
+            const result = stripComments(sql);
+            expect(result).toContain("'hello'");
+            expect(result).not.toContain('comment');
+        });
+
+        it('should remove multi-line comments but keep string literals', () => {
+            const sql = "SELECT /* comment */ 'value' FROM t";
+            const result = stripComments(sql);
+            expect(result).toContain("'value'");
+            expect(result).not.toContain('comment');
+        });
+
+        it('should preserve string with escaped quotes', () => {
+            const sql = "SELECT 'it''s a test' FROM t";
+            const result = stripComments(sql);
+            expect(result).toContain("'it''s a test'");
+        });
+    });
+
+    describe('searchInCodeWithMode', () => {
+        const sql = "SELECT 'users' FROM orders -- users table";
+
+        it('should find in raw mode (comments and strings included)', () => {
+            expect(searchInCodeWithMode(sql, 'users', 'raw')).toBe(true);
+        });
+
+        it('should find in noComments mode when term is in string', () => {
+            expect(searchInCodeWithMode(sql, 'users', 'noComments')).toBe(true);
+        });
+
+        it('should NOT find in noCommentsNoLiterals mode when term is only in string/comment', () => {
+            expect(searchInCodeWithMode(sql, 'users', 'noCommentsNoLiterals')).toBe(false);
+        });
+
+        it('should find term in actual code in all modes', () => {
+            expect(searchInCodeWithMode(sql, 'orders', 'raw')).toBe(true);
+            expect(searchInCodeWithMode(sql, 'orders', 'noComments')).toBe(true);
+            expect(searchInCodeWithMode(sql, 'orders', 'noCommentsNoLiterals')).toBe(true);
+        });
+
+        it('should find term only in comment in raw mode', () => {
+            const sqlWithComment = "SELECT * FROM t -- secret_table";
+            expect(searchInCodeWithMode(sqlWithComment, 'secret_table', 'raw')).toBe(true);
+            expect(searchInCodeWithMode(sqlWithComment, 'secret_table', 'noComments')).toBe(false);
+            expect(searchInCodeWithMode(sqlWithComment, 'secret_table', 'noCommentsNoLiterals')).toBe(false);
         });
     });
 });

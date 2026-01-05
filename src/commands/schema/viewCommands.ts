@@ -66,7 +66,7 @@ export function registerViewCommands(deps: SchemaCommandsDependencies): vscode.D
                 let relCount = 0;
                 await executeWithProgress(
                     `Building ERD for ${database}.${selectedSchema}...`,
-                    async () => {
+                    async (progress) => {
                         const { buildERDData } = await import('../../schema/erdProvider');
                         const { ERDView } = await import('../../views/erdView');
 
@@ -75,7 +75,8 @@ export function registerViewCommands(deps: SchemaCommandsDependencies): vscode.D
                             connectionManager,
                             connectionName,
                             database!,
-                            selectedSchema
+                            selectedSchema,
+                            progress
                         );
 
                         tableCount = erdData.tables.length;

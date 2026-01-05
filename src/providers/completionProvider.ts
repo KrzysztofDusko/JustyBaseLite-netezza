@@ -3,6 +3,7 @@ import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 import { MetadataCache } from '../metadataCache';
 import { ConnectionManager } from '../core/connectionManager';
 import { DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from '../metadata/types';
+import { buildColumnMetadataQuery, parseColumnMetadata } from './tableMetadataProvider';
 
 export class SqlCompletionItemProvider implements vscode.CompletionItemProvider {
     constructor(
@@ -402,6 +403,78 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         return null;
     }
 
+    /**
+     * Build simple column query for cases when we don't have full database and schema info.
+     * Falls back to simpler queries without PK/FK information.
+     */
+    private buildSimpleColumnQuery(
+        dbPrefix: string,
+        objId: number | undefined,
+        tableName: string,
+        schemaName: string | undefined,
+        dbName: string | undefined
+    ): string {
+        if (objId) {
+            return `SELECT ATTNAME, FORMAT_TYPE FROM ${dbPrefix}_V_RELATION_COLUMN WHERE OBJID = ${objId} ORDER BY ATTNUM`;
+        }
+        const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
+        const dbClause = dbName ? `AND UPPER(O.DBNAME) = UPPER('${dbName}')` : '';
+        return `
+            SELECT C.ATTNAME, C.FORMAT_TYPE 
+            FROM ${dbPrefix}_V_RELATION_COLUMN C
+            JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
+            WHERE UPPER(O.OBJNAME) = UPPER('${tableName}') ${schemaClause} ${dbClause}
+            ORDER BY C.ATTNUM
+        `;
+    }
+
+    /**
+     * Create a CompletionItem for a column with PK/FK indicators
+     */
+    private createColumnCompletionItem(item: ColumnMetadata): vscode.CompletionItem {
+        const name = item.label || item.ATTNAME;
+
+        // Add key indicator to label
+        let label = name;
+        if (item.isPk) {
+            label = `🔑 ${name}`;
+        } else if (item.isFk) {
+            label = `🔗 ${name}`;
+        }
+
+        const ci = new vscode.CompletionItem(label, item.kind || vscode.CompletionItemKind.Field);
+
+        // Set insertText to just the column name (without emoji)
+        ci.insertText = name;
+
+        // Build detail with type and key info
+        let detail = item.detail || '';
+        if (item.isPk && item.isFk) {
+            detail += ' (PK, FK)';
+        } else if (item.isPk) {
+            detail += ' (PK)';
+        } else if (item.isFk) {
+            detail += ' (FK)';
+        }
+        ci.detail = detail;
+
+        // Add documentation (description) - shows in the sidebar panel
+        if (item.documentation) {
+            ci.documentation = new vscode.MarkdownString(item.documentation);
+        }
+
+        // Sort PK first, then FK, then regular columns
+        if (item.isPk) {
+            ci.sortText = `0_${name}`;
+        } else if (item.isFk) {
+            ci.sortText = `1_${name}`;
+        } else {
+            ci.sortText = `2_${name}`;
+        }
+
+        return ci;
+    }
+
     private getKeywords(): vscode.CompletionItem[] {
         const keywords = [
             'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'LIMIT', 'INSERT', 'INTO', 'VALUES',
@@ -528,6 +601,9 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 const label = typeof item.label === 'string' ? item.label : (item.label?.label || item.OBJNAME || item.TABLENAME || '?');
                 const ci = new vscode.CompletionItem(label, item.kind || vscode.CompletionItemKind.Class);
                 ci.detail = item.detail;
+                if (item.DESCRIPTION) {
+                    ci.documentation = new vscode.MarkdownString(item.DESCRIPTION);
+                }
                 ci.sortText = item.sortText;
                 return ci;
             });
@@ -541,15 +617,15 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         try {
             let query = '';
             if (schemaName) {
-                query = `SELECT OBJNAME, OBJID FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND UPPER(SCHEMA) = UPPER('${schemaName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
+                query = `SELECT OBJNAME, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND UPPER(SCHEMA) = UPPER('${schemaName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
             } else {
-                query = `SELECT OBJNAME, OBJID, SCHEMA FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
+                query = `SELECT OBJNAME, OBJID, SCHEMA, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
             }
 
             const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
             if (!result) return [];
 
-            const results = queryResultToRows<{ OBJNAME: string; OBJID: number; SCHEMA?: string }>(result);
+            const results = queryResultToRows<{ OBJNAME: string; OBJID: number; SCHEMA?: string; DESCRIPTION?: string }>(result);
             const idMapForKey = new Map<string, number>();
 
             const items: TableMetadata[] = results.map(row => {
@@ -570,7 +646,8 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                     label: label,
                     kind: 6, // Class
                     detail: schemaName ? 'Table' : `Table (${schema})`,
-                    sortText: row.OBJNAME
+                    sortText: row.OBJNAME,
+                    DESCRIPTION: row.DESCRIPTION
                 };
             });
 
@@ -580,6 +657,9 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 const label = typeof item.label === 'string' ? item.label : (item.label?.label || '?');
                 const ci = new vscode.CompletionItem(label, item.kind);
                 ci.detail = item.detail;
+                if (item.DESCRIPTION) {
+                    ci.documentation = new vscode.MarkdownString(item.DESCRIPTION);
+                }
                 ci.sortText = item.sortText;
                 return ci;
             });
@@ -615,43 +695,57 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         const cacheKey = `${dbName || 'CURRENT'}.${schemaName || ''}.${tableName}`;
         const cached = this.metadataCache.getColumns(connectionName, cacheKey);
         if (cached) {
-            return cached.map((item) => {
-                const ci = new vscode.CompletionItem(item.label || item.ATTNAME, item.kind || vscode.CompletionItemKind.Field);
-                ci.detail = item.detail;
-                return ci;
-            });
+            return cached.map((item) => this.createColumnCompletionItem(item));
+        }
+
+        // When schema is not specified (double-dot pattern), try to find columns from any schema
+        if (!schemaName && dbName) {
+            const cachedAny = this.metadataCache.getColumnsAnySchema(connectionName, dbName, tableName);
+            if (cachedAny) {
+                return cachedAny.map((item) => this.createColumnCompletionItem(item));
+            }
         }
 
         const statusMsg = vscode.window.setStatusBarMessage(`Fetching columns for ${tableName}...`);
 
         try {
-            let query = '';
-            if (objId) {
-                query = `SELECT ATTNAME, FORMAT_TYPE FROM ${dbPrefix}_V_RELATION_COLUMN WHERE OBJID = ${objId} ORDER BY ATTNUM`;
-            } else {
-                const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
-                const dbClause = dbName ? `AND UPPER(O.DBNAME) = UPPER('${dbName}')` : '';
-                query = `
-                    SELECT C.ATTNAME, C.FORMAT_TYPE 
-                    FROM ${dbPrefix}_V_RELATION_COLUMN C
-                    JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                    WHERE UPPER(O.OBJNAME) = UPPER('${tableName}') ${schemaClause} ${dbClause}
-                    ORDER BY C.ATTNUM
-                `;
-            }
+            // Use the canonical column query that includes PK/FK information
+            // This ensures the cache is populated with full metadata for Schema tree view
+            const effectiveSchema = schemaName || '';
+            const effectiveDb = dbName || '';
+
+            const query = effectiveDb && effectiveSchema
+                ? buildColumnMetadataQuery(effectiveDb, effectiveSchema, tableName)
+                : this.buildSimpleColumnQuery(dbPrefix, objId, tableName, schemaName, dbName);
 
             const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
             if (!result) return [];
 
-            const results = queryResultToRows<{ ATTNAME: string; FORMAT_TYPE: string }>(result);
-
-            const items: ColumnMetadata[] = results.map(row => ({
-                ATTNAME: row.ATTNAME,
-                FORMAT_TYPE: row.FORMAT_TYPE,
-                label: row.ATTNAME,
-                kind: 9, // Field
-                detail: row.FORMAT_TYPE
-            }));
+            // Use parseColumnMetadata if we used the full query, otherwise parse simple result
+            let items: ColumnMetadata[];
+            if (effectiveDb && effectiveSchema) {
+                const parsed = parseColumnMetadata(result);
+                items = parsed.map(col => ({
+                    ATTNAME: col.attname,
+                    FORMAT_TYPE: col.formatType,
+                    label: col.attname,
+                    kind: 5, // Field
+                    detail: col.formatType,
+                    isPk: col.isPk,
+                    isFk: col.isFk,
+                    documentation: col.description
+                }));
+            } else {
+                // Fallback for queries without full schema - no PK/FK info
+                const results = queryResultToRows<{ ATTNAME: string; FORMAT_TYPE: string }>(result);
+                items = results.map(row => ({
+                    ATTNAME: row.ATTNAME,
+                    FORMAT_TYPE: row.FORMAT_TYPE,
+                    label: row.ATTNAME,
+                    kind: 5, // Field
+                    detail: row.FORMAT_TYPE
+                }));
+            }
 
             this.metadataCache.setColumns(connectionName, cacheKey, items);
 
@@ -673,11 +767,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 });
             }
 
-            return items.map(item => {
-                const ci = new vscode.CompletionItem(item.label!, item.kind);
-                ci.detail = item.detail;
-                return ci;
-            });
+            return items.map(item => this.createColumnCompletionItem(item));
         } catch (e: unknown) {
             console.error(e);
             return [];

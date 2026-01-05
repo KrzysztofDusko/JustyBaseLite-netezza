@@ -2319,23 +2319,30 @@ function getAllGridsExportData() {
         if (!grid || !grid.tanTable) return;
 
         const table = grid.tanTable;
-        const rows = table.getFilteredRowModel().rows;
-        const headers = table.getAllColumns().filter(col => col.getIsVisible());
+        const filteredRows = table.getFilteredRowModel().rows;
+        const visibleHeaders = table.getAllColumns().filter(col => col.getIsVisible());
 
-        let csv = headers.map(h => escapeCsvValue(h.columnDef.header)).join(',') + '\n';
-
-        rows.forEach(row => {
-            const rowData = headers.map(header => {
-                const cell = row.getValue(header.id);
-                return escapeCsvValue(cell);
-            });
-            csv += rowData.join(',') + '\n';
+        // Build column metadata with types from original resultSet
+        // Map visible header IDs to original column definitions
+        const columns = visibleHeaders.map(h => {
+            const colIndex = parseInt(h.id);
+            const originalCol = rs.columns[colIndex];
+            return {
+                name: h.columnDef.header,
+                type: originalCol ? originalCol.type : undefined
+            };
         });
 
+        // Build rows as arrays of values (preserving original values)
+        const rows = filteredRows.map(row =>
+            visibleHeaders.map(header => row.getValue(header.id))
+        );
+
         exportData.push({
-            csv: csv,
+            columns: columns,
+            rows: rows,
             sql: rs.sql || '',
-            name: rs.name || `Result ${index + 1}`, // Use result set name if available
+            name: rs.name || `Result ${index + 1}`,
             isActive: index === activeGridIndex
         });
     });
