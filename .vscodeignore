@@ -24,7 +24,8 @@ dist/*.map
 node_modules/
 libs/
 
-Icon.png
+# Icon.png
+IconSanta.png
 
 samples/
 docs/

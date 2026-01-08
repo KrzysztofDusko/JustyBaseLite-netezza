@@ -2,14 +2,14 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "0.0.24",
+  "version": "1.0.0",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
     "url": "https://www.linkedin.com/in/krzysztof-du%C5%9Bko-124b48195/"
   },
   "license": "Apache-2.0",
-  "icon": "IconSanta.png",
+  "icon": "Icon.png",
   "galleryBanner": {
     "color": "#0066CC",
     "theme": "dark"
@@ -715,6 +715,5 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.50.0",
     "yauzl": "^3.2.0"
-  },
-  "preview": true
+  }
 }
