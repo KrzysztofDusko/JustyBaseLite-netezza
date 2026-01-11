@@ -86,7 +86,11 @@ export class EditDataProvider {
                             tableName,
                             item.connectionName,
                             context,
-                            connectionManager
+                            connectionManager,
+                            {
+                                whereClause: message.whereClause,
+                                columns: message.columns
+                            }
                         );
                         break;
 
@@ -184,7 +188,8 @@ export class EditDataProvider {
         table: string,
         connectionName: string,
         context: vscode.ExtensionContext,
-        connectionManager: ConnectionManager
+        connectionManager: ConnectionManager,
+        options: { whereClause?: string; columns?: string } = {}
     ) {
         const fullTableName = `${db}.${schema}.${table}`;
         try {
@@ -193,10 +198,33 @@ export class EditDataProvider {
             // Use centralized tableMetadataProvider for metadata queries
             const queryRunner = (query: string) => runQueryRaw(context, query, true, connectionManager, connectionName);
 
+            // Prepare Query
+            let selectList = 'ROWID, *';
+            if (options.columns && options.columns.trim()) {
+                const cols = options.columns.trim();
+                // Ensure ROWID is included if not present
+                if (!/\bROWID\b/i.test(cols)) {
+                    selectList = 'ROWID, ' + cols;
+                } else {
+                    selectList = cols;
+                }
+            }
+
+            let query = `SELECT ${selectList} FROM ${fullTableName}`;
+            if (options.whereClause && options.whereClause.trim()) {
+                const where = options.whereClause.trim();
+                if (/^\s*WHERE\s/i.test(where)) {
+                    query += ` ${where}`;
+                } else {
+                    query += ` WHERE ${where}`;
+                }
+            }
+            query += ' LIMIT 50000';
+
             const [dataResult, metadata] = await Promise.all([
                 runQueryRaw(
                     context,
-                    `SELECT ROWID, * FROM ${fullTableName} LIMIT 50000`,
+                    query,
                     true,
                     connectionManager,
                     connectionName
@@ -222,11 +250,27 @@ export class EditDataProvider {
             }
 
             // Columns extraction
+            // Columns extraction
             let columns: string[] = [];
-            if (columnsMeta.length > 0) {
-                columns = ['ROWID', ...columnsMeta.map((c: { ATTNAME: string }) => c.ATTNAME)];
-            } else if (data.length > 0) {
+
+            // 1. If we have data, use the keys from data (most accurate for what was returned)
+            if (data.length > 0) {
                 columns = Object.keys(data[0]);
+                // Ensure ROWID is first if present
+                if (columns.includes('ROWID')) {
+                    columns = ['ROWID', ...columns.filter(c => c !== 'ROWID')];
+                }
+            }
+            // 2. If no data but we have user-selected columns, use those
+            else if (options.columns && options.columns.trim()) {
+                const cols = options.columns.trim().split(',').map(c => c.trim()).filter(c => c);
+                // We assume user wanted these, ensuring ROWID is there
+                const hasRowId = cols.some(c => c.toUpperCase() === 'ROWID');
+                columns = hasRowId ? cols : ['ROWID', ...cols];
+            }
+            // 3. Fallback to all columns from metadata
+            else if (columnsMeta.length > 0) {
+                columns = ['ROWID', ...columnsMeta.map((c: { ATTNAME: string }) => c.ATTNAME)];
             }
 
             console.log('[EditDataProvider] Sending to webview:', { dataRows: data.length, columns: columns.length });
@@ -372,9 +416,13 @@ export class EditDataProvider {
                 <!-- Tab: Data -->
                 <div id="tab-data" class="tab-content active">
                     <div class="toolbar">
+                        <div class="filter-container">
+                            <input type="text" id="filterColumns" class="toolbar-input" placeholder="Columns (e.g. ID, NAME)" title="Columns to select">
+                            <input type="text" id="filterWhere" class="toolbar-input" placeholder="WHERE clause (e.g. ID > 100)" title="WHERE filter condition">
+                        </div>
                         <span id="status" class="status"></span>
                         <div class="actions">
-                            <button id="refreshBtn">Refresh</button>
+                            <button id="refreshBtn" title="Apply Filter / Refresh">Refresh</button>
                             <button id="addRowBtn">Add Row</button>
                             <button id="saveBtn" class="primary">Save Changes</button>
                         </div>

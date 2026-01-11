@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../core/connectionManager';
-import { runQueriesSequentially, runExplainQuery, runQueriesWithStreaming, StreamingChunk } from '../core/queryRunner';
+import { runQueriesSequentially, runExplainQuery, runQueriesWithStreaming, StreamingChunk, cancelQueryByUri } from '../core/queryRunner';
 import { SqlParser } from '../sql/sqlParser';
 import { ResultPanelView } from '../views/resultPanelView';
 // sql-formatter is lazy-loaded to reduce startup time
@@ -23,6 +23,38 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
     const { context, connectionManager, resultPanelProvider } = deps;
 
     return [
+        vscode.commands.registerCommand('netezza.cancelQuery', async (sourceUri?: string | vscode.Uri, currentRowCounts?: number[]) => {
+            let uriToCancel = typeof sourceUri === 'string' ? sourceUri : sourceUri?.toString();
+            if (!uriToCancel) {
+                const editor = vscode.window.activeTextEditor;
+                if (editor) {
+                    uriToCancel = editor.document.uri.toString();
+                }
+            }
+
+            if (uriToCancel) {
+                console.log(`[netezza.cancelQuery] Cancelling: ${uriToCancel}`);
+                // 1. Update UI immediately (optimistic)
+                resultPanelProvider.cancelExecution(uriToCancel, currentRowCounts);
+
+                // 2. Perform backend cancellation (async)
+                try {
+                    await cancelQueryByUri(uriToCancel);
+                } catch (err) {
+                    console.error('[netezza.cancelQuery] Backend cancel failed:', err);
+                }
+            } else {
+                // If we don't have a specific URI, try to cancel the "active" execution in the provider
+                const activeUri = resultPanelProvider.getActiveSource();
+                if (activeUri) {
+                    console.log(`[netezza.cancelQuery] No URI provided, falling back to active source: ${activeUri}`);
+                    resultPanelProvider.cancelExecution(activeUri, currentRowCounts);
+                    await cancelQueryByUri(activeUri);
+                } else {
+                    vscode.window.showWarningMessage('No active query to cancel.');
+                }
+            }
+        }),
         // Run Query (Smart/Sequential Execution)
         vscode.commands.registerCommand('netezza.runQuery', async () => {
             const editor = vscode.window.activeTextEditor;
@@ -47,7 +79,7 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
                 if (/^\s*CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b/i.test(selectedText)) {
                     queries = [selectedText];
                 } else {
-                    queries = SqlParser.splitStatements(selectedText);
+                    queries = SqlParser.splitStatements(selectedText).filter(q => q.trim().length > 0);
                 }
             } else {
                 const offset = document.offsetAt(selection.active);
@@ -108,37 +140,54 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
                 const enableStreaming = config.get<boolean>('enableStreaming', false);
                 const streamingChunkSize = config.get<number>('streamingChunkSize', 5000);
 
-                if (enableStreaming) {
-                    // Use streaming for large result sets
-                    await runQueriesWithStreaming(
-                        context,
-                        queries,
-                        connectionManager,
-                        sourceUri,
-                        msg => resultPanelProvider.log(sourceUri, msg),
-                        (queryIndex: number, chunk: StreamingChunk, sql: string) => {
-                            resultPanelProvider.appendStreamingChunk(sourceUri, queryIndex, chunk, sql);
-                        },
-                        streamingChunkSize
-                    );
-                } else {
-                    // Use traditional batch loading
-                    await runQueriesSequentially(
-                        context,
-                        queries,
-                        connectionManager,
-                        sourceUri,
-                        msg => resultPanelProvider.log(sourceUri, msg),
-                        queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
-                    );
-                }
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Executing SQL for ${sourceUri.split(/[\\/]/).pop()}...`,
+                    cancellable: false
+                }, async () => {
+                    if (enableStreaming) {
+                        // Use streaming for large result sets
+                        await runQueriesWithStreaming(
+                            context,
+                            queries,
+                            connectionManager,
+                            sourceUri,
+                            msg => resultPanelProvider.log(sourceUri, msg),
+                            (queryIndex: number, chunk: StreamingChunk, sql: string) => {
+                                resultPanelProvider.appendStreamingChunk(sourceUri, queryIndex, chunk, sql);
+                            },
+                            streamingChunkSize
+                        );
+                    } else {
+                        // Use traditional batch loading
+                        await runQueriesSequentially(
+                            context,
+                            queries,
+                            connectionManager,
+                            sourceUri,
+                            msg => resultPanelProvider.log(sourceUri, msg),
+                            queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
+                        );
+                    }
+                });
 
                 resultPanelProvider.finalizeExecution(sourceUri);
                 vscode.commands.executeCommand('netezza.results.focus');
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err);
-                resultPanelProvider.finalizeExecution(sourceUri);
                 resultPanelProvider.log(sourceUri, `Error: ${msg}`);
+
+                // Add error result BEFORE finalizing so it gets properly pinned
+                resultPanelProvider.updateResults([{
+                    columns: [],
+                    data: [],
+                    message: msg,
+                    isError: true,
+                    sql: queries.length === 1 ? queries[0] : undefined
+                }], sourceUri, true);
+
+                // Finalize AFTER adding error so the error pin is preserved
+                resultPanelProvider.finalizeExecution(sourceUri);
                 vscode.window.showErrorMessage(`Error executing query: ${msg}`);
             }
         }),
@@ -201,21 +250,38 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
             try {
                 resultPanelProvider.startExecution(sourceUri);
 
-                await runQueriesSequentially(
-                    context,
-                    [text],
-                    connectionManager,
-                    sourceUri,
-                    msg => resultPanelProvider.log(sourceUri, msg),
-                    queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
-                );
+                await vscode.window.withProgress({
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Executing batch SQL for ${sourceUri.split(/[\\/]/).pop()}...`,
+                    cancellable: false
+                }, async () => {
+                    await runQueriesSequentially(
+                        context,
+                        [text],
+                        connectionManager,
+                        sourceUri,
+                        msg => resultPanelProvider.log(sourceUri, msg),
+                        queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
+                    );
+                });
 
                 resultPanelProvider.finalizeExecution(sourceUri);
                 vscode.commands.executeCommand('netezza.results.focus');
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err);
-                resultPanelProvider.finalizeExecution(sourceUri);
                 resultPanelProvider.log(sourceUri, `Error: ${msg}`);
+
+                // Add error result BEFORE finalizing so it gets properly pinned
+                resultPanelProvider.updateResults([{
+                    columns: [],
+                    data: [],
+                    message: msg,
+                    isError: true,
+                    sql: text
+                }], sourceUri, true);
+
+                // Finalize AFTER adding error so the error pin is preserved
+                resultPanelProvider.finalizeExecution(sourceUri);
                 vscode.window.showErrorMessage(`Error executing query: ${msg}`);
             }
         }),

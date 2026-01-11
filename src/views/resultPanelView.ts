@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { AnalysisPanelView } from './analysisPanelView';
 import { ResultSet } from '../types';
-import { ResultsHtmlGenerator, ViewScriptUris, ViewData } from './resultsHtmlGenerator';
+import { ResultsHtmlGenerator, ViewData, ViewScriptUris } from './resultsHtmlGenerator';
 
 export class ResultPanelView implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.results';
@@ -17,10 +17,17 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     > = new Map();
     private _autoPinnedResults: Set<string> = new Set(); // Track auto-pinned results for current execution
     private _activeSourceUri: string | undefined;
+    private _activeResultSetIndexMap: Map<string, number> = new Map();
     private _resultIdCounter: number = 0;
+    private _executingSources: Set<string> = new Set();
+    private _cancelledSources: Set<string> = new Set();
 
     constructor(extensionUri: vscode.Uri) {
         this._extensionUri = extensionUri;
+    }
+
+    public getActiveSource(): string | undefined {
+        return this._activeSourceUri;
     }
 
     public resolveWebviewView(
@@ -91,6 +98,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'closeSource':
                     this.closeSource(message.sourceUri);
                     return;
+                case 'cancelQuery':
+                    if (message.sourceUri) {
+                        // Call the command to cancel
+                        vscode.commands.executeCommand('netezza.cancelQuery', message.sourceUri, message.currentRowCounts);
+                    }
+                    return;
                 case 'copyToClipboard':
                     vscode.env.clipboard.writeText(message.text);
                     vscode.window.showInformationMessage('Copied to clipboard');
@@ -103,6 +116,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     return;
                 case 'setContext':
                     vscode.commands.executeCommand('setContext', message.key, message.value);
+                    return;
+                case 'clearLogs':
+                    this.clearLogs(message.sourceUri);
+                    return;
+                case 'switchResultSet':
+                    this._activeResultSetIndexMap.set(message.sourceUri, message.resultSetIndex);
                     return;
             }
         });
@@ -124,6 +143,8 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
      * Clears unpinned results and sets up an initial "Execution Log" result set.
      */
     public startExecution(sourceUri: string) {
+        this._executingSources.add(sourceUri);
+        this._cancelledSources.delete(sourceUri);
         // Clear unpinned results for this source
         const existingResults = this._resultsMap.get(sourceUri) || [];
 
@@ -141,12 +162,13 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             logResultSet.executionTimestamp = Date.now();
         } else {
             // Create new Log
+            const timestamp = new Date().toLocaleTimeString();
             logResultSet = {
                 columns: [
                     { name: 'Time', type: 'string' },
                     { name: 'Message', type: 'string' }
                 ],
-                data: [],
+                data: [[timestamp, '--- New Execution Started ---']],
                 message: 'Execution started...',
                 executionTimestamp: Date.now(),
                 isLog: true,
@@ -155,6 +177,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
 
         // Identify other pinned results (excluding the log if it was already there)
+        // Also explicitly preserve error results
         const otherPinnedInfo = Array.from(this._pinnedResults.entries())
             .filter(
                 ([_, info]) => info.sourceUri === sourceUri && existingResults[info.resultSetIndex] !== logResultSet
@@ -164,7 +187,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         const otherPinnedResults: ResultSet[] = [];
         otherPinnedInfo.forEach(([_id, info]) => {
             if (info.resultSetIndex < existingResults.length) {
-                otherPinnedResults.push(existingResults[info.resultSetIndex]);
+                const rs = existingResults[info.resultSetIndex];
+                if (rs) {
+                    otherPinnedResults.push(rs);
+                }
             }
         });
 
@@ -179,7 +205,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         oldPinIds.forEach(id => this._pinnedResults.delete(id));
 
         // Re-pin Log at index 0
-        const logResultId = `result_${++this._resultIdCounter}`;
+        const logResultId = `result_${++this._resultIdCounter} `;
         const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
         this._pinnedResults.set(logResultId, {
             sourceUri,
@@ -190,17 +216,18 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         // Re-pin others (shifted by 1)
         otherPinnedInfo.forEach(([_oldId, _info], idx) => {
-            const newId = `result_${++this._resultIdCounter}`;
+            const newId = `result_${++this._resultIdCounter} `;
             this._pinnedResults.set(newId, {
                 sourceUri,
                 resultSetIndex: idx + 1, // 0 is Log
                 timestamp: Date.now(),
-                label: `${filename} - Result ${idx + 2}` // +2 because 0 is Log, 1 is Result 2 (visually)
+                label: `${filename} - Result ${idx + 1} ` // +1 because 0 is Log, 1 is Result 1
             });
         });
 
         this._pinnedSources.add(sourceUri);
         this._activeSourceUri = sourceUri;
+        this._activeResultSetIndexMap.set(sourceUri, 0); // Switch to Logs
 
         this._updateWebview();
         this._view?.show?.(true);
@@ -229,20 +256,62 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
+
+    /**
+     * Notify the frontend that execution for the given source has been cancelled.
+     * This allows the frontend to stop processing pending data chunks immediately.
+     */
+    public cancelExecution(sourceUri: string, currentRowCounts?: number[]) {
+        if (this._executingSources.has(sourceUri)) {
+            this._executingSources.delete(sourceUri);
+        }
+        this._cancelledSources.add(sourceUri);
+
+        // Mark current result sets as cancelled in our state
+        const results = this._resultsMap.get(sourceUri) || [];
+        results.forEach((rs, index) => {
+            rs.isCancelled = true;
+            // If we have counts from the webview, truncate to what the user actually saw
+            if (currentRowCounts && currentRowCounts[index] !== undefined) {
+                rs.data = rs.data.slice(0, currentRowCounts[index]);
+            }
+        });
+
+        // Force immediate UI update to show 'Cancelled' status and hide spinner
+        this._updateWebview();
+
+        // Notify webview to discard pending messages for this source
+        this._postMessageToWebview({
+            command: 'cancelExecution',
+            sourceUri: sourceUri
+        });
+    }
+
     /**
      * Called after all queries in an execution complete.
      * Unpins the auto-pinned results so they behave normally on next run.
      */
     public finalizeExecution(sourceUri: string) {
-        // Unpin all auto-pinned results for this source
+        this._executingSources.delete(sourceUri);
+        // Unpin all auto-pinned results for this source, EXCEPT errors
+        // We want errors to persist until explicitly cleared or replaced
+        const results = this._resultsMap.get(sourceUri) || [];
+
         for (const resultId of this._autoPinnedResults) {
             const pin = this._pinnedResults.get(resultId);
             if (pin && pin.sourceUri === sourceUri) {
+                // Check if the result is an error
+                const rs = results[pin.resultSetIndex];
+                if (rs && rs.isError) {
+                    // this.log(sourceUri, `DEBUG: Preserving error tab(ID: ${ resultId }, Index: ${ pin.resultSetIndex })`);
+                    continue; // Keep pin for error
+                }
+                // this.log(sourceUri, `DEBUG: Unpinning tab(ID: ${ resultId }, Index: ${ pin.resultSetIndex })`);
                 this._pinnedResults.delete(resultId);
             }
         }
         this._autoPinnedResults.clear();
-        // Note: We don't call _updateWebview() here to avoid flicker
+        this._updateWebview();
     }
 
     public updateResults(results: ResultSet[], sourceUri: string, append: boolean = false) {
@@ -304,26 +373,17 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         // 3. Append New Results
         const newResultsStartIndex = finalResultSets.length;
+        console.log('[updateResults] Before append:', {
+            existingResults: existingResults.map((rs, i) => `[${i}]isLog = ${rs.isLog}, isError = ${rs.isError} `),
+            finalResultSetsSoFar: finalResultSets.map((rs, i) => `[${i}]isLog = ${rs.isLog}, isError = ${rs.isError} `),
+            newResults: newResultSets.map(rs => `isLog = ${rs.isLog}, isError = ${rs.isError} `)
+        });
         finalResultSets.push(...newResultSets);
 
-        // Auto-pin new results so they don't get lost on next updateResults call
-        const filename = sourceUri.split(/[\\\\/]/).pop() || sourceUri;
-        newResultSets.forEach((rs, idx) => {
-            const resultId = `result_${++this._resultIdCounter}`;
-            const resultIndex = newResultsStartIndex + idx;
-            this._pinnedResults.set(resultId, {
-                sourceUri,
-                resultSetIndex: resultIndex,
-                timestamp: Date.now(),
-                label: rs.isLog ? `${filename} - Logs` : `${filename} - Result ${resultIndex}`
-            });
-            // Track as auto-pinned (will be unpinned after execution completes)
-            this._autoPinnedResults.add(resultId);
-        });
-
+        // Update the results map FIRST before manipulating pins
         this._resultsMap.set(sourceUri, finalResultSets);
 
-        // 4. Update indices for existing pins
+        // 4. Update indices for existing pins BEFORE creating new pins
         remappedPins.forEach((rs, id) => {
             const newIndex = finalResultSets.indexOf(rs);
             if (newIndex !== -1) {
@@ -337,8 +397,8 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             // Check if we already have a pin pointing to existingLog
             const isLogPinned = Array.from(remappedPins.values()).includes(existingLog);
             if (!isLogPinned) {
-                const logResultId = `result_${++this._resultIdCounter}`;
-                const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
+                const logResultId = `result_${++this._resultIdCounter} `;
+                const filename = sourceUri.split(/[\\\\/]/).pop() || sourceUri;
                 this._pinnedResults.set(logResultId, {
                     sourceUri,
                     resultSetIndex: 0, // It is always at 0
@@ -348,7 +408,22 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             }
         }
 
-        // 6. Handle unpinned cleanup (if !append)
+        // 6. Auto-pin new results so they don't get lost on next updateResults call
+        const filename = sourceUri.split(/[\\\\/]/).pop() || sourceUri;
+        newResultSets.forEach((rs, idx) => {
+            const resultId = `result_${++this._resultIdCounter} `;
+            const resultIndex = newResultsStartIndex + idx;
+            this._pinnedResults.set(resultId, {
+                sourceUri,
+                resultSetIndex: resultIndex,
+                timestamp: Date.now(),
+                label: rs.isLog ? `${filename} - Logs` : `${filename} - Result ${resultIndex} `
+            });
+            // Track as auto-pinned (will be unpinned after execution completes)
+            this._autoPinnedResults.add(resultId);
+        });
+
+        // 7. Handle unpinned cleanup (if !append)
         if (!append) {
             const unpinnedSources = Array.from(this._resultsMap.keys()).filter(
                 uri => uri !== sourceUri && !this._pinnedSources.has(uri)
@@ -366,6 +441,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
 
         this._activeSourceUri = sourceUri;
+        this._activeResultSetIndexMap.set(sourceUri, newResultsStartIndex); // Switch to the first of new results
 
         if (this._view) {
             this._updateWebview();
@@ -392,6 +468,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         },
         sql: string
     ) {
+        // If the execution was cancelled, ignore any further chunks
+        if (this._cancelledSources.has(sourceUri)) {
+            return;
+        }
+
         const existingResults = this._resultsMap.get(sourceUri) || [];
 
         if (chunk.isFirstChunk && chunk.columns.length > 0) {
@@ -418,18 +499,19 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
             // Auto-pin the new result set
             const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
-            const resultId = `result_${++this._resultIdCounter}`;
+            const resultId = `result_${++this._resultIdCounter} `;
             const resultSetIndex = existingResults.length - 1;
             this._pinnedResults.set(resultId, {
                 sourceUri,
                 resultSetIndex,
                 timestamp: Date.now(),
-                label: `${filename} - Result ${resultSetIndex}`
+                label: `${filename} - Result ${resultSetIndex} `
             });
             this._autoPinnedResults.add(resultId);
 
             // Full render for first chunk (new result set created)
             this._activeSourceUri = sourceUri;
+            this._activeResultSetIndexMap.set(sourceUri, resultSetIndex); // Switch to the new result set
             this._updateWebview();
             this._view?.show?.(true);
         } else if (chunk.rows.length > 0) {
@@ -488,10 +570,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             this._pinnedResults.delete(existingPin[0]);
         } else {
             // Pin the result
-            const resultId = `result_${++this._resultIdCounter}`;
+            const resultId = `result_${++this._resultIdCounter} `;
             const timestamp = Date.now();
             const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
-            const label = `${filename} - Result ${resultSetIndex + 1}`;
+            const label = `${filename} - Result ${resultSetIndex + 1} `;
 
             this._pinnedResults.set(resultId, {
                 sourceUri,
@@ -529,7 +611,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         if (uri) {
             await vscode.workspace.fs.writeFile(uri, Buffer.from(csvContent));
-            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath} `);
         }
     }
 
@@ -560,7 +642,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         });
         if (uri) {
             await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
-            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath} `);
         }
     }
 
@@ -571,7 +653,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         });
         if (uri) {
             await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
-            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath} `);
         }
     }
 
@@ -582,7 +664,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         });
         if (uri) {
             await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
-            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath} `);
         }
     }
 
@@ -593,7 +675,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         });
         if (uri) {
             await vscode.workspace.fs.writeFile(uri, Buffer.from(content));
-            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath}`);
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath} `);
         }
     }
 
@@ -601,6 +683,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         if (this._resultsMap.has(sourceUri)) {
             this._resultsMap.delete(sourceUri);
             this._pinnedSources.delete(sourceUri);
+            this._executingSources.delete(sourceUri);
 
             // Also remove any pinned results for this source
             const pinnedResultsToRemove = Array.from(this._pinnedResults.entries())
@@ -615,6 +698,19 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             }
 
             this._updateWebview();
+        }
+    }
+
+    private clearLogs(sourceUri: string) {
+        const results = this._resultsMap.get(sourceUri);
+        if (results) {
+            const logResultSet = results.find(r => r.isLog);
+            if (logResultSet) {
+                logResultSet.data = [];
+                const timestamp = new Date().toLocaleTimeString();
+                logResultSet.data.push([timestamp, '--- Logs Cleared ---']);
+                this._updateWebview();
+            }
         }
     }
 
@@ -664,6 +760,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     ? sources[0]
                     : null;
         const activeResultSets = activeSource ? this._resultsMap.get(activeSource) : [];
+        const activeResultSetIndex =
+            activeSource && this._activeResultSetIndexMap.has(activeSource)
+                ? this._activeResultSetIndexMap.get(activeSource)!
+                : activeResultSets && activeResultSets.length > 0
+                    ? activeResultSets.length - 1
+                    : 0;
 
         // Serialize data safely with BigInt support
         const bigIntReplacer = (_key: string, value: unknown) => {
@@ -681,7 +783,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             pinnedSourcesJson: JSON.stringify(pinnedSources),
             pinnedResultsJson: JSON.stringify(pinnedResults),
             activeSourceJson: JSON.stringify(activeSource),
-            resultSetsJson: JSON.stringify(activeResultSets, bigIntReplacer)
+            resultSetsJson: JSON.stringify(activeResultSets, bigIntReplacer),
+            activeResultSetIndex: activeResultSetIndex,
+            executingSourcesJson: JSON.stringify(Array.from(this._executingSources))
         };
     }
 }

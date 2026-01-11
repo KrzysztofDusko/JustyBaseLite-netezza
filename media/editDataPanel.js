@@ -37,12 +37,31 @@ window.addEventListener('message', event => {
 
 document.addEventListener('DOMContentLoaded', () => {
     // Top Toolbar
-    document.getElementById('refreshBtn').onclick = () => {
+    const triggerRefresh = () => {
         if (hasUnsavedChanges() && !confirm('You have unsaved changes. Discard them?')) {
             return;
         }
-        vscode.postMessage({ command: 'refresh' });
+
+        const whereClause = document.getElementById('filterWhere').value;
+        const columns = document.getElementById('filterColumns').value;
+
+        vscode.postMessage({
+            command: 'refresh',
+            whereClause: whereClause,
+            columns: columns
+        });
     };
+
+    document.getElementById('refreshBtn').onclick = triggerRefresh;
+
+    ['filterWhere', 'filterColumns'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') triggerRefresh();
+            });
+        }
+    });
 
     document.getElementById('saveBtn').onclick = () => {
         saveChanges();

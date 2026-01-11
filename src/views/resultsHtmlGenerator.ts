@@ -14,6 +14,8 @@ export interface ViewData {
     pinnedResultsJson: string;
     activeSourceJson: string;
     resultSetsJson: string;
+    activeResultSetIndex: number;
+    executingSourcesJson: string;
 }
 
 export class ResultsHtmlGenerator {
@@ -40,6 +42,11 @@ export class ResultsHtmlGenerator {
             <div id="sourceTabs" class="source-tabs"></div>
             <div id="resultSetTabs" class="result-set-tabs" style="display: none;"></div>
             
+            <div id="loadingOverlay" class="loading-overlay">
+                <div class="spinner"></div>
+                <div class="executing-text">Executing SQL...</div>
+                <button id="cancelQueryBtn" class="secondary" title="Cancel the current query">Cancel</button>
+            </div>
             <div class="controls">
                 <input type="text" id="globalFilter" placeholder="Filter..." onkeyup="onFilterChanged()" style="background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px;">
                 <button onclick="toggleRowView()" title="Toggle Row View">${icons.eye} Row View</button>
@@ -86,6 +93,7 @@ export class ResultsHtmlGenerator {
                 <button onclick="copySelection(false)" title="Copy selected cells to clipboard">${icons.copy} Copy</button>
                 <button onclick="copySelection(true)" title="Copy selected cells with headers">${icons.copy} Copy w/ Headers</button>
                 <button onclick="clearAllFilters()" title="Clear all column filters">${icons.clear} Clear Filters</button>
+                <button id="clearLogsBtn" onclick="clearLogs()" title="Clear execution logs" style="display: none;">${icons.trash} Clear Logs</button>
                 <span id="rowCountInfo" style="margin-left: auto; font-size: 12px; opacity: 0.8;"></span>
             </div>
 
@@ -113,9 +121,10 @@ export class ResultsHtmlGenerator {
                 window.pinnedResults = ${viewData.pinnedResultsJson};
                 window.activeSource = ${viewData.activeSourceJson};
                 window.resultSets = ${viewData.resultSetsJson};
+                window.executingSources = new Set(${viewData.executingSourcesJson});
                 
                 let grids = [];
-                let activeGridIndex = window.resultSets && window.resultSets.length > 0 ? window.resultSets.length - 1 : 0;
+                let activeGridIndex = ${viewData.activeResultSetIndex};
                 const workerUri = "${uris.workerUri}";
             </script>
             <script src="${uris.mainScriptUri}"></script>
@@ -139,7 +148,8 @@ export class ResultsHtmlGenerator {
             markdown: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M14.5 2H1.5C.7 2 0 2.7 0 3.5v9C0 13.3.7 14 1.5 14h13c.8 0 1.5-.7 1.5-1.5v-9c0-.8-.7-1.5-1.5-1.5zM3 11V5l2 2 2-2v6H6V7l-1 1-1-1v4H3zm10 0h-2V9h-2v2H7V5h2v2h2V5h2v6z"/></svg>`,
             export: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6 3h8v10H6V3zm-1 0H3v10h2V3zm-2-1h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M6 6h8v1H6V6zm0 2h8v1H6V8zm0 2h8v1H6v-1z"/><path d="M10 12L8 14L6 12" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>`, // Custom combo icon
             checkAll: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M13.485 1.929l1.414 1.414-9.9 9.9-4.243-4.242 1.415-1.415 2.828 2.829z"/></svg>`,
-            clear: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 7.293l4.146-4.147.708.708L8.707 8l4.147 4.146-.708.708L8 8.707l-4.146 4.147-.708-.708L7.293 8 3.146 3.854l.708-.708L8 7.293z"/></svg>`
+            clear: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M8 7.293l4.146-4.147.708.708L8.707 8l4.147 4.146-.708.708L8 8.707l-4.146 4.147-.708-.708L7.293 8 3.146 3.854l.708-.708L8 7.293z"/></svg>`,
+            trash: `<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M6.5 1h3l.5.5V3h3v1h-1v10h-1v-10h-7v10h-1V4h-1V3h3V1.5l.5-.5zM7 2v1h2V2H7zm-2 2v9h6V4H5zm1 1h1v7H6V5zm2 0h1v7H8V5z"/></svg>`
         };
     }
 }

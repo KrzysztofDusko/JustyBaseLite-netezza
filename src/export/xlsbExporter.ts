@@ -158,7 +158,7 @@ export async function exportQueryToXlsb(
                     try {
                         const typeName = reader.getTypeName(i);
                         colIsNumeric.push(numericTypes.has(typeName));
-                    } catch (e) {
+                    } catch {
                         // Fallback to safe default (treat as string) if type unknown
                         colIsNumeric.push(false);
                     }

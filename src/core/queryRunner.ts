@@ -8,7 +8,24 @@ import { NzConnection, NzCommand, QueryResult, ColumnDefinition, NzDataReader } 
 export { QueryResult };
 
 // Session tracking for DROP SESSION functionality
-const executingCommands = new Map<string, NzCommand>(); // Map documentUri -> NzCommand
+interface ExecutingQueryState {
+    command: NzCommand;
+    isCancelled: boolean;
+    sessionId?: string;
+}
+const executingCommands = new Map<string, ExecutingQueryState>(); // Map documentUri -> State
+
+function normalizeUriKey(uri: string): string {
+    // Basic normalization: handles Windows drive letter casing differences
+    if (uri.startsWith('file:///')) {
+        const driveMatch = uri.match(/^file:\/\/\/([A-Z]):\//i);
+        if (driveMatch) {
+            const drive = driveMatch[1].toLowerCase();
+            return `file:///${drive}:${uri.substring(10)}`;
+        }
+    }
+    return uri;
+}
 
 export async function cancelCurrentQuery(): Promise<void> {
     const editor = vscode.window.activeTextEditor;
@@ -19,11 +36,13 @@ export async function cancelCurrentQuery(): Promise<void> {
 
     // Check if we have a command for this specific document
     const docUri = editor.document.uri.toString();
-    const cmd = executingCommands.get(docUri);
+    const uriStr = normalizeUriKey(docUri);
+    const state = executingCommands.get(uriStr);
 
-    if (cmd) {
+    if (state) {
+        state.isCancelled = true; // Signal fetch loops to stop
         try {
-            await cmd.cancel();
+            await state.command.cancel();
             vscode.window.showInformationMessage('Cancellation request sent.');
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -31,6 +50,30 @@ export async function cancelCurrentQuery(): Promise<void> {
         }
     } else {
         vscode.window.showInformationMessage('No active query found for this tab.');
+    }
+}
+
+export async function cancelQueryByUri(docUri: string | vscode.Uri): Promise<void> {
+    const uriStr = normalizeUriKey(typeof docUri === 'string' ? docUri : docUri.toString());
+    const state = executingCommands.get(uriStr);
+
+    console.log(`[cancelQueryByUri] Found state for ${uriStr}: ${!!state}`);
+
+    if (state) {
+        state.isCancelled = true;
+        try {
+            console.log(`[cancelQueryByUri] Calling cmd.cancel() for ${uriStr}`);
+            await state.command.cancel();
+            vscode.window.showInformationMessage('Cancellation request sent.');
+        } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`[cancelQueryByUri] Failed to cancel: ${msg}`);
+            vscode.window.showErrorMessage(`Failed to cancel query: ${msg}`);
+        }
+    } else {
+        console.warn(`[cancelQueryByUri] No active command found for ${uriStr}`);
+        // Log all current keys for debugging
+        console.log(`[cancelQueryByUri] Active keys: ${Array.from(executingCommands.keys()).join(', ')}`);
     }
 }
 
@@ -178,7 +221,13 @@ async function getConnection(
 }
 
 
-async function consumeRestAndCancel(reader: NzDataReader, cmd: NzCommand): Promise<void> {
+async function consumeRestAndCancel(
+    reader: NzDataReader,
+    cmd: NzCommand,
+    documentUri?: string,
+    sessionId?: string,
+    connectionManager?: ConnectionManager
+): Promise<void> {
     const startTime = Date.now();
     const timeoutMs = 10000; // 10 seconds
 
@@ -186,6 +235,14 @@ async function consumeRestAndCancel(reader: NzDataReader, cmd: NzCommand): Promi
         let timedOut = false;
         do {
             while (await reader.read()) {
+                // Respect cancellation even during draining
+                if (documentUri) {
+                    const state = executingCommands.get(normalizeUriKey(documentUri));
+                    if (state && state.isCancelled) {
+                        break;
+                    }
+                }
+
                 if (Date.now() - startTime > timeoutMs) {
                     timedOut = true;
                     break;
@@ -193,7 +250,6 @@ async function consumeRestAndCancel(reader: NzDataReader, cmd: NzCommand): Promi
             }
             if (timedOut) break;
 
-            // Check timeout before waiting for nextResult 
             if (Date.now() - startTime > timeoutMs) {
                 timedOut = true;
                 break;
@@ -202,6 +258,44 @@ async function consumeRestAndCancel(reader: NzDataReader, cmd: NzCommand): Promi
 
         if (timedOut) {
             console.warn(`consumeRestAndCancel timed out after ${timeoutMs}ms, forcing cancel`);
+
+            // If we timed out and have a session ID, offer to Drop Session
+            if (sessionId && connectionManager) {
+                const msg = `Cancellation is taking longer than expected. Do you want to force DROP SESSION ${sessionId}?`;
+                const selection = await vscode.window.showWarningMessage(msg, `Drop Session ${sessionId}`, 'Keep Waiting');
+
+                if (selection === `Drop Session ${sessionId}`) {
+                    // Execute DROP SESSION on a new connection
+                    try {
+                        const connName = connectionManager.getActiveConnectionName();
+                        if (connName) {
+                            const details = await connectionManager.getConnection(connName);
+                            if (details) {
+                                const { createNzConnection } = require('./nzConnectionFactory');
+                                const connection = createNzConnection({
+                                    host: details.host,
+                                    port: details.port || 5480,
+                                    database: details.database,
+                                    user: details.user,
+                                    password: details.password
+                                }) as NzConnection;
+                                await connection.connect();
+                                try {
+                                    const dropCmd = connection.createCommand(`DROP SESSION ${sessionId}`);
+                                    const r = await dropCmd.executeReader();
+                                    await r.close();
+                                    vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
+                                } finally {
+                                    await connection.close();
+                                }
+                            }
+                        }
+                    } catch (dropErr) { // type unknown
+                        const dropMsg = dropErr instanceof Error ? dropErr.message : String(dropErr);
+                        vscode.window.showErrorMessage(`Failed to drop session: ${dropMsg}`);
+                    }
+                }
+            }
         }
 
         await cmd.cancel();
@@ -214,13 +308,14 @@ async function executeQueryAndFetch(
     connection: NzConnection,
     queryToExecute: string,
     queryTimeout: number,
-    documentUri?: string
+    documentUri?: string,
+    sessionId?: string
 ): Promise<{ columns: { name: string; type?: string }[]; data: unknown[][]; limitReached: boolean }> {
     const cmd = connection.createCommand(queryToExecute);
     cmd.commandTimeout = queryTimeout;
 
     if (documentUri) {
-        executingCommands.set(documentUri, cmd);
+        executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false, sessionId });
     }
 
     try {
@@ -233,6 +328,14 @@ async function executeQueryAndFetch(
         let limitReached = false;
 
         while (await reader.read()) {
+            // Check for cancellation
+            if (documentUri) {
+                const state = executingCommands.get(normalizeUriKey(documentUri));
+                if (state && state.isCancelled) {
+                    break; // Exit loop if cancelled
+                }
+            }
+
             if (columns.length === 0) {
                 for (let i = 0; i < reader.fieldCount; i++) {
                     columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
@@ -249,7 +352,7 @@ async function executeQueryAndFetch(
             if (fetchedCount >= limit) {
                 limitReached = true;
                 // Cancel the command on the server side since we don't need more data
-                await consumeRestAndCancel(reader, cmd);
+                // Actually, executeQueryAndFetch doesn't have ConnectionManager.
                 break;
             }
         }
@@ -257,7 +360,7 @@ async function executeQueryAndFetch(
         return { columns, data, limitReached };
     } finally {
         if (documentUri) {
-            executingCommands.delete(documentUri);
+            executingCommands.delete(normalizeUriKey(documentUri));
         }
     }
 }
@@ -305,6 +408,8 @@ export async function runQueryRaw(
 
         // 2. Resolve connection name
         const resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
+        log(logger, `Using connection: ${resolvedConnectionName}`);
+        log(logger, 'Connecting to database...');
 
         // 3. Get connection
         const { connection, shouldCloseConnection } = await getConnection(
@@ -312,6 +417,7 @@ export async function runQueryRaw(
             resolvedConnectionName,
             keepConnectionOpen
         );
+        log(logger, 'Connected.');
 
         // Attach listener for notices
         if (logger.outputChannel) {
@@ -322,17 +428,31 @@ export async function runQueryRaw(
             connection.on('notice', noticeHandler);
         }
 
+        let sessionId: string | undefined;
+        try {
+            const sidCmd = connection.createCommand('SELECT CURRENT_SID');
+            const sidReader = await sidCmd.executeReader();
+            if (await sidReader.read()) {
+                sessionId = String(sidReader.getValue(0));
+            }
+            await sidReader.close();
+        } catch {
+            // Ignore if we can't get SID
+        }
+
         try {
             // 4. Get timeout configuration
             const config = vscode.workspace.getConfiguration('netezza');
             const queryTimeout = config.get<number>('queryTimeout', 1800);
+            log(logger, 'Executing SQL on server...');
 
             // 5. Execute query and fetch results
             const { columns, data, limitReached } = await executeQueryAndFetch(
                 connection,
                 queryToExecute,
                 queryTimeout,
-                documentUri
+                documentUri,
+                sessionId
             );
 
             // 6. Log to history (async, don't wait)
@@ -504,13 +624,20 @@ export async function runExplainQuery(
             cmd.commandTimeout = queryTimeout;
 
             if (documentUri) {
-                executingCommands.set(documentUri, cmd);
+                executingCommands.set(documentUri, { command: cmd, isCancelled: false });
             }
 
             try {
                 const reader = await cmd.executeReader();
                 // Consume any results (EXPLAIN usually doesn't return rows, just notices)
+                // Consume any results (EXPLAIN usually doesn't return rows, just notices)
                 while (await reader.read()) {
+                    if (documentUri) {
+                        const state = executingCommands.get(documentUri);
+                        if (state && state.isCancelled) {
+                            break;
+                        }
+                    }
                     // Ignore actual rows, we only care about notices
                 }
             } finally {
@@ -573,6 +700,12 @@ export async function runQueriesSequentially(
             throw new Error(`Connection '${resolvedConnectionName}' not found`);
         }
 
+        // Log connection info before connecting
+        if (outputChannel) outputChannel.appendLine(`Using connection: ${resolvedConnectionName}`);
+        if (logCallback) logCallback(`Using connection: ${resolvedConnectionName}`);
+        if (outputChannel) outputChannel.appendLine('Connecting to database...');
+        if (logCallback) logCallback('Connecting to database...');
+
         // Use shared getConnection helper to eliminate code duplication
         const { connection, shouldCloseConnection } = await getConnection(
             connManager,
@@ -600,14 +733,18 @@ export async function runQueriesSequentially(
             }
 
             // Capture Netezza Session ID
+            let sessionId: string | undefined;
             try {
                 // Execute scalar query to get Session ID
                 const sidCmd = connection.createCommand('SELECT CURRENT_SID');
                 const sidReader = await sidCmd.executeReader();
                 if (await sidReader.read()) {
                     const sid = sidReader.getValue(0);
-                    if (sid !== undefined && logCallback) {
-                        logCallback(`Connected. Session ID: ${sid}`);
+                    if (sid !== undefined) {
+                        sessionId = String(sid);
+                        if (logCallback) {
+                            logCallback(`Connected. Session ID: ${sessionId}`);
+                        }
                     }
                 }
                 // Important: Close reader to release connection lock (_executing flag)
@@ -648,7 +785,9 @@ export async function runQueriesSequentially(
                         queryToExecute,
                         200000,
                         queryTimeout,
-                        documentUri
+                        documentUri,
+                        sessionId ? String(sessionId) : undefined,
+                        connManager
                     );
                     const durationMs = Date.now() - startTime;
                     if (logCallback) logCallback(`Executed query ${i + 1}/${queries.length} in ${durationMs}ms`);
@@ -763,7 +902,9 @@ async function executeAndFetchWithLimit(
     query: string,
     limit: number,
     timeoutSeconds?: number,
-    documentUri?: string
+    documentUri?: string,
+    sessionId?: string,
+    connectionManager?: ConnectionManager
 ): Promise<{ results: InternalResultSet[]; error?: Error }> {
     const cmd = connection.createCommand(query);
     if (timeoutSeconds && timeoutSeconds > 0) {
@@ -772,7 +913,7 @@ async function executeAndFetchWithLimit(
 
     // Track command
     if (documentUri) {
-        executingCommands.set(documentUri, cmd);
+        executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false, sessionId });
     }
 
     try {
@@ -790,6 +931,14 @@ async function executeAndFetchWithLimit(
 
                 // Fetch loop
                 while (await reader.read()) {
+                    // Check for cancellation
+                    if (documentUri) {
+                        const state = executingCommands.get(normalizeUriKey(documentUri));
+                        if (state && state.isCancelled) {
+                            throw new Error('Query cancelled by user');
+                        }
+                    }
+
                     // Initialize columns on first row
                     if (columns.length === 0) {
                         for (let i = 0; i < reader.fieldCount; i++) {
@@ -809,7 +958,7 @@ async function executeAndFetchWithLimit(
                     if (fetchedCount >= limit) {
                         limitReached = true;
                         // Cancel the command on the server side since we don't need more data
-                        await consumeRestAndCancel(reader, cmd);
+                        await consumeRestAndCancel(reader, cmd, documentUri, sessionId, connectionManager);
                         break;
                     }
                 }
@@ -831,7 +980,7 @@ async function executeAndFetchWithLimit(
         return { results, error: caughtError };
     } finally {
         if (documentUri) {
-            executingCommands.delete(documentUri);
+            executingCommands.delete(normalizeUriKey(documentUri));
         }
     }
 }
@@ -859,7 +1008,9 @@ async function executeAndFetchStreaming(
     chunkSize: number,
     timeoutSeconds: number | undefined,
     documentUri: string | undefined,
-    onChunk: (chunk: StreamingChunk) => void
+    onChunk: (chunk: StreamingChunk) => void,
+    sessionId?: string,
+    connectionManager?: ConnectionManager
 ): Promise<{ totalRows: number; limitReached: boolean; error?: Error }> {
     const cmd = connection.createCommand(query);
     if (timeoutSeconds && timeoutSeconds > 0) {
@@ -868,7 +1019,7 @@ async function executeAndFetchStreaming(
 
     // Track command
     if (documentUri) {
-        executingCommands.set(documentUri, cmd);
+        executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false, sessionId });
     }
 
     try {
@@ -884,6 +1035,14 @@ async function executeAndFetchStreaming(
             let isFirstChunk = true;
 
             while (await reader.read()) {
+                // Check for cancellation
+                if (documentUri) {
+                    const state = executingCommands.get(normalizeUriKey(documentUri));
+                    if (state && state.isCancelled) {
+                        throw new Error('Query cancelled by user');
+                    }
+                }
+
                 // Initialize columns on first row
                 if (columns.length === 0) {
                     for (let i = 0; i < reader.fieldCount; i++) {
@@ -916,12 +1075,20 @@ async function executeAndFetchStreaming(
                 // Check limit
                 if (totalRows >= limit) {
                     limitReached = true;
-                    await consumeRestAndCancel(reader, cmd);
+                    await consumeRestAndCancel(reader, cmd, documentUri, sessionId, connectionManager);
                     break;
                 }
             }
 
             // Send final chunk (even if empty, to signal completion)
+            // But skip it if we were cancelled in the meantime
+            if (documentUri) {
+                const state = executingCommands.get(normalizeUriKey(documentUri));
+                if (state && state.isCancelled) {
+                    return { totalRows, limitReached, error: caughtError };
+                }
+            }
+
             onChunk({
                 columns: isFirstChunk ? columns : [],
                 rows: chunk,
@@ -938,7 +1105,7 @@ async function executeAndFetchStreaming(
         return { totalRows, limitReached, error: caughtError };
     } finally {
         if (documentUri) {
-            executingCommands.delete(documentUri);
+            executingCommands.delete(normalizeUriKey(documentUri));
         }
     }
 }
@@ -1004,13 +1171,14 @@ export async function runQueriesWithStreaming(
 
         try {
             // Get Session ID
+            let sessionId: string | undefined;
             try {
                 const sidCmd = connection.createCommand('SELECT CURRENT_SID');
                 const sidReader = await sidCmd.executeReader();
                 if (await sidReader.read()) {
-                    const sid = sidReader.getValue(0);
-                    if (sid !== undefined && logCallback) {
-                        logCallback(`Connected. Session ID: ${sid}`);
+                    sessionId = String(sidReader.getValue(0));
+                    if (logCallback) {
+                        logCallback(`Connected. Session ID: ${sessionId}`);
                     }
                 }
                 await sidReader.close();
@@ -1056,7 +1224,9 @@ export async function runQueriesWithStreaming(
                             if (chunkCallback) {
                                 chunkCallback(i, chunk, queryToExecute);
                             }
-                        }
+                        },
+                        sessionId,
+                        connManager
                     );
 
                     const durationMs = Date.now() - startTime;
@@ -1093,3 +1263,5 @@ export async function runQueriesWithStreaming(
         throw new Error(errorMessage);
     }
 }
+
+

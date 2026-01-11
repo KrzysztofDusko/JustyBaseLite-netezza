@@ -52,6 +52,16 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     // Execute command to reveal item in schema tree
                     vscode.commands.executeCommand('netezza.revealInSchema', data);
                     break;
+                case 'cancel':
+                    // Cancel current search by incrementing searchId
+                    this.currentSearchId++;
+                    this._view?.webview.postMessage({ type: 'cancelled' });
+                    break;
+                case 'reset':
+                    // Reset search - cancel and clear results
+                    this.currentSearchId++;
+                    this._view?.webview.postMessage({ type: 'reset' });
+                    break;
             }
         });
     }
@@ -456,6 +466,8 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         <div class="search-box">
             <input type="text" id="searchInput" placeholder="Search tables, columns, view definitions, procedure source..." />
             <button id="searchBtn" class="primary">Search</button>
+            <button id="cancelBtn" style="display: none;" title="Cancel search">✕</button>
+            <button id="resetBtn" title="Reset search">↺</button>
         </div>
         <div class="options-row">
             <label>
@@ -476,9 +488,19 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             const vscode = acquireVsCodeApi();
             const searchInput = document.getElementById('searchInput');
             const searchBtn = document.getElementById('searchBtn');
+            const cancelBtn = document.getElementById('cancelBtn');
+            const resetBtn = document.getElementById('resetBtn');
             const sourceModeSelect = document.getElementById('sourceModeSelect');
             const resultsList = document.getElementById('resultsList');
             const status = document.getElementById('status');
+            
+            let isSearching = false;
+            
+            function setSearchingState(searching) {
+                isSearching = searching;
+                cancelBtn.style.display = searching ? 'inline-flex' : 'none';
+                searchBtn.disabled = searching;
+            }
 
             searchBtn.addEventListener('click', () => {
                 const term = searchInput.value;
@@ -486,6 +508,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     // Show searching indicator in results panel
                     resultsList.innerHTML = '<li class="searching-indicator"><span class="spinner"></span> Searching...</li>';
                     status.textContent = '';
+                    setSearchingState(true);
                     
                     const sourceMode = sourceModeSelect.value;
                     if (sourceMode) {
@@ -496,6 +519,14 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                         vscode.postMessage({ type: 'search', value: term });
                     }
                 }
+            });
+            
+            cancelBtn.addEventListener('click', () => {
+                vscode.postMessage({ type: 'cancel' });
+            });
+            
+            resetBtn.addEventListener('click', () => {
+                vscode.postMessage({ type: 'reset' });
             });
 
             searchInput.addEventListener('keypress', (e) => {
@@ -514,11 +545,24 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                         break;
                     case 'results':
                         status.textContent = '';
+                        setSearchingState(false);
                         renderResults(message.data, message.append);
                         break;
                     case 'error':
                         resultsList.innerHTML = '';
                         status.textContent = 'Error: ' + message.message;
+                        setSearchingState(false);
+                        break;
+                    case 'cancelled':
+                        resultsList.innerHTML = '';
+                        status.textContent = 'Search cancelled.';
+                        setSearchingState(false);
+                        break;
+                    case 'reset':
+                        searchInput.value = '';
+                        resultsList.innerHTML = '';
+                        status.textContent = '';
+                        setSearchingState(false);
                         break;
                 }
             });

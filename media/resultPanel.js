@@ -36,6 +36,34 @@ style.textContent = `
     .console-msg {
         color: var(--vscode-editor-foreground);
     }
+    .error-wrapper {
+        padding: 20px;
+        background-color: var(--vscode-editor-background);
+        height: 100%;
+        overflow: auto;
+        box-sizing: border-box;
+    }
+    .error-view {
+        border-left: 4px solid var(--vscode-errorForeground);
+        background-color: var(--vscode-input-background);
+        padding: 15px;
+        margin: 10px 0;
+        white-space: pre-wrap;
+        font-family: var(--vscode-editor-font-family);
+        color: var(--vscode-errorForeground);
+    }
+    .error-title {
+        font-weight: bold;
+        margin-bottom: 8px;
+        font-size: 1.1em;
+    }
+    .error-sql {
+        margin-top: 15px;
+        padding-top: 10px;
+        border-top: 1px solid var(--vscode-panel-border);
+        opacity: 0.7;
+        font-size: 0.9em;
+    }
 `;
 document.head.appendChild(style);
 
@@ -45,15 +73,53 @@ function init() {
         renderSourceTabs();
         renderResultSetTabs();
         renderGrids();
+        updateLoadingState();
 
         // Setup global keyboard shortcuts
         setupGlobalKeyboardShortcuts();
 
         // Setup message handler for streaming updates
         setupStreamingMessageHandler();
+
+        // Setup cancel button handler
+        setupCancelButton();
+
+        // Switch to the correct grid if it's not the default (0)
+        // This handles the initial focus sent by extension in ViewData
+        if (activeGridIndex !== 0) {
+            switchToResultSet(activeGridIndex);
+        }
     } catch (e) {
         showError('Initialization error: ' + e.message);
         console.error(e);
+    }
+}
+
+function updateLoadingState() {
+    const overlay = document.getElementById('loadingOverlay');
+    if (!overlay) return;
+
+    const isActiveExecuting = window.executingSources && window.executingSources.has(window.activeSource);
+    if (isActiveExecuting) {
+        overlay.classList.add('visible');
+    } else {
+        overlay.classList.remove('visible');
+    }
+}
+
+function setupCancelButton() {
+    const cancelBtn = document.getElementById('cancelQueryBtn');
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', () => {
+            const currentRowCounts = window.resultSets ? window.resultSets.map(rs => rs.data.length) : [];
+            vscode.postMessage({
+                command: 'cancelQuery',
+                sourceUri: window.activeSource,
+                currentRowCounts: currentRowCounts
+            });
+            // Optimistically update UI
+            handleCancelExecution({ sourceUri: window.activeSource });
+        });
     }
 }
 
@@ -63,6 +129,9 @@ function setupStreamingMessageHandler() {
         const message = event.data;
 
         switch (message.command) {
+            case 'cancelExecution':
+                handleCancelExecution(message);
+                break;
             case 'appendRows':
                 handleAppendRows(message);
                 break;
@@ -83,6 +152,37 @@ function setupStreamingMessageHandler() {
     });
 }
 
+function handleCancelExecution(message) {
+    // If the cancelled source is the active one, mark current result sets as cancelled
+    if (window.activeSource === message.sourceUri) {
+        if (window.resultSets) {
+            window.resultSets.forEach(rs => {
+                rs.isCancelled = true;
+                // Optional: Show visual indicator of cancellation?
+                if (rs.limitReached === undefined) rs.limitReached = true;
+            });
+        }
+
+        // Remove from executing Set if present
+        if (window.executingSources && window.executingSources.has(message.sourceUri)) {
+            window.executingSources.delete(message.sourceUri);
+
+            // Update UI spinner in tab
+            const tabs = document.querySelectorAll('.source-tab');
+            tabs.forEach(tab => {
+                const span = tab.querySelector('span');
+                if (span && span.title === message.sourceUri) {
+                    const spinner = tab.querySelector('.source-tab-spinner');
+                    if (spinner) spinner.remove();
+                }
+            });
+        }
+
+        // Always ensure the spinner is removed and overlay hidden
+        updateLoadingState();
+    }
+}
+
 // Handle incremental row append during streaming
 function handleAppendRows(message) {
     const { resultSetIndex, rows, totalRows, isLastChunk, limitReached } = message;
@@ -90,6 +190,12 @@ function handleAppendRows(message) {
     // Update the data in window.resultSets
     if (window.resultSets && window.resultSets[resultSetIndex]) {
         const rs = window.resultSets[resultSetIndex];
+
+        // Check for cancellation
+        if (rs.isCancelled) {
+            return;
+        }
+
         rs.data.push(...rows);
         rs.limitReached = limitReached;
 
@@ -175,6 +281,7 @@ function initializeResultView(data, columns) {
 
         // Setup global keyboard shortcuts
         setupGlobalKeyboardShortcuts();
+        updateLoadingState();
     } catch (e) {
         showError('Initialization error: ' + e.message);
         console.error(e);
@@ -212,8 +319,11 @@ function renderResultSetTabs() {
         tab.className = 'result-set-tab' + (index === activeGridIndex ? ' active' : '');
 
         // Tab Text
+        // Use name if provided, otherwise generate a label
+        // For non-log results, subtract 1 from index to get 1-based naming (since log is at index 0)
         const textSpan = document.createElement('span');
-        textSpan.textContent = rs.name || `Result ${index + 1}`;
+        const defaultLabel = rs.isLog ? 'Logs' : `Result ${index}`;
+        textSpan.textContent = rs.name || defaultLabel;
         tab.appendChild(textSpan);
 
         // Pin Button
@@ -283,6 +393,14 @@ function switchToResultSet(index) {
     saveAllGridStates();
 
     activeGridIndex = index;
+
+    // Notify extension of manual tab switch
+    vscode.postMessage({
+        command: 'switchResultSet',
+        sourceUri: window.activeSource,
+        resultSetIndex: index
+    });
+
     updateControlsVisibility(index);
 
     // Update tab styling
@@ -334,9 +452,20 @@ function updateControlsVisibility(index) {
     const rs = window.resultSets[index];
     const isLog = rs && rs.isLog;
     const controls = document.querySelector('.controls');
-    // Use flex for controls if visible (default for div is block, but css might say flex)
-    // Actually empty string reverts to CSS value which is best.
-    if (controls) controls.style.display = isLog ? 'none' : '';
+
+    if (controls) {
+        // Hide most controls when viewing logs, except the Clear Logs button
+        const children = controls.children;
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            if (child.id === 'clearLogsBtn') {
+                child.style.display = isLog ? 'inline-flex' : 'none';
+            } else {
+                // Hide other controls when in log view
+                child.style.display = isLog ? 'none' : '';
+            }
+        }
+    }
 
     const groupingPanel = document.getElementById('groupingPanel');
     if (groupingPanel) groupingPanel.style.display = isLog ? 'none' : '';
@@ -353,6 +482,13 @@ function createSourceTab(source) {
     filename.textContent = parts[parts.length - 1] || source;
     filename.title = source;
     tab.appendChild(filename);
+
+    if (window.executingSources && window.executingSources.has(source)) {
+        const spinner = document.createElement('div');
+        spinner.className = 'source-tab-spinner';
+        spinner.title = 'SQL Execution in progress...';
+        tab.appendChild(spinner);
+    }
 
     const closeBtn = document.createElement('span');
     closeBtn.textContent = '×';
@@ -400,6 +536,8 @@ function renderGrids() {
         try {
             if (rs.isLog) {
                 createLogConsole(rs, index, container);
+            } else if (rs.isError) {
+                createErrorView(rs, index, container);
             } else {
                 createResultSetGrid(rs, index, container, createTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel, getGroupedRowModel, getExpandedRowModel);
             }
@@ -765,6 +903,72 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     // State - Try to restore from saved state (using executionTimestamp in key)
     const savedState = getSavedStateFor(rsIndex, rs.executionTimestamp);
 
+    // Initialize column widths map
+    let columnWidths = new Map();
+    if (savedState && savedState.columnWidths) {
+        try {
+            // Restore from array entry [key, value]
+            columnWidths = new Map(savedState.columnWidths);
+        } catch (e) { console.error('Error restoring column widths', e); }
+    }
+
+    // Calculate initial column widths if not fully populated
+    try {
+        const measureCanvas = document.createElement('canvas');
+        const measureCtx = measureCanvas.getContext('2d');
+        const computedStyle = window.getComputedStyle(document.body);
+        const fontSize = computedStyle.getPropertyValue('--vscode-editor-font-size') || '13px';
+        const fontFamily = computedStyle.getPropertyValue('--vscode-editor-font-family') || 'Consolas, monospace';
+        measureCtx.font = `${fontSize} ${fontFamily}`;
+
+        columns.forEach(col => {
+            if (!columnWidths.has(col.id)) {
+                // Start with header width + padding for sort/filter icons
+                let maxWidth = measureCtx.measureText(col.header).width + 30;
+
+                // Check first 100 rows
+                const sampleSize = Math.min(rs.data.length, 100);
+                for (let i = 0; i < sampleSize; i++) {
+                    const val = col.accessorFn(rs.data[i]);
+                    if (val !== null && val !== undefined) {
+                        // Add padding (~16px for cell padding)
+                        const w = measureCtx.measureText(String(val)).width + 16;
+                        if (w > maxWidth) maxWidth = w;
+                    }
+                }
+
+                // Apply 800px max width limit
+                maxWidth = Math.min(maxWidth, 800);
+                columnWidths.set(col.id, Math.ceil(maxWidth));
+            }
+        });
+    } catch (e) {
+        console.error('Error calculating column widths:', e);
+    }
+
+    // Set table layout to fixed
+    table.style.tableLayout = 'fixed';
+
+    // Helper to render colgroup
+    function renderColGroup() {
+        // Remove existing colgroup
+        const existing = table.querySelector('colgroup');
+        if (existing) existing.remove();
+
+        const colGroup = document.createElement('colgroup');
+        // Get visible columns in correct order
+        const visibleCols = tanTable.getVisibleLeafColumns();
+
+        visibleCols.forEach(col => {
+            const colEl = document.createElement('col');
+            const w = columnWidths.get(col.id) || 100; // Default fallback
+            colEl.style.width = w + 'px';
+            colGroup.appendChild(colEl);
+        });
+
+        table.insertBefore(colGroup, table.querySelector('thead'));
+    }
+
     // Restore custom states
     if (savedState) {
         if (savedState.customColumnFilters) columnFilterStates[rsIndex] = savedState.customColumnFilters;
@@ -913,7 +1117,9 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         updateRowCount: () => updateRowCount(),
         render: () => render(),
         createVirtualizer: () => createVirtualizer(),
-        renderTableRows: () => renderTableRows()
+        renderTableRows: () => renderTableRows(),
+        renderColGroup: () => renderColGroup(),
+        columnWidths: columnWidths
     };
     grids.push(gridObj);
 
@@ -1042,6 +1248,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     function render() {
         try {
             createVirtualizer();
+            renderColGroup(); // Update column widths (and order)
             renderTableHeaders();
             renderTableRows();
             updateRowCount();
@@ -1369,6 +1576,45 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     Object.assign(gridObj, selectionHandlers);
 }
 
+function createErrorView(rs, rsIndex, container) {
+    const wrapper = document.createElement('div');
+    // Use grid-wrapper class so switchToResultSet can show/hide it correctly
+    wrapper.className = 'grid-wrapper error-wrapper' + (rsIndex === activeGridIndex ? ' active' : '');
+    wrapper.style.display = rsIndex === activeGridIndex ? 'block' : 'none';
+    container.appendChild(wrapper);
+
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'error-view';
+
+    const title = document.createElement('div');
+    title.className = 'error-title';
+    title.textContent = 'SQL Execution Error';
+    errorDiv.appendChild(title);
+
+    const msg = document.createElement('div');
+    msg.textContent = rs.message || 'Unknown error occurred.';
+    errorDiv.appendChild(msg);
+
+    if (rs.sql) {
+        const sqlDiv = document.createElement('div');
+        sqlDiv.className = 'error-sql';
+        sqlDiv.innerHTML = `<strong>Executed SQL:</strong><br><pre style="margin-top: 5px;">${rs.sql}</pre>`;
+        errorDiv.appendChild(sqlDiv);
+    }
+
+    wrapper.appendChild(errorDiv);
+    grids.push(null); // Register placeholder grid to keep indices in sync
+}
+
+function clearLogs() {
+    if (window.activeSource) {
+        vscode.postMessage({
+            command: 'clearLogs',
+            sourceUri: window.activeSource
+        });
+    }
+}
+
 // State Management
 // Save state for ALL grids using sourceUri:rsIndex:executionTimestamp key
 // The executionTimestamp ensures state from previous SQL executions is not reused
@@ -1411,6 +1657,7 @@ function saveAllGridStates() {
             // Custom states
             customColumnFilters: columnFilterStates[rsIndex],
             aggregations: aggregationStates[rsIndex],
+            columnWidths: Array.from(grid.columnWidths || []),
             // Scroll position
             scrollTop: scrollTop,
             scrollLeft: scrollLeft
@@ -1583,6 +1830,73 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
     };
 
     th.appendChild(headerContent);
+
+    // Resizer handle
+    const resizer = document.createElement('div');
+    resizer.className = 'col-resizer';
+    resizer.style.position = 'absolute';
+    resizer.style.right = '0';
+    resizer.style.top = '0';
+    resizer.style.width = '5px';
+    resizer.style.height = '100%';
+    resizer.style.cursor = 'col-resize';
+    resizer.style.userSelect = 'none';
+    resizer.style.touchAction = 'none';
+    resizer.style.zIndex = '5'; // Higher than others
+
+    // Drag handlers for resizing
+    resizer.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const grid = grids[rsIndex];
+        const colId = header.column.id;
+        const startX = e.clientX;
+        const startWidth = (grid && grid.columnWidths && grid.columnWidths.get(colId)) || th.getBoundingClientRect().width;
+
+        const onMouseMove = (moveEvent) => {
+            const currentX = moveEvent.clientX;
+            const delta = currentX - startX;
+            const newWidth = Math.max(50, startWidth + delta); // Min width 50
+
+            if (grid && grid.columnWidths) {
+                grid.columnWidths.set(colId, newWidth);
+                // Update col element directly for performance
+                // We need to find the correct col index
+                if (grid.tanTable) {
+                    const visibleCols = grid.tanTable.getVisibleLeafColumns();
+                    const colIndex = visibleCols.findIndex(c => c.id === colId);
+                    if (colIndex !== -1) {
+                        const colGroup = grid.tanTable.options.meta?.colGroupElement ||
+                            document.querySelectorAll('.grid-wrapper')[rsIndex]?.querySelector('colgroup');
+                        if (colGroup && colGroup.children[colIndex]) {
+                            colGroup.children[colIndex].style.width = newWidth + 'px';
+                        }
+                    }
+                }
+            }
+        };
+
+        const onMouseUp = () => {
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+            // Save state
+            savePinnedState();
+        };
+
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+
+    // Prevent starting drag-reorder when clicking resizer
+    resizer.draggable = true;
+    resizer.ondragstart = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    th.appendChild(resizer);
+
     return th;
 }
 

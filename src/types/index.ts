@@ -8,6 +8,8 @@ export interface QueryResult {
     sql?: string;
     // UI specific fields
     isLog?: boolean;
+    isError?: boolean;
+    isCancelled?: boolean;
     executionTimestamp?: number;
     name?: string;
 }

@@ -6,7 +6,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQueryRaw, cancelCurrentQuery } from './core/queryRunner';
+import { runQueryRaw } from './core/queryRunner';
 import { ConnectionManager } from './core/connectionManager';
 import { LoginPanel } from './views/loginPanel';
 import { SchemaProvider } from './providers/schemaProvider';
@@ -310,9 +310,6 @@ END_PROC;`;
             );
         }),
 
-        vscode.commands.registerCommand('netezza.cancelQuery', async () => {
-            await cancelCurrentQuery();
-        }),
 
         vscode.commands.registerCommand('netezza.selectActiveConnection', async () => {
             const connections = await connectionManager.getConnections();
