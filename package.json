@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -163,6 +163,14 @@
       {
         "command": "netezza.addPrimaryKey",
         "title": "Add Primary Key"
+      },
+      {
+        "command": "netezza.addForeignKey",
+        "title": "Add Foreign Key"
+      },
+      {
+        "command": "netezza.addUniqueConstraint",
+        "title": "Add Unique Constraint"
       },
       {
         "command": "netezza.importClipboard",
@@ -477,7 +485,17 @@
         {
           "command": "netezza.addPrimaryKey",
           "when": "view == netezza.schema && viewItem == netezza:TABLE",
-          "group": "5_schema"
+          "group": "5_schema@1"
+        },
+        {
+          "command": "netezza.addForeignKey",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "5_schema@2"
+        },
+        {
+          "command": "netezza.addUniqueConstraint",
+          "when": "view == netezza.schema && viewItem == netezza:TABLE",
+          "group": "5_schema@3"
         },
         {
           "command": "netezza.createDDL",

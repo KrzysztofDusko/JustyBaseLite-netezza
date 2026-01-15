@@ -381,6 +381,116 @@ function renderResultSetTabs() {
         };
         tab.appendChild(analyzeSpan);
 
+        // Close Button (x) for individual result
+        const closeSpan = document.createElement('span');
+        closeSpan.className = 'result-set-close-btn';
+        closeSpan.textContent = '×';
+        closeSpan.title = 'Close this result';
+        closeSpan.style.marginLeft = '8px';
+        closeSpan.style.cursor = 'pointer';
+        closeSpan.style.opacity = '0.6';
+        closeSpan.style.fontWeight = 'bold';
+        closeSpan.style.fontSize = '16px';
+        closeSpan.onmouseover = () => closeSpan.style.opacity = '1';
+        closeSpan.onmouseout = () => closeSpan.style.opacity = '0.6';
+
+        closeSpan.onclick = (e) => {
+            e.stopPropagation();
+            vscode.postMessage({
+                command: 'closeResult',
+                sourceUri: window.activeSource,
+                resultSetIndex: index
+            });
+        };
+        tab.appendChild(closeSpan);
+
+        // Add context menu (right-click) to individual tabs
+        tab.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            // Create context menu
+            const menu = document.createElement('div');
+            menu.className = 'context-menu';
+            menu.style.position = 'fixed';
+            menu.style.top = e.clientY + 'px';
+            menu.style.left = e.clientX + 'px';
+            menu.style.backgroundColor = 'var(--vscode-menu-background)';
+            menu.style.border = '1px solid var(--vscode-menu-border)';
+            menu.style.borderRadius = '4px';
+            menu.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.3)';
+            menu.style.zIndex = '10000';
+            menu.style.minWidth = '150px';
+
+            // Close Result option
+            const closeResultItem = document.createElement('div');
+            closeResultItem.className = 'context-menu-item';
+            closeResultItem.textContent = 'Close This Result';
+            closeResultItem.style.padding = '8px 12px';
+            closeResultItem.style.cursor = 'pointer';
+            closeResultItem.style.color = 'var(--vscode-menu-foreground)';
+            closeResultItem.style.fontSize = '12px';
+            closeResultItem.style.userSelect = 'none';
+
+            closeResultItem.addEventListener('mouseover', () => {
+                closeResultItem.style.backgroundColor = 'var(--vscode-menu-selectionBackground)';
+            });
+            closeResultItem.addEventListener('mouseout', () => {
+                closeResultItem.style.backgroundColor = 'transparent';
+            });
+
+            closeResultItem.addEventListener('click', () => {
+                vscode.postMessage({
+                    command: 'closeResult',
+                    sourceUri: window.activeSource,
+                    resultSetIndex: index
+                });
+                document.body.removeChild(menu);
+            });
+
+            menu.appendChild(closeResultItem);
+
+            // Close All Results option
+            const closeAllItem = document.createElement('div');
+            closeAllItem.className = 'context-menu-item';
+            closeAllItem.textContent = 'Close All Results';
+            closeAllItem.style.padding = '8px 12px';
+            closeAllItem.style.cursor = 'pointer';
+            closeAllItem.style.color = 'var(--vscode-menu-foreground)';
+            closeAllItem.style.fontSize = '12px';
+            closeAllItem.style.userSelect = 'none';
+
+            closeAllItem.addEventListener('mouseover', () => {
+                closeAllItem.style.backgroundColor = 'var(--vscode-menu-selectionBackground)';
+            });
+            closeAllItem.addEventListener('mouseout', () => {
+                closeAllItem.style.backgroundColor = 'transparent';
+            });
+
+            closeAllItem.addEventListener('click', () => {
+                vscode.postMessage({
+                    command: 'closeAllResults',
+                    sourceUri: window.activeSource
+                });
+                document.body.removeChild(menu);
+            });
+
+            menu.appendChild(closeAllItem);
+            document.body.appendChild(menu);
+
+            // Close menu when clicking elsewhere
+            const closeMenu = () => {
+                if (document.body.contains(menu)) {
+                    document.body.removeChild(menu);
+                }
+                document.removeEventListener('click', closeMenu);
+                document.removeEventListener('contextmenu', closeMenu);
+            };
+
+            document.addEventListener('click', closeMenu);
+            document.addEventListener('contextmenu', closeMenu);
+        });
+
         tab.onclick = () => switchToResultSet(index);
         container.appendChild(tab);
     });
@@ -732,7 +842,18 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     wrapper.style.display = rsIndex === activeGridIndex ? 'block' : 'none';
     container.appendChild(wrapper);
 
-    if (!rs.data || !Array.isArray(rs.data) || rs.data.length === 0) {
+    // If data is missing or not an array, show invalid message
+    if (!rs.data || !Array.isArray(rs.data)) {
+        wrapper.innerHTML = '<div style="padding: 20px; text-align: center; color: red;">Invalid result data</div>';
+        grids.push(null);
+        return;
+    }
+
+    // If there are no rows but columns are present, render the table with headers only
+    const hasRows = rs.data.length > 0;
+
+    // If there are no rows and no columns, prefer showing message/rowsAffected when available
+    if (!hasRows && (!rs.columns || rs.columns.length === 0)) {
         if (rs.rowsAffected !== undefined || rs.message) {
             const rowsAffectedText = rs.rowsAffected !== undefined ? `${rs.rowsAffected} rows affected` : '';
             const messageText = rs.message || '';

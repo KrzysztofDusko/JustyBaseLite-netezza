@@ -67,7 +67,7 @@ export class EditDataProvider {
                             context,
                             connectionManager
                         );
-                        // Refresh after save
+                        // Refresh after save with same filter options
                         this._loadData(
                             panel,
                             database,
@@ -75,7 +75,11 @@ export class EditDataProvider {
                             tableName,
                             item.connectionName,
                             context,
-                            connectionManager
+                            connectionManager,
+                            {
+                                whereClause: message.whereClause,
+                                columns: message.columns
+                            }
                         );
                         break;
                     case 'refresh':
@@ -219,7 +223,7 @@ export class EditDataProvider {
                     query += ` WHERE ${where}`;
                 }
             }
-            query += ' LIMIT 50000';
+            query += ' ORDER BY ROWID LIMIT 50000';
 
             const [dataResult, metadata] = await Promise.all([
                 runQueryRaw(

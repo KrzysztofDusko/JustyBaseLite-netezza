@@ -247,6 +247,178 @@ export function registerTableCommands(deps: SchemaCommandsDependencies): vscode.
             }
         }),
 
+        // Add Foreign Key
+        vscode.commands.registerCommand('netezza.addForeignKey', async (item: SchemaItemData) => {
+            if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {
+                const fullName = getFullName(item);
+
+                const constraintName = await vscode.window.showInputBox({
+                    prompt: 'Enter foreign key constraint name',
+                    placeHolder: `e.g. FK_${item.label}`,
+                    value: `FK_${item.label}`,
+                    validateInput: value => {
+                        if (!value || value.trim().length === 0) {
+                            return 'Constraint name cannot be empty';
+                        }
+                        if (!isValidIdentifier(value)) {
+                            return 'Invalid constraint name';
+                        }
+                        return null;
+                    }
+                });
+
+                if (!constraintName) return;
+
+                const columns = await vscode.window.showInputBox({
+                    prompt: 'Enter foreign key column names (comma separated)',
+                    placeHolder: 'e.g. COL1, COL2 or ID',
+                    validateInput: value => {
+                        if (!value || value.trim().length === 0) {
+                            return 'You must provide at least one column';
+                        }
+                        return null;
+                    }
+                });
+
+                if (!columns) return;
+
+                const referencedTable = await vscode.window.showInputBox({
+                    prompt: 'Enter referenced table name (schema.table)',
+                    placeHolder: 'e.g. SCHEMA_NAME.TABLE_NAME',
+                    validateInput: value => {
+                        if (!value || value.trim().length === 0) {
+                            return 'Referenced table name cannot be empty';
+                        }
+                        return null;
+                    }
+                });
+
+                if (!referencedTable) return;
+
+                const referencedColumns = await vscode.window.showInputBox({
+                    prompt: 'Enter referenced table column names (comma separated)',
+                    placeHolder: 'e.g. COL1, COL2 or ID',
+                    validateInput: value => {
+                        if (!value || value.trim().length === 0) {
+                            return 'You must provide at least one column';
+                        }
+                        return null;
+                    }
+                });
+
+                if (!referencedColumns) return;
+
+                const columnList = columns
+                    .split(',')
+                    .map(c => c.trim().toUpperCase())
+                    .join(', ');
+                const refColumnList = referencedColumns
+                    .split(',')
+                    .map(c => c.trim().toUpperCase())
+                    .join(', ');
+                const sql = `ALTER TABLE ${fullName} ADD CONSTRAINT ${constraintName.trim().toUpperCase()} FOREIGN KEY (${columnList}) REFERENCES ${referencedTable.trim().toUpperCase()} (${refColumnList});`;
+
+                const confirmation = await vscode.window.showInformationMessage(
+                    `Add foreign key to table "${fullName}"?\n\n${sql}`,
+                    { modal: true },
+                    'Yes, add',
+                    'Cancel'
+                );
+
+                if (confirmation === 'Yes, add') {
+                    if (!await requireConnection(connectionManager)) return;
+
+                    try {
+                        await executeWithProgress(
+                            `Adding foreign key to ${fullName}...`,
+                            async () => {
+                                await runQuery(context, sql, true, item.connectionName, connectionManager);
+                            }
+                        );
+
+                        vscode.window.showInformationMessage(
+                            `Foreign key added: ${constraintName.trim().toUpperCase()}`
+                        );
+                        schemaProvider.refresh();
+                    } catch (err: unknown) {
+                        const message = err instanceof Error ? err.message : String(err);
+                        vscode.window.showErrorMessage(`Error adding foreign key: ${message}`);
+                    }
+                }
+            }
+        }),
+
+        // Add Unique Constraint
+        vscode.commands.registerCommand('netezza.addUniqueConstraint', async (item: SchemaItemData) => {
+            if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {
+                const fullName = getFullName(item);
+
+                const constraintName = await vscode.window.showInputBox({
+                    prompt: 'Enter unique constraint name',
+                    placeHolder: `e.g. UQ_${item.label}`,
+                    value: `UQ_${item.label}`,
+                    validateInput: value => {
+                        if (!value || value.trim().length === 0) {
+                            return 'Constraint name cannot be empty';
+                        }
+                        if (!isValidIdentifier(value)) {
+                            return 'Invalid constraint name';
+                        }
+                        return null;
+                    }
+                });
+
+                if (!constraintName) return;
+
+                const columns = await vscode.window.showInputBox({
+                    prompt: 'Enter unique constraint column names (comma separated)',
+                    placeHolder: 'e.g. COL1, COL2 or EMAIL',
+                    validateInput: value => {
+                        if (!value || value.trim().length === 0) {
+                            return 'You must provide at least one column';
+                        }
+                        return null;
+                    }
+                });
+
+                if (!columns) return;
+
+                const columnList = columns
+                    .split(',')
+                    .map(c => c.trim().toUpperCase())
+                    .join(', ');
+                const sql = `ALTER TABLE ${fullName} ADD CONSTRAINT ${constraintName.trim().toUpperCase()} UNIQUE (${columnList});`;
+
+                const confirmation = await vscode.window.showInformationMessage(
+                    `Add unique constraint to table "${fullName}"?\n\n${sql}`,
+                    { modal: true },
+                    'Yes, add',
+                    'Cancel'
+                );
+
+                if (confirmation === 'Yes, add') {
+                    if (!await requireConnection(connectionManager)) return;
+
+                    try {
+                        await executeWithProgress(
+                            `Adding unique constraint to ${fullName}...`,
+                            async () => {
+                                await runQuery(context, sql, true, item.connectionName, connectionManager);
+                            }
+                        );
+
+                        vscode.window.showInformationMessage(
+                            `Unique constraint added: ${constraintName.trim().toUpperCase()}`
+                        );
+                        schemaProvider.refresh();
+                    } catch (err: unknown) {
+                        const message = err instanceof Error ? err.message : String(err);
+                        vscode.window.showErrorMessage(`Error adding unique constraint: ${message}`);
+                    }
+                }
+            }
+        }),
+
         // Change Owner
         vscode.commands.registerCommand('netezza.changeOwner', async (item: SchemaItemData) => {
             if (item && item.label && item.dbName && item.schema && item.objType === 'TABLE') {

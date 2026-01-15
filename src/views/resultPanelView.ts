@@ -75,6 +75,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     return;
                 case 'switchSource':
                     this._activeSourceUri = message.sourceUri;
+                    // Ensure the source exists in the results map
+                    if (!this._resultsMap.has(message.sourceUri)) {
+                        this._resultsMap.set(message.sourceUri, []);
+                    }
                     this._updateWebview();
                     return;
                 case 'togglePin':
@@ -97,6 +101,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     return;
                 case 'closeSource':
                     this.closeSource(message.sourceUri);
+                    return;
+                case 'closeResult':
+                    this.closeResult(message.sourceUri, message.resultSetIndex);
+                    return;
+                case 'closeAllResults':
+                    this.closeAllResults(message.sourceUri);
                     return;
                 case 'cancelQuery':
                     if (message.sourceUri) {
@@ -132,10 +142,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     }
 
     public setActiveSource(sourceUri: string) {
-        if (this._resultsMap.has(sourceUri) && this._activeSourceUri !== sourceUri) {
-            this._activeSourceUri = sourceUri;
-            this._updateWebview();
+        if (this._activeSourceUri === sourceUri) return;
+        this._activeSourceUri = sourceUri;
+        if (!this._resultsMap.has(sourceUri)) {
+            this._resultsMap.set(sourceUri, []);
         }
+        this._updateWebview();
     }
 
     /**
@@ -701,6 +713,76 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
+    private closeResult(sourceUri: string, resultSetIndex: number) {
+        const results = this._resultsMap.get(sourceUri);
+        if (!results || resultSetIndex < 0 || resultSetIndex >= results.length) {
+            return;
+        }
+
+        // Remove the result at this index
+        results.splice(resultSetIndex, 1);
+
+        // Remove any pinned results that pointed to this result
+        const pinnedResultsToRemove = Array.from(this._pinnedResults.entries())
+            .filter(([_, info]) => info.sourceUri === sourceUri && info.resultSetIndex === resultSetIndex)
+            .map(([id, _]) => id);
+        pinnedResultsToRemove.forEach(id => this._pinnedResults.delete(id));
+
+        // Update indices for pinned results that are after the removed one
+        for (const [_id, info] of this._pinnedResults.entries()) {
+            if (info.sourceUri === sourceUri && info.resultSetIndex > resultSetIndex) {
+                info.resultSetIndex -= 1;
+            }
+        }
+
+        // If we closed all non-log results, or if active index is now out of bounds
+        if (this._activeResultSetIndexMap.get(sourceUri) === resultSetIndex) {
+            // Switch to the next available result or the one before it
+            const newIndex = resultSetIndex < results.length ? resultSetIndex : Math.max(0, results.length - 1);
+            this._activeResultSetIndexMap.set(sourceUri, newIndex);
+        } else if (this._activeResultSetIndexMap.get(sourceUri)! > resultSetIndex) {
+            // Decrement active index if it was after the removed result
+            this._activeResultSetIndexMap.set(sourceUri, this._activeResultSetIndexMap.get(sourceUri)! - 1);
+        }
+
+        this._updateWebview();
+    }
+
+    private closeAllResults(sourceUri: string) {
+        const results = this._resultsMap.get(sourceUri);
+        if (!results || results.length === 0) {
+            return;
+        }
+
+        // Keep only the log result (if it exists)
+        const logIndex = results.findIndex(r => r.isLog);
+        
+        if (logIndex === -1) {
+            // No log, remove all results
+            results.splice(0);
+        } else {
+            // Keep only log, remove everything else
+            const logResult = results[logIndex];
+            results.splice(0);
+            results.push(logResult);
+        }
+
+        // Remove all pinned results for non-log items for this source
+        const pinnedResultsToRemove = Array.from(this._pinnedResults.entries())
+            .filter(([_, info]) => {
+                if (info.sourceUri !== sourceUri) return false;
+                const rs = results[info.resultSetIndex];
+                return !rs || !rs.isLog; // Remove if doesn't exist or is not log
+            })
+            .map(([id, _]) => id);
+        pinnedResultsToRemove.forEach(id => this._pinnedResults.delete(id));
+
+        // Reset active index to 0 (log is now at index 0 if it exists)
+        this._activeResultSetIndexMap.set(sourceUri, 0);
+
+        this._updateWebview();
+    }
+
     private clearLogs(sourceUri: string) {
         const results = this._resultsMap.get(sourceUri);
         if (results) {
@@ -759,12 +841,33 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 : sources.length > 0
                     ? sources[0]
                     : null;
-        const activeResultSets = activeSource ? this._resultsMap.get(activeSource) : [];
+        let activeResultSets = activeSource ? this._resultsMap.get(activeSource) || [] : [];
+
+        // If no results exist for the active source, create an empty state with a message
+        if (activeSource && activeResultSets.length === 0) {
+            const timestamp = new Date().toLocaleTimeString();
+            const emptyLog: ResultSet = {
+                columns: [
+                    { name: 'Time', type: 'string' },
+                    { name: 'Message', type: 'string' }
+                ],
+                data: [[timestamp, 'No results yet']],
+                message: 'No results yet',
+                executionTimestamp: Date.now(),
+                isLog: true,
+                name: 'Logs'
+            } as ResultSet;
+            activeResultSets = [emptyLog];
+            // Persist empty log into results map so subsequent _prepareViewData calls and webview render
+            // consistently reflect that this source has an empty log result set.
+            this._resultsMap.set(activeSource, activeResultSets);
+        }
+
         const activeResultSetIndex =
             activeSource && this._activeResultSetIndexMap.has(activeSource)
                 ? this._activeResultSetIndexMap.get(activeSource)!
                 : activeResultSets && activeResultSets.length > 0
-                    ? activeResultSets.length - 1
+                    ? 0
                     : 0;
 
         // Serialize data safely with BigInt support

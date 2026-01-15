@@ -6,7 +6,8 @@ import {
     extractVariables,
     parseSetVariables,
     replaceVariablesInSql,
-    processVariables
+    processVariables,
+    extractVariablesFromQueries
 } from '../core/variableUtils';
 
 describe('core/variableUtils', () => {
@@ -324,6 +325,59 @@ WHERE id = $ID`;
             const result = processVariables(sql, { TABLE: 'users' });
             expect(result.processedSql).toBe('SELECT * FROM mydb..users');
             expect(result.unresolvedVars).toEqual(['SCHEMA']);
+        });
+    });
+
+    describe('extractVariablesFromQueries', () => {
+        it('should return empty set for empty array', () => {
+            expect(extractVariablesFromQueries([])).toEqual(new Set());
+        });
+
+        it('should extract variables from single query', () => {
+            const queries = ['SELECT * FROM ${TABLE} WHERE id = $ID'];
+            const result = extractVariablesFromQueries(queries);
+            expect(result).toEqual(new Set(['TABLE', 'ID']));
+        });
+
+        it('should extract and deduplicate variables from multiple queries', () => {
+            const queries = [
+                'SELECT $VAR1',
+                'SELECT ${VAR2}',
+                'SELECT $VAR1' // duplicate
+            ];
+            const result = extractVariablesFromQueries(queries);
+            expect(result).toEqual(new Set(['VAR1', 'VAR2']));
+        });
+
+        it('should handle @SET definitions and extract remaining variables', () => {
+            const queries = [
+                '@SET VAR1 = value1\nSELECT ${VAR2}',
+                'SELECT ${VAR1}'
+            ];
+            const result = extractVariablesFromQueries(queries);
+            // VAR1 is defined in first query via @SET, but used in second query
+            // VAR2 is not defined anywhere
+            expect(result).toEqual(new Set(['VAR1', 'VAR2']));
+        });
+
+        it('should extract variables from mixed format queries', () => {
+            const queries = [
+                'SELECT ${TABLE1}, $COL1 FROM db',
+                'SELECT ${TABLE2}, $COL2 FROM db',
+                'SELECT $TABLE1' // duplicate in different format
+            ];
+            const result = extractVariablesFromQueries(queries);
+            expect(result).toEqual(new Set(['TABLE1', 'COL1', 'TABLE2', 'COL2']));
+        });
+
+        it('should handle queries without variables', () => {
+            const queries = [
+                'SELECT * FROM users',
+                'SELECT ${VAR1}',
+                'SELECT * FROM orders'
+            ];
+            const result = extractVariablesFromQueries(queries);
+            expect(result).toEqual(new Set(['VAR1']));
         });
     });
 });

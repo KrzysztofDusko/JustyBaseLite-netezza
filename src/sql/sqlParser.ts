@@ -27,9 +27,9 @@ export class SqlParser {
                     continue;
                 }
             } else if (inSingleQuote) {
-                if (char === "'" && text[i - 1] !== '\\') inSingleQuote = false; // Simple check, might need better escaping
+                if (char === "'") inSingleQuote = false;
             } else if (inDoubleQuote) {
-                if (char === '"' && text[i - 1] !== '\\') inDoubleQuote = false;
+                if (char === '"') inDoubleQuote = false;
             } else {
                 // Not in any special block
                 if (char === '-' && nextChar === '-') {
@@ -90,9 +90,9 @@ export class SqlParser {
                     i++;
                 }
             } else if (inSingleQuote) {
-                if (char === "'" && text[i - 1] !== '\\') inSingleQuote = false;
+                if (char === "'") inSingleQuote = false;
             } else if (inDoubleQuote) {
-                if (char === '"' && text[i - 1] !== '\\') inDoubleQuote = false;
+                if (char === '"') inDoubleQuote = false;
             } else {
                 if (char === '-' && nextChar === '-') {
                     inLineComment = true;
@@ -129,9 +129,9 @@ export class SqlParser {
                     i++;
                 }
             } else if (inSingleQuote) {
-                if (char === "'" && text[i - 1] !== '\\') inSingleQuote = false;
+                if (char === "'") inSingleQuote = false;
             } else if (inDoubleQuote) {
-                if (char === '"' && text[i - 1] !== '\\') inDoubleQuote = false;
+                if (char === '"') inDoubleQuote = false;
             } else {
                 if (char === '-' && nextChar === '-') {
                     inLineComment = true;

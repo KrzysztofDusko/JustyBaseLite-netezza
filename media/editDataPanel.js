@@ -614,5 +614,14 @@ function saveChanges() {
         return;
     }
 
-    vscode.postMessage({ command: 'save', changes: payload });
+    // Include current filter state so after save we can reapply same filters
+    const whereClause = document.getElementById('filterWhere').value;
+    const columns = document.getElementById('filterColumns').value;
+
+    vscode.postMessage({ 
+        command: 'save', 
+        changes: payload,
+        whereClause: whereClause,
+        columns: columns
+    });
 }

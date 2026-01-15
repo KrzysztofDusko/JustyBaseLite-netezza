@@ -166,6 +166,27 @@ body {
     color: var(--vscode-charts-blue);
 }
 
+.result-set-close-btn {
+    font-size: 16px;
+    opacity: 0.6;
+    cursor: pointer;
+    transition: opacity 0.2s ease-in-out;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    line-height: 1;
+}
+
+.result-set-close-btn:hover {
+    opacity: 1;
+    color: var(--vscode-errorForeground);
+}
+
+.result-set-tab:hover .result-set-close-btn {
+    opacity: 0.8;
+}
+
 /* Grouping Panel */
 .grouping-panel {
     padding: 8px;

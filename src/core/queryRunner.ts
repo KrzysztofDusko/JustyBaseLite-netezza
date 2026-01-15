@@ -84,10 +84,12 @@ export async function cancelQueryByUri(docUri: string | vscode.Uri): Promise<voi
 async function promptForVariableValues(
     variables: Set<string>,
     silent: boolean,
-    defaults?: Record<string, string>
+    defaults?: Record<string, string>,
+    extensionUri?: vscode.Uri
 ): Promise<Record<string, string>> {
     const values: Record<string, string> = {};
     if (variables.size === 0) return values;
+
     if (silent) {
         // If silent but defaults present for all variables, use them. Otherwise error.
         const missing = Array.from(variables).filter(v => !(defaults && defaults[v] !== undefined));
@@ -103,30 +105,19 @@ async function promptForVariableValues(
         return values;
     }
 
-    // First use defaults when provided
-    const toPrompt: string[] = [];
-    for (const name of variables) {
-        if (defaults && defaults[name] !== undefined) {
-            values[name] = defaults[name];
-        } else {
-            toPrompt.push(name);
-        }
+    // Use webview panel for better UX
+    const { VariableInputPanel } = require('../views/variableInputPanel');
+    const result = await VariableInputPanel.show(
+        Array.from(variables),
+        defaults,
+        extensionUri
+    );
+
+    if (!result) {
+        throw new Error('Variable input cancelled by user');
     }
 
-    for (const name of toPrompt) {
-        const input = await vscode.window.showInputBox({
-            prompt: `Enter value for ${name}`,
-            placeHolder: '',
-            value: defaults && defaults[name] ? defaults[name] : undefined,
-            ignoreFocusOut: true
-        });
-        if (input === undefined) {
-            throw new Error('Variable input cancelled by user');
-        }
-        values[name] = input;
-    }
-
-    return values;
+    return result;
 }
 
 // QueryResult is now imported from '../types' and re-exported above
@@ -158,7 +149,8 @@ function log(logger: OutputLogger, message: string): void {
 
 async function resolveQueryVariables(
     query: string,
-    silent: boolean
+    silent: boolean,
+    extensionUri?: vscode.Uri
 ): Promise<string> {
     const parsed = parseSetVariables(query);
     let queryToExecute = parsed.sql;
@@ -166,8 +158,27 @@ async function resolveQueryVariables(
 
     const vars = extractVariables(queryToExecute);
     if (vars.size > 0) {
-        const resolved = await promptForVariableValues(vars, silent, setDefaults);
-        queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
+        // Only prompt for variables that do NOT have a value set via @SET
+        const missingVars = new Set<string>();
+        for (const v of vars) {
+            // DEBUG LOG
+            console.log(`[VariableDebug] Checking variable '${v}'. Value in defaults: '${setDefaults[v]}'`);
+            if (setDefaults[v] === undefined) {
+                missingVars.add(v);
+            }
+        }
+
+        let promptedValues: Record<string, string> = {};
+        if (missingVars.size > 0) {
+            console.log(`[VariableDebug] Prompting for missing vars: ${Array.from(missingVars).join(', ')}`);
+            // We only prompt for missing variables. defined ones are used automatically.
+            promptedValues = await promptForVariableValues(missingVars, silent, undefined, extensionUri);
+        } else {
+            console.log(`[VariableDebug] All variables defined in defaults. Skipping prompt.`);
+        }
+
+        const finalValues = { ...setDefaults, ...promptedValues };
+        queryToExecute = replaceVariablesInSql(queryToExecute, finalValues);
     }
 
     return queryToExecute;
@@ -327,18 +338,17 @@ async function executeQueryAndFetch(
         let fetchedCount = 0;
         let limitReached = false;
 
+        // Read column metadata BEFORE the fetch loop (even if there are 0 rows)
+        for (let i = 0; i < reader.fieldCount; i++) {
+            columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+        }
+
         while (await reader.read()) {
             // Check for cancellation
             if (documentUri) {
                 const state = executingCommands.get(normalizeUriKey(documentUri));
                 if (state && state.isCancelled) {
                     break; // Exit loop if cancelled
-                }
-            }
-
-            if (columns.length === 0) {
-                for (let i = 0; i < reader.fieldCount; i++) {
-                    columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
                 }
             }
 
@@ -390,7 +400,8 @@ export async function runQueryRaw(
     connectionManager?: ConnectionManager,
     connectionName?: string,
     documentUri?: string,
-    logCallback?: (msg: string) => void
+    logCallback?: (msg: string) => void,
+    extensionUri?: vscode.Uri
 ): Promise<QueryResult> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
@@ -404,7 +415,7 @@ export async function runQueryRaw(
 
     try {
         // 1. Resolve variables in query
-        const queryToExecute = await resolveQueryVariables(query, silent);
+        const queryToExecute = await resolveQueryVariables(query, silent, extensionUri || context.extensionUri);
 
         // 2. Resolve connection name
         const resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
@@ -665,7 +676,8 @@ export async function runQueriesSequentially(
     connectionManager?: ConnectionManager,
     documentUri?: string,
     logCallback?: (msg: string) => void,
-    resultCallback?: (results: QueryResult[]) => void
+    resultCallback?: (results: QueryResult[]) => void,
+    extensionUri?: vscode.Uri
 ): Promise<QueryResult[]> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
@@ -754,9 +766,45 @@ export async function runQueriesSequentially(
                 if (logCallback) logCallback(`Connected.`);
             }
 
+
             const historyManager = new QueryHistoryManager(context);
             // Use resolved connection name for history
             const activeConnectionName = resolvedConnectionName;
+
+            // --- BATCH VARIABLE HANDLING START ---
+            // 1. Scan all queries for variables and @SET defaults
+            const allVariables = new Set<string>();
+            const allDefaults: Record<string, string> = {};
+
+            for (const q of queries) {
+                const parsed = parseSetVariables(q);
+                // defaults from later queries override earlier ones (standard script behavior)
+                Object.assign(allDefaults, parsed.setValues);
+                const vars = extractVariables(parsed.sql);
+                vars.forEach(v => allVariables.add(v));
+            }
+
+            // 2. Prompt for values ONCE for the entire batch
+            // Only prompt for variables that are NOT in allDefaults
+            const missingVars = new Set<string>();
+            for (const v of allVariables) {
+                if (allDefaults[v] === undefined) {
+                    missingVars.add(v);
+                }
+            }
+
+            let resolvedVars: Record<string, string> = { ...allDefaults };
+
+            if (missingVars.size > 0) {
+                const prompted = await promptForVariableValues(
+                    missingVars,
+                    false, // silent=false means we want to prompt
+                    undefined,
+                    extensionUri || context.extensionUri
+                );
+                Object.assign(resolvedVars, prompted);
+            }
+            // --- BATCH VARIABLE HANDLING END ---
 
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i];
@@ -765,15 +813,12 @@ export async function runQueriesSequentially(
                 if (logCallback) logCallback(msg);
 
                 try {
-                    // Parse @SET defaults and detect/resolve ${VAR} placeholders for this query
+                    // Parse @SET locally to strip them from SQL
+                    // We use the globally resolved variables here
                     const parsed = parseSetVariables(query);
-                    let queryToExecute = parsed.sql;
-                    const setDefaults = parsed.setValues;
-                    const vars = extractVariables(queryToExecute);
-                    if (vars.size > 0) {
-                        const resolved = await promptForVariableValues(vars, false, setDefaults);
-                        queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
-                    }
+                    const queryToExecute = replaceVariablesInSql(parsed.sql, resolvedVars);
+
+                    // Execute query
 
                     // Execute query
                     const config = vscode.workspace.getConfiguration('netezza');
@@ -929,6 +974,11 @@ async function executeAndFetchWithLimit(
                 let fetchedCount = 0;
                 let limitReached = false;
 
+                // Read column metadata BEFORE the fetch loop (even if there are 0 rows)
+                for (let i = 0; i < reader.fieldCount; i++) {
+                    columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+                }
+
                 // Fetch loop
                 while (await reader.read()) {
                     // Check for cancellation
@@ -936,13 +986,6 @@ async function executeAndFetchWithLimit(
                         const state = executingCommands.get(normalizeUriKey(documentUri));
                         if (state && state.isCancelled) {
                             throw new Error('Query cancelled by user');
-                        }
-                    }
-
-                    // Initialize columns on first row
-                    if (columns.length === 0) {
-                        for (let i = 0; i < reader.fieldCount; i++) {
-                            columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
                         }
                     }
 
@@ -1034,19 +1077,17 @@ async function executeAndFetchStreaming(
             let chunk: unknown[][] = [];
             let isFirstChunk = true;
 
+            // Read column metadata BEFORE the fetch loop (even if there are 0 rows)
+            for (let i = 0; i < reader.fieldCount; i++) {
+                columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
+            }
+
             while (await reader.read()) {
                 // Check for cancellation
                 if (documentUri) {
                     const state = executingCommands.get(normalizeUriKey(documentUri));
                     if (state && state.isCancelled) {
                         throw new Error('Query cancelled by user');
-                    }
-                }
-
-                // Initialize columns on first row
-                if (columns.length === 0) {
-                    for (let i = 0; i < reader.fieldCount; i++) {
-                        columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
                     }
                 }
 
@@ -1121,7 +1162,8 @@ export async function runQueriesWithStreaming(
     documentUri?: string,
     logCallback?: (msg: string) => void,
     chunkCallback?: (queryIndex: number, chunk: StreamingChunk, sql: string) => void,
-    chunkSize: number = 5000
+    chunkSize: number = 5000,
+    extensionUri?: vscode.Uri
 ): Promise<void> {
     const connManager = connectionManager || new ConnectionManager(context);
     const keepConnectionOpen = connManager.getKeepConnectionOpen();
@@ -1187,8 +1229,34 @@ export async function runQueriesWithStreaming(
                 if (logCallback) logCallback('Connected.');
             }
 
+
             const historyManager = new QueryHistoryManager(context);
             const currentSchema = 'unknown';
+
+            // --- BATCH VARIABLE HANDLING START ---
+            // 1. Scan all queries for variables and @SET defaults
+            const allVariables = new Set<string>();
+            const allDefaults: Record<string, string> = {};
+
+            for (const q of queries) {
+                const parsed = parseSetVariables(q);
+                // defaults from later queries override earlier ones (standard script behavior)
+                Object.assign(allDefaults, parsed.setValues);
+                const vars = extractVariables(parsed.sql);
+                vars.forEach(v => allVariables.add(v));
+            }
+
+            // 2. Prompt for values ONCE for the entire batch
+            let resolvedVars: Record<string, string> = {};
+            if (allVariables.size > 0) {
+                resolvedVars = await promptForVariableValues(
+                    allVariables,
+                    false, // silent=false means we want to prompt
+                    allDefaults,
+                    extensionUri || context.extensionUri
+                );
+            }
+            // --- BATCH VARIABLE HANDLING END ---
 
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i];
@@ -1197,15 +1265,10 @@ export async function runQueriesWithStreaming(
                 if (logCallback) logCallback(msg);
 
                 try {
-                    // Parse variables
+                    // Parse @SET locally to strip them from SQL
+                    // We use the globally resolved variables here
                     const parsed = parseSetVariables(query);
-                    let queryToExecute = parsed.sql;
-                    const setDefaults = parsed.setValues;
-                    const vars = extractVariables(queryToExecute);
-                    if (vars.size > 0) {
-                        const resolved = await promptForVariableValues(vars, false, setDefaults);
-                        queryToExecute = replaceVariablesInSql(queryToExecute, resolved);
-                    }
+                    const queryToExecute = replaceVariablesInSql(parsed.sql, resolvedVars);
 
                     const config = vscode.workspace.getConfiguration('netezza');
                     const queryTimeout = config.get<number>('queryTimeout', 1800);

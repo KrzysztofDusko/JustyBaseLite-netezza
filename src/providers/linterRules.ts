@@ -69,9 +69,9 @@ function isInsideStringOrComment(sql: string, position: number): boolean {
                 i++; // Skip the '/'
             }
         } else if (inSingleQuote) {
-            if (char === "'" && sql[i - 1] !== '\\') inSingleQuote = false;
+            if (char === "'") inSingleQuote = false;
         } else if (inDoubleQuote) {
-            if (char === '"' && sql[i - 1] !== '\\') inDoubleQuote = false;
+            if (char === '"') inDoubleQuote = false;
         } else {
             if (char === '-' && nextChar === '-') {
                 inLineComment = true;

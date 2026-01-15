@@ -76,12 +76,27 @@ export function parseSetVariables(sql: string): ParseSetResult {
         const m = line.match(/^\s*@SET\s+([A-Za-z0-9_]+)\s*=\s*(.+)$/i);
         if (m) {
             let val = m[2].trim();
-            // Remove trailing semicolon if present
+
+            // Check if there's a semicolon followed by more SQL on the same line
+            // e.g., "@SET A=1; SELECT ${A}" -> val="1", rest="SELECT ${A}"
+            const semiIndex = val.indexOf(';');
+            let restOfLine = '';
+            if (semiIndex !== -1) {
+                restOfLine = val.substring(semiIndex + 1).trim();
+                val = val.substring(0, semiIndex).trim();
+            }
+
+            // Remove trailing semicolon from value if present (after split)
             if (val.endsWith(';')) val = val.slice(0, -1).trim();
             // Remove surrounding quotes if present
             const qm = val.match(/^'(.*)'$/s) || val.match(/^"(.*)"$/s);
             if (qm) val = qm[1];
             setValues[m[1]] = val;
+
+            // If there was content after the semicolon, add it to remaining SQL
+            if (restOfLine) {
+                remaining.push(restOfLine);
+            }
         } else {
             remaining.push(line);
         }
@@ -89,6 +104,7 @@ export function parseSetVariables(sql: string): ParseSetResult {
 
     return { sql: remaining.join('\n'), setValues };
 }
+
 
 /**
  * Replace variable placeholders in SQL with provided values.
@@ -123,6 +139,27 @@ export function replaceVariablesInSql(sql: string, values: Record<string, string
     }
 
     return result;
+}
+
+/**
+ * Extract all unique variables from multiple SQL queries.
+ * This is useful when you want to prompt for all variables once before executing multiple queries.
+ * 
+ * @param queries - Array of SQL query strings
+ * @returns Set of all unique variable names found across all queries
+ * 
+ * @example
+ * extractVariablesFromQueries(['SELECT $VAR1', 'SELECT ${VAR2}', 'SELECT $VAR1'])
+ * // Returns: Set(['VAR1', 'VAR2'])
+ */
+export function extractVariablesFromQueries(queries: string[]): Set<string> {
+    const allVars = new Set<string>();
+    for (const query of queries) {
+        const parsed = parseSetVariables(query);
+        const vars = extractVariables(parsed.sql);
+        vars.forEach(v => allVars.add(v));
+    }
+    return allVars;
 }
 
 /**
