@@ -1247,14 +1247,24 @@ export async function runQueriesWithStreaming(
             }
 
             // 2. Prompt for values ONCE for the entire batch
-            let resolvedVars: Record<string, string> = {};
-            if (allVariables.size > 0) {
-                resolvedVars = await promptForVariableValues(
-                    allVariables,
+            // Only prompt for variables that are NOT in allDefaults
+            const missingVars = new Set<string>();
+            for (const v of allVariables) {
+                if (allDefaults[v] === undefined) {
+                    missingVars.add(v);
+                }
+            }
+
+            let resolvedVars: Record<string, string> = { ...allDefaults };
+
+            if (missingVars.size > 0) {
+                const prompted = await promptForVariableValues(
+                    missingVars,
                     false, // silent=false means we want to prompt
-                    allDefaults,
+                    undefined,
                     extensionUri || context.extensionUri
                 );
+                Object.assign(resolvedVars, prompted);
             }
             // --- BATCH VARIABLE HANDLING END ---
 
