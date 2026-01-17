@@ -9,11 +9,11 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 ## Features
 
-![General Overview](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/general_01.png)
+![General Overview](docs/screenshots/general_01.png)
 
 ### 🤖 AI Copilot Assistant
 
-![AI Copilot Chat](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/ai_fix_errors_chat.png)
+![AI Copilot Chat](docs/screenshots/ai_fix_errors_chat.png)
 
 - **Auto Mode**: Apply suggested fixes or optimizations using the built-in diff editor (modal review dialog). Options: Apply Changes, Apply & Close Diff, Discard.
 - **Interactive Mode**: Open Copilot Chat for a back-and-forth discussion; suggestions stay in Chat unless you explicitly apply them with `/edit`.
@@ -35,7 +35,7 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 ### 🔎 Schema Browser
 
-![Schema Browser Context Menu](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/schema_panel.png)
+![Schema Browser Context Menu](docs/screenshots/schema_panel.png)
 
 - **Object Explorer**: Browse Databases, Schemas, Tables, Views, Procedures, Sequences, and Synonyms.
 - **Search**: Quickly find objects across the entire system.
@@ -57,7 +57,7 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 ### 🛠️ Table & Object Management
 
-![View and Edit Data](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/view_edit_data_01.png)
+![View and Edit Data](docs/screenshots/view_edit_data_01.png)
 
 Right-click on objects in the Schema Browser for powerful context actions:
 - **Maintenance**:
@@ -90,8 +90,8 @@ Right-click on objects in the Schema Browser for powerful context actions:
 - **Resources**: Monitor CPU, Memory, Disk, and Fabric utilization across SPUs with system utilization summary.
 - **Storage Statistics**: Analyze table storage, used bytes, and data skew (weighted average) per schema and database.
 
-![Session Monitor Dashboard](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/session_monitor_01.png)
-![Running Queries](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/session_monitor_02.png)
+![Session Monitor Dashboard](docs/screenshots/session_monitor_01.png)
+![Running Queries](docs/screenshots/session_monitor_02.png)
 
 - **Access**: Right-click on a database in the Schema Browser → **Open Monitor Dashboard**.
 
@@ -100,13 +100,13 @@ Right-click on objects in the Schema Browser for powerful context actions:
 - **Foreign Key Visualization**: Display Primary Key (PK) and Foreign Key (FK) relationships between tables.
 - **Column Details**: View column names, data types, and key indicators directly in the diagram.
 
-![Entity Relationship Diagram](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/ERD_01.png)
+![Entity Relationship Diagram](docs/screenshots/ERD_01.png)
 
 - **Access**: Right-click on a schema in the Schema Browser → **Generate ERD**.
 
 ### 🔄 ETL Designer
 
-![ETL Designer Workflow](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/etl_01.png)
+![ETL Designer Workflow](docs/screenshots/etl_01.png)
 
 - **Visual Workflow Designer**: Create data workflows with drag-and-drop nodes on a canvas.
 - **Task Types**:
