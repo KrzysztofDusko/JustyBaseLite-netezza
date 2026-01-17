@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -39,7 +39,8 @@
   },
   "activationEvents": [
     "onLanguage:sql",
-    "onStartupFinished"
+    "onStartupFinished",
+    "onChatParticipant:netezza.sqlcopilot"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -89,6 +90,14 @@
       ]
     },
     "commands": [
+      {
+        "command": "justyBaseLite.copilot.changeModel",
+        "title": "Netezza AI: Change Model"
+      },
+      {
+        "command": "justyBaseLite.copilot.clearModel",
+        "title": "Netezza AI: Clear Persisted Model"
+      },
       {
         "command": "netezza.runQuery",
         "title": "Run Query (Smart/Sequential)",
@@ -302,6 +311,60 @@
         "command": "netezza.runEtlProject",
         "title": "Run ETL Project",
         "icon": "$(debug-start)"
+      },
+      {
+        "command": "netezza.copilotFixSql",
+        "title": "Copilot: Fix SQL (Auto)",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "netezza.copilotFixSqlInteractive",
+        "title": "Copilot: Fix SQL (Interactive Chat)",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "netezza.copilotOptimizeSql",
+        "title": "Copilot: Optimize SQL (Auto)",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "netezza.copilotOptimizeSqlInteractive",
+        "title": "Copilot: Optimize SQL (Interactive Chat)",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "netezza.copilotExplainSql",
+        "title": "Copilot: Explain SQL (Auto)",
+        "icon": "$(book)"
+      },
+      {
+        "command": "netezza.copilotExplainSqlInteractive",
+        "title": "Copilot: Explain SQL (Interactive Chat)",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "netezza.copilotCustomQuestion",
+        "title": "Copilot: Ask Custom Question (Auto)",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "netezza.copilotCustomQuestionInteractive",
+        "title": "Copilot: Ask Custom Question (Interactive Chat)",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "netezza.copilotGenerateSql",
+        "title": "Copilot: Generate SQL from Description",
+        "icon": "$(sparkle)"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "netezza.sqlcopilot",
+        "name": "sql-copilot",
+        "fullName": "SQL Copilot",
+        "description": "Ask questions about your SQL with full database context (DDL, tables, variables)",
+        "isSticky": true
       }
     ],
     "menus": {
@@ -412,6 +475,51 @@
           "command": "netezza.formatSQL",
           "when": "resourceLangId == sql",
           "group": "1_modification"
+        },
+        {
+          "command": "netezza.copilotFixSql",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@1"
+        },
+        {
+          "command": "netezza.copilotFixSqlInteractive",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@2"
+        },
+        {
+          "command": "netezza.copilotOptimizeSql",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@3"
+        },
+        {
+          "command": "netezza.copilotOptimizeSqlInteractive",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@4"
+        },
+        {
+          "command": "netezza.copilotExplainSql",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@5"
+        },
+        {
+          "command": "netezza.copilotExplainSqlInteractive",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@6"
+        },
+        {
+          "command": "netezza.copilotCustomQuestion",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@7"
+        },
+        {
+          "command": "netezza.copilotCustomQuestionInteractive",
+          "when": "resourceLangId == sql && editorHasSelection",
+          "group": "netezza_copilot@8"
+        },
+        {
+          "command": "netezza.copilotGenerateSql",
+          "when": "resourceLangId == sql",
+          "group": "netezza_copilot@9"
         }
       ],
       "view/title": [
@@ -648,6 +756,31 @@
           "minimum": 1,
           "maximum": 168,
           "description": "Metadata cache time-to-live in hours. Cached schema, tables, and columns will be refreshed after this period. Default: 4 hours."
+        },
+        "justyBaseLite.prompts.optimize": {
+          "type": "string",
+          "default": "Optimize the following Netezza SQL query for performance and readability:",
+          "description": "Prompt used for optimizing SQL queries."
+        },
+        "justyBaseLite.prompts.fix": {
+          "type": "string",
+          "default": "Fix the syntax errors in the following Netezza SQL query:",
+          "description": "Prompt used for fixing SQL queries."
+        },
+        "justyBaseLite.prompts.explain": {
+          "type": "string",
+          "default": "Explain what this Netezza SQL query does:",
+          "description": "Prompt used for explaining SQL queries."
+        },
+        "justyBaseLite.copilot.preferredLanguage": {
+          "type": "string",
+          "enum": ["english", "system"],
+          "default": "english",
+          "enumDescriptions": [
+            "Always respond in English",
+            "Respond in the system/OS language"
+          ],
+          "description": "Preferred language for AI Copilot responses. 'english' always uses English, 'system' uses the operating system language."
         }
       }
     },

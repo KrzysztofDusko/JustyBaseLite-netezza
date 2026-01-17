@@ -9,6 +9,19 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 ## Features
 
+![General Overview](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/general_01.png)
+
+### 🤖 AI Copilot Assistant
+
+![AI Copilot Chat](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/ai_fix_errors_chat.png)
+
+- **Auto Mode**: Apply suggested fixes or optimizations using the built-in diff editor (modal review dialog). Options: Apply Changes, Apply & Close Diff, Discard.
+- **Interactive Mode**: Open Copilot Chat for a back-and-forth discussion; suggestions stay in Chat unless you explicitly apply them with `/edit`.
+- **Generate SQL from Description**: Describe what you need in natural language, and Copilot generates the SQL using your database schema context.
+- **Describe Data**: From the Results panel you can request Copilot to describe a result set (first 50 rows). A privacy confirmation modal appears before any data is sent.
+- **Commands**: Fix/Optimize/Explain/Ask/Generate (each available in Auto and Interactive variants).
+
+
 ### 🚀 Query Execution
 - **Zero Configuration**: Connect immediately using host, user, and password. No ODBC setup required.
 - **Progressive Results**: Results appear immediately as queries finish, even when running multiple statements.
@@ -21,6 +34,9 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 
 ### 🔎 Schema Browser
+
+![Schema Browser Context Menu](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/schema_panel.png)
+
 - **Object Explorer**: Browse Databases, Schemas, Tables, Views, Procedures, Sequences, and Synonyms.
 - **Search**: Quickly find objects across the entire system.
 - **Rich Metadata**: View column types, primary keys, and specialized object properties.
@@ -40,6 +56,9 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 
 ### 🛠️ Table & Object Management
+
+![View and Edit Data](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/view_edit_data_01.png)
+
 Right-click on objects in the Schema Browser for powerful context actions:
 - **Maintenance**:
     - **Groom Table**: Reclaim space and organize records.
@@ -70,15 +89,25 @@ Right-click on objects in the Schema Browser for powerful context actions:
 - **Running Queries**: View currently executing queries with estimated cost, elapsed time, and ability to kill sessions.
 - **Resources**: Monitor CPU, Memory, Disk, and Fabric utilization across SPUs with system utilization summary.
 - **Storage Statistics**: Analyze table storage, used bytes, and data skew (weighted average) per schema and database.
+
+![Session Monitor Dashboard](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/session_monitor_01.png)
+![Running Queries](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/session_monitor_02.png)
+
 - **Access**: Right-click on a database in the Schema Browser → **Open Monitor Dashboard**.
 
 ### 🗺️ Entity Relationship Diagram (ERD)
 - **Visual Schema Exploration**: Generate interactive diagrams showing tables and their relationships.
 - **Foreign Key Visualization**: Display Primary Key (PK) and Foreign Key (FK) relationships between tables.
 - **Column Details**: View column names, data types, and key indicators directly in the diagram.
+
+![Entity Relationship Diagram](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/ERD_01.png)
+
 - **Access**: Right-click on a schema in the Schema Browser → **Generate ERD**.
 
 ### 🔄 ETL Designer
+
+![ETL Designer Workflow](https://github.com/KrzysztofDusko/JustyBaseLite-netezza/raw/HEAD/docs/screenshots/etl_01.png)
+
 - **Visual Workflow Designer**: Create data workflows with drag-and-drop nodes on a canvas.
 - **Task Types**:
     - **SQL Task**: Execute SQL queries against the connected Netezza database.
@@ -94,7 +123,7 @@ Right-click on objects in the Schema Browser for powerful context actions:
 
 ### 🔍 SQL Linter
 - **Real-time Feedback**: Get instant warnings and errors as you type SQL.
-- **10 Built-in Rules**: Detect common anti-patterns like `SELECT *`, `DELETE` without `WHERE`, `CROSS JOIN`, and more.
+- **13 Built-in Rules**: Detect common anti-patterns like `SELECT *`, `DELETE` without `WHERE`, `CROSS JOIN`, `UPDATE ... AS`, and more.
 - **Configurable Severity**: Set each rule to `error`, `warning`, `hint`, or disable with `off`.
 - **Smart Detection**: Ignores patterns inside strings and comments.
 - 📖 **[SQL Linter Reference](docs/SQL_LINTER.md)**

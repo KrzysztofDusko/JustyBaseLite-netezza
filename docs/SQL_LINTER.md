@@ -34,6 +34,8 @@ Enable/disable the linter and customize rule severity in VS Code settings:
 | **NZ009** | Hint | Multiple `OR` conditions - consider `UNION` |
 | **NZ010** | Info | Missing table alias in `JOIN` |
 | **NZ011** | Warning | `CREATE TABLE AS SELECT` missing `DISTRIBUTE ON` |
+| **NZ012** | Error | `UPDATE table AS alias` - AS keyword not allowed in Netezza UPDATE |
+| **NZ013** | Info | `UNION` instead of `UNION ALL` - performance consideration |
 
 ## Examples
 
@@ -71,6 +73,24 @@ CREATE TABLE copy_t AS SELECT * FROM original;
 
 -- ✅ OK: Explicit distribution
 CREATE TABLE copy_t AS SELECT * FROM original DISTRIBUTE ON RANDOM;
+```
+
+### NZ012 - UPDATE with AS Alias
+```sql
+-- ❌ Error: AS keyword not allowed in Netezza UPDATE
+UPDATE customers AS c SET c.status = 'inactive';
+
+-- ✅ OK: Alias without AS
+UPDATE customers c SET c.status = 'inactive';
+```
+
+### NZ013 - UNION vs UNION ALL
+```sql
+-- ⚠️ Info: UNION performs implicit DISTINCT (slower)
+SELECT id FROM table1 UNION SELECT id FROM table2;
+
+-- ✅ Better: Use UNION ALL if duplicates don't matter
+SELECT id FROM table1 UNION ALL SELECT id FROM table2;
 ```
 
 ## Smart Detection

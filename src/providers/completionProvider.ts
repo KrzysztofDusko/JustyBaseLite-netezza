@@ -24,6 +24,9 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         // Parse local definitions (CTEs, Temp Tables)
         const localDefs = this.parseLocalDefinitions(cleanText);
 
+        // Parse variables (@SET ZMIENNA = ...)
+        const variables = this.parseVariables(cleanText);
+
         const linePrefix = document.lineAt(position).text.substr(0, position.character);
         const upperPrefix = linePrefix.toUpperCase();
 
@@ -157,7 +160,45 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
             }
         }
 
-        // 6. Keywords (Default)
+        // 6. Variable Suggestion
+        // Trigger: "$" or "${" or invoked explicitly. We require explicit invocation (Ctrl+Space)
+        // to show suggestions (prevents automatic trigger duplication). If the user has already
+        // typed '$' or '${', we adjust `insertText` so the leading '$' isn't duplicated.
+        if (linePrefix.match(/\$\{?[a-zA-Z0-9_]*$/)) {
+            // Only provide variable suggestions when the completion was explicitly invoked
+            // (e.g. Ctrl+Space). This prevents automatic trigger on typing '$'.
+            if (_context.triggerKind !== vscode.CompletionTriggerKind.Invoke) {
+                return [];
+            }
+
+            const completionItems = variables.map(varName => {
+                const label = `\${${varName}}`;
+                const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.Variable);
+
+                // Determine how the user has started the variable so we don't duplicate '$'
+                let insertTextStr: string;
+                if (linePrefix.endsWith('${')) {
+                    // User typed '${' -> insert 'VAR_NAME}' so final is ${VAR_NAME}
+                    insertTextStr = `${varName}}`;
+                } else if (linePrefix.endsWith('$')) {
+                    // User typed '$' -> insert '{VAR_NAME}' so final is ${VAR_NAME}
+                    insertTextStr = `{${varName}}`;
+                } else {
+                    // No '$' typed -> insert full '${VAR_NAME}'
+                    insertTextStr = `\${${varName}}`;
+                }
+
+                item.insertText = insertTextStr;
+                item.detail = 'Variable';
+                item.sortText = `0_${varName}`; // Prioritize at top
+                item.filterText = varName; // Allow filtering by variable name without ${}
+                return item;
+            });
+
+            return new vscode.CompletionList(completionItems, false);
+        }
+
+        // 7. Keywords (Default)
         return this.getKeywords();
     }
 
@@ -169,6 +210,27 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         return clean;
     }
 
+    private parseVariables(text: string): string[] {
+        const variables: string[] = [];
+        
+        // Parse: @SET VARIABLE_NAME = value ;
+        // Handles various formats like:
+        // @SET VAR1 = 'value' ;
+        // @SET VAR2 = 123 ;
+        // @SET VAR3 = SELECT * FROM ... ;
+        const varRegex = /@SET\s+([a-zA-Z0-9_]+)\s*=/gi;
+        let match;
+        
+        while ((match = varRegex.exec(text)) !== null) {
+            const varName = match[1];
+            if (!variables.includes(varName)) {
+                variables.push(varName);
+            }
+        }
+        
+        return variables.sort();
+    }
+
     private parseLocalDefinitions(text: string): { name: string; type: string; columns: string[] }[] {
         const definitions: { name: string; type: string; columns: string[] }[] = [];
 
@@ -176,7 +238,7 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         // Regex to capture: CREATE TABLE name AS ( query )
         // We need to stop at matching closing paren.
 
-        const tempTableRegex = /CREATE\s+TABLE\s+([a-zA-Z0-9_]+)\s+AS\s*\(/gi;
+        const tempTableRegex = /CREATE\s+(?:TEMP\s+)?TABLE\s+([a-zA-Z0-9_]+)\s+AS\s*\(/gi;
         let match;
         while ((match = tempTableRegex.exec(text)) !== null) {
             const tableName = match[1];

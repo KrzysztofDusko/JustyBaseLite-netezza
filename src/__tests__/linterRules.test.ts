@@ -15,7 +15,9 @@ import {
     ruleNZ008,
     ruleNZ009,
     ruleNZ010,
-    ruleNZ011
+    ruleNZ011,
+    ruleNZ012,
+    ruleNZ013
 } from '../providers/linterRules';
 
 describe('providers/linterRules', () => {
@@ -356,6 +358,54 @@ describe('providers/linterRules', () => {
             const sql = 'CREATE TABLE new_table AS SELECT * FROM old_table WHERE id > 0 DISTRIBUTE ON (id)';
             const issues = ruleNZ011.check(sql);
             expect(issues.length).toBe(0);
+        });
+    });
+
+    describe('NZ012: UPDATE with disallowed AS alias', () => {
+        it('should detect UPDATE with AS alias', () => {
+            const sql = 'UPDATE users AS u SET active = 1';
+            const issues = ruleNZ012.check(sql);
+            expect(issues.length).toBe(1);
+            expect(issues[0].ruleId).toBe('NZ012');
+        });
+
+        it('should not flag UPDATE without AS', () => {
+            const sql = 'UPDATE users u SET active = 1';
+            const issues = ruleNZ012.check(sql);
+            expect(issues.length).toBe(0);
+        });
+
+        it('should not flag plain UPDATE', () => {
+            const sql = 'UPDATE users SET active = 1';
+            const issues = ruleNZ012.check(sql);
+            expect(issues.length).toBe(0);
+        });
+    });
+
+    describe('NZ013: Prefer UNION ALL over UNION', () => {
+        it('should detect UNION', () => {
+            const sql = 'SELECT * FROM t1 UNION SELECT * FROM t2';
+            const issues = ruleNZ013.check(sql);
+            expect(issues.length).toBe(1);
+            expect(issues[0].ruleId).toBe('NZ013');
+        });
+
+        it('should detect UNION DISTINCT', () => {
+            const sql = 'SELECT * FROM t1 UNION DISTINCT SELECT * FROM t2';
+            const issues = ruleNZ013.check(sql);
+            expect(issues.length).toBe(1);
+        });
+
+        it('should not flag UNION ALL', () => {
+            const sql = 'SELECT * FROM t1 UNION ALL SELECT * FROM t2';
+            const issues = ruleNZ013.check(sql);
+            expect(issues.length).toBe(0);
+        });
+
+        it('should detect multiple UNIONs', () => {
+            const sql = 'SELECT 1 UNION SELECT 2 UNION ALL SELECT 3';
+            const issues = ruleNZ013.check(sql);
+            expect(issues.length).toBe(1);
         });
     });
 });

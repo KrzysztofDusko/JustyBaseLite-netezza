@@ -539,6 +539,61 @@ export const ruleNZ011: LintRule = {
 };
 
 /**
+ * NZ012: UPDATE with disallowed AS alias
+ */
+export const ruleNZ012: LintRule = {
+    id: 'NZ012',
+    name: 'Update Alias With AS',
+    description: 'Netezza UPDATE statements do not support "AS" for table aliases. Use "UPDATE table alias" instead.',
+    defaultSeverity: vscode.DiagnosticSeverity.Error,
+    check(sql: string): LintIssue[] {
+        const issues: LintIssue[] = [];
+        const pattern = /\bUPDATE\s+[\w."]+\s+AS\s+[\w."]+/gi;
+        const matches = findPatternMatches(sql, pattern);
+
+        for (const match of matches) {
+            const asMatch = /\bAS\b/i.exec(match[0]);
+            if (asMatch) {
+                issues.push({
+                    ruleId: this.id,
+                    message: `${this.id}: ${this.description}`,
+                    severity: this.defaultSeverity,
+                    startOffset: match.index + asMatch.index,
+                    endOffset: match.index + asMatch.index + asMatch[0].length
+                });
+            }
+        }
+        return issues;
+    }
+};
+
+/**
+ * NZ013: Prefer UNION ALL over UNION
+ */
+export const ruleNZ013: LintRule = {
+    id: 'NZ013',
+    name: 'Prefer Union All',
+    description: 'UNION performs a distinct operation which is slower than UNION ALL. Use UNION ALL if duplicates are not an issue.',
+    defaultSeverity: vscode.DiagnosticSeverity.Information,
+    check(sql: string): LintIssue[] {
+        const issues: LintIssue[] = [];
+        const pattern = /\bUNION\b(?!\s+ALL\b)/gi;
+        const matches = findPatternMatches(sql, pattern);
+
+        for (const match of matches) {
+            issues.push({
+                ruleId: this.id,
+                message: `${this.id}: ${this.description}`,
+                severity: this.defaultSeverity,
+                startOffset: match.index,
+                endOffset: match.index + match[0].length
+            });
+        }
+        return issues;
+    }
+};
+
+/**
  * All available lint rules
  */
 export const allRules: LintRule[] = [
@@ -552,7 +607,9 @@ export const allRules: LintRule[] = [
     ruleNZ008,
     ruleNZ009,
     ruleNZ010,
-    ruleNZ011
+    ruleNZ011,
+    ruleNZ012,
+    ruleNZ013
 ];
 
 /**

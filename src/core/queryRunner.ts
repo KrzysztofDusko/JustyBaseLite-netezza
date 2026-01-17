@@ -793,7 +793,7 @@ export async function runQueriesSequentially(
                 }
             }
 
-            let resolvedVars: Record<string, string> = { ...allDefaults };
+            const resolvedVars: Record<string, string> = { ...allDefaults };
 
             if (missingVars.size > 0) {
                 const prompted = await promptForVariableValues(
@@ -1255,7 +1255,7 @@ export async function runQueriesWithStreaming(
                 }
             }
 
-            let resolvedVars: Record<string, string> = { ...allDefaults };
+            const resolvedVars: Record<string, string> = { ...allDefaults };
 
             if (missingVars.size > 0) {
                 const prompted = await promptForVariableValues(

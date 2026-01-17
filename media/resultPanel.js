@@ -64,6 +64,45 @@ style.textContent = `
         opacity: 0.7;
         font-size: 0.9em;
     }
+    .error-actions {
+        margin-top: 20px;
+        padding-top: 15px;
+        border-top: 1px solid var(--vscode-panel-border);
+        display: flex;
+        gap: 10px;
+        align-items: center;
+    }
+    .copilot-fix-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 16px;
+        font-size: 13px;
+        font-weight: 500;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        background: linear-gradient(135deg, var(--vscode-button-background) 0%, #6b5ce7 100%);
+        color: var(--vscode-button-foreground);
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        transition: all 0.2s ease;
+    }
+    .copilot-fix-btn:hover {
+        background: linear-gradient(135deg, var(--vscode-button-hoverBackground) 0%, #7d6ff0 100%);
+        box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
+        transform: translateY(-1px);
+    }
+    .copilot-fix-btn:active {
+        transform: translateY(0);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    }
+    .copilot-fix-btn .icon {
+        font-size: 16px;
+    }
+    .copilot-fix-btn.loading {
+        opacity: 0.7;
+        cursor: wait;
+    }
 `;
 document.head.appendChild(style);
 
@@ -380,6 +419,28 @@ function renderResultSetTabs() {
             }
         };
         tab.appendChild(analyzeSpan);
+
+        // Copilot AI Describe Button
+        const copilotSpan = document.createElement('span');
+        copilotSpan.className = 'codicon codicon-sparkle';
+        copilotSpan.style.marginLeft = '6px';
+        copilotSpan.style.cursor = 'pointer';
+        copilotSpan.title = 'Describe data with Copilot AI';
+        copilotSpan.textContent = '✨';
+
+        copilotSpan.onclick = (e) => {
+            e.stopPropagation();
+            // Send describe with copilot message
+            const rs = window.resultSets[index];
+            if (rs) {
+                vscode.postMessage({
+                    command: 'describeWithCopilot',
+                    data: rs.data,
+                    sql: rs.sql || ''
+                });
+            }
+        };
+        tab.appendChild(copilotSpan);
 
         // Close Button (x) for individual result
         const closeSpan = document.createElement('span');
@@ -1722,6 +1783,31 @@ function createErrorView(rs, rsIndex, container) {
         sqlDiv.innerHTML = `<strong>Executed SQL:</strong><br><pre style="margin-top: 5px;">${rs.sql}</pre>`;
         errorDiv.appendChild(sqlDiv);
     }
+
+    // Add Fix with Copilot button
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'error-actions';
+
+    const fixBtn = document.createElement('button');
+    fixBtn.className = 'copilot-fix-btn';
+    fixBtn.innerHTML = '<span class="icon">✨</span><span>Fix with Copilot</span>';
+    fixBtn.title = 'Send error and SQL to Copilot Chat for fixing (includes table DDL for context)';
+    fixBtn.onclick = () => {
+        fixBtn.classList.add('loading');
+        fixBtn.innerHTML = '<span class="icon">⏳</span><span>Sending to Copilot...</span>';
+        vscode.postMessage({
+            command: 'fixSqlError',
+            errorMessage: rs.message || 'Unknown error',
+            sql: rs.sql || ''
+        });
+        // Reset button after a short delay
+        setTimeout(() => {
+            fixBtn.classList.remove('loading');
+            fixBtn.innerHTML = '<span class="icon">✨</span><span>Fix with Copilot</span>';
+        }, 2000);
+    };
+    actionsDiv.appendChild(fixBtn);
+    errorDiv.appendChild(actionsDiv);
 
     wrapper.appendChild(errorDiv);
     grids.push(null); // Register placeholder grid to keep indices in sync

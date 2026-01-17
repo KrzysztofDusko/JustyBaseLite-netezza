@@ -23,6 +23,7 @@ import { activateSqlLinter } from './providers/sqlLinterProvider';
 import { NetezzaLinterCodeActionProvider } from './providers/linterCodeActions';
 import { EtlDesignerView } from './views/etlDesignerView';
 import { EtlProjectManager } from './etl/etlProjectManager';
+import { CopilotService } from './services/copilotService';
 
 // Import modular command registrations
 import { registerSchemaCommands } from './commands/schemaCommands';
@@ -242,6 +243,130 @@ export async function activate(context: vscode.ExtensionContext) {
         resultPanelProvider
     });
     context.subscriptions.push(...queryDisposables);
+
+    // ========== Copilot Commands ==========
+    const copilotService = new CopilotService(connectionManager, context);
+
+    const copilotDisposables = [
+        vscode.commands.registerCommand('netezza.copilotFixSql', async () => {
+            try {
+                await copilotService.fixSql();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotFixSqlInteractive', async () => {
+            try {
+                await copilotService.fixSqlInteractive();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotOptimizeSql', async () => {
+            try {
+                await copilotService.optimizeSql();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotOptimizeSqlInteractive', async () => {
+            try {
+                await copilotService.optimizeSqlInteractive();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotExplainSql', async () => {
+            try {
+                await copilotService.explainSql();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotExplainSqlInteractive', async () => {
+            try {
+                await copilotService.explainSqlInteractive();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotCustomQuestion', async () => {
+            try {
+                await copilotService.askCustomQuestion();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotCustomQuestionInteractive', async () => {
+            try {
+                await copilotService.askCustomQuestionInteractive();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.copilotGenerateSql', async () => {
+            try {
+                await copilotService.generateSqlInteractive();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('justyBaseLite.copilot.changeModel', async () => {
+            try {
+                await copilotService.changeModel();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('justyBaseLite.copilot.clearModel', async () => {
+            try {
+                await copilotService.clearPersistedModel();
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.describeDataWithCopilot', async (data: Record<string, unknown>[], sql?: string) => {
+            try {
+                await copilotService.describeDataWithCopilot(data, sql);
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        }),
+
+        vscode.commands.registerCommand('netezza.fixSqlError', async (errorMessage: string, sql: string) => {
+            try {
+                await copilotService.fixSqlError(errorMessage, sql);
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
+            }
+        })
+    ];
+
+    context.subscriptions.push(...copilotDisposables);
 
     // ========== Core Commands (kept in extension.ts) ==========
     context.subscriptions.push(

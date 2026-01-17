@@ -308,8 +308,8 @@ describe('SQL Linter Rules', () => {
     });
 
     describe('allRules', () => {
-        it('should contain 11 rules', () => {
-            expect(allRules.length).toBe(11);
+        it('should contain 13 rules', () => {
+            expect(allRules.length).toBe(13);
         });
 
         it('should have unique rule IDs', () => {

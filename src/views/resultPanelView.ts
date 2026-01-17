@@ -49,6 +49,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'analyze':
                     AnalysisPanelView.createOrShow(this._extensionUri, message.data);
                     return;
+                case 'describeWithCopilot':
+                    vscode.commands.executeCommand('netezza.describeDataWithCopilot', message.data, message.sql);
+                    return;
+                case 'fixSqlError':
+                    vscode.commands.executeCommand('netezza.fixSqlError', message.errorMessage, message.sql);
+                    return;
                 case 'exportCsv':
                     this.exportCsv(message.data);
                     return;
@@ -729,7 +735,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         pinnedResultsToRemove.forEach(id => this._pinnedResults.delete(id));
 
         // Update indices for pinned results that are after the removed one
-        for (const [_id, info] of this._pinnedResults.entries()) {
+        for (const [, info] of this._pinnedResults.entries()) {
             if (info.sourceUri === sourceUri && info.resultSetIndex > resultSetIndex) {
                 info.resultSetIndex -= 1;
             }
