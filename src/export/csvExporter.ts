@@ -8,16 +8,21 @@ import { NzConnection, ConnectionDetails } from '../types';
 // ConnectionDetails used directly - no parseConnectionString needed
 
 export async function exportToCsv(
-    _context: vscode.ExtensionContext,
     connectionDetails: ConnectionDetails,
     query: string,
     filePath: string,
     progress?: vscode.Progress<{ message?: string; increment?: number }>,
-    timeout?: number
+    timeout?: number,
+    cancellationToken?: vscode.CancellationToken
 ): Promise<void> {
     let connection: NzConnection | null = null;
 
     try {
+        // Check cancellation before starting
+        if (cancellationToken?.isCancellationRequested) {
+            throw new Error('Export cancelled by user');
+        }
+
         if (progress) {
             progress.report({ message: 'Connecting to database...' });
         }
@@ -70,31 +75,62 @@ export async function exportToCsv(
         let totalRows = 0;
         let rowBuffer: string[] = []; // Buffer multiple rows before writing
         const BUFFER_SIZE = 500; // Increased buffer size
+        let wasCancelled = false;
 
-        while (await reader.read()) {
-            totalRows++;
+        try {
+            while (await reader.read()) {
+                // Check for cancellation during data fetch
+                if (cancellationToken?.isCancellationRequested) {
+                    wasCancelled = true;
+                    if (progress) {
+                        progress.report({ message: `Export cancelled - finalizing ${totalRows} rows...` });
+                    }
+                    break; // Exit loop but finalize file with partial data
+                }
 
-            // Build row string
-            const rowValues: string[] = [];
-            for (let i = 0; i < reader.fieldCount; i++) {
-                rowValues.push(escapeCsvField(reader.getValue(i)));
+                totalRows++;
+
+                // Build row string
+                const rowValues: string[] = [];
+                for (let i = 0; i < reader.fieldCount; i++) {
+                    rowValues.push(escapeCsvField(reader.getValue(i)));
+                }
+
+                rowBuffer.push(rowValues.join(','));
+
+                // Write buffer when it reaches BUFFER_SIZE
+                if (rowBuffer.length >= BUFFER_SIZE) {
+                    const canWrite = writeStream.write(rowBuffer.join('\n') + '\n');
+                    rowBuffer = []; // Clear buffer
+
+                    // Handle backpressure
+                    if (!canWrite) {
+                        await new Promise<void>(resolve => writeStream.once('drain', resolve));
+                    }
+
+                    // Yield to event loop to allow cancellation callback to execute
+                    await new Promise(resolve => setImmediate(resolve));
+
+                    // Check again after yielding
+                    if (cancellationToken?.isCancellationRequested) {
+                        wasCancelled = true;
+                        if (progress) {
+                            progress.report({ message: `Export cancelled - finalizing ${totalRows} rows...` });
+                        }
+                        break;
+                    }
+
+                    if (progress && totalRows % 1000 === 0) {
+                        progress.report({ message: `Processed ${totalRows} rows...` });
+                    }
+                }
             }
-
-            rowBuffer.push(rowValues.join(','));
-
-            // Write buffer when it reaches BUFFER_SIZE
-            if (rowBuffer.length >= BUFFER_SIZE) {
-                const canWrite = writeStream.write(rowBuffer.join('\n') + '\n');
-                rowBuffer = []; // Clear buffer
-
-                // Handle backpressure
-                if (!canWrite) {
-                    await new Promise<void>(resolve => writeStream.once('drain', resolve));
-                }
-
-                if (progress && totalRows % 1000 === 0) {
-                    progress.report({ message: `Processed ${totalRows} rows...` });
-                }
+        } catch (readErr: unknown) {
+            // Handle read errors but still finalize file with partial data
+            wasCancelled = true;
+            if (progress) {
+                const errMsg = readErr instanceof Error ? readErr.message : String(readErr);
+                progress.report({ message: `Error after ${totalRows} rows: ${errMsg}` });
             }
         }
 
@@ -111,7 +147,8 @@ export async function exportToCsv(
         });
 
         if (progress) {
-            progress.report({ message: `Completed: ${totalRows} rows exported` });
+            const status = wasCancelled ? ' (cancelled - partial data saved)' : '';
+            progress.report({ message: `Completed: ${totalRows} rows exported${status}` });
         }
     } finally {
         if (connection) {

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 const XlsbWriter = require('../../libs/ExcelHelpersTs/XlsbWriter').default as new (filePath: string) => {
     addSheet(sheetName: string, hidden?: boolean): void;
@@ -86,6 +87,8 @@ export interface ExportResult {
  * @param outputPath Path where to save the XLSB file
  * @param copyToClipboard If true, also copy file to clipboard (Windows only)
  * @param progressCallback Optional callback for progress updates
+ * @param timeout Optional query timeout in seconds
+ * @param cancellationToken Optional cancellation token to abort export
  * @returns Export result with success status and details
  */
 export async function exportQueryToXlsb(
@@ -94,11 +97,17 @@ export async function exportQueryToXlsb(
     outputPath: string,
     copyToClipboard: boolean = false,
     progressCallback?: ProgressCallback,
-    timeout?: number
+    timeout?: number,
+    cancellationToken?: vscode.CancellationToken
 ): Promise<ExportResult> {
     let connection: NzConnection | null = null;
 
     try {
+        // Check cancellation before starting
+        if (cancellationToken?.isCancellationRequested) {
+            throw new Error('Export cancelled by user');
+        }
+
         // Connect to database
         if (progressCallback) {
             progressCallback('Connecting to database...');
@@ -125,6 +134,7 @@ export async function exportQueryToXlsb(
 
         let totalRows = 0;
         let totalCols = 0;
+        let wasCancelled = false;
 
         for (let qIndex = 0; qIndex < queries.length; qIndex++) {
             const currentQuery = queries[qIndex];
@@ -141,7 +151,25 @@ export async function exportQueryToXlsb(
                 if (timeout) {
                     cmd.commandTimeout = timeout;
                 }
-                const reader = await cmd.executeReader();
+
+                // Set up cancellation listener to cancel the SQL command when user clicks Cancel
+                let cancelListener: vscode.Disposable | undefined;
+                if (cancellationToken) {
+                    cancelListener = cancellationToken.onCancellationRequested(async () => {
+                        wasCancelled = true;
+                        if (progressCallback) {
+                            progressCallback('Cancelling query...');
+                        }
+                        try {
+                            await cmd.cancel();
+                        } catch (cancelErr) {
+                            console.error('Error cancelling command:', cancelErr);
+                        }
+                    });
+                }
+
+                try {
+                    const reader = await cmd.executeReader();
 
                 // Prepare headers for XLSB
                 const headers: string[] = [];
@@ -172,36 +200,80 @@ export async function exportQueryToXlsb(
 
                 let rowCount = 0;
 
-                // Stream rows directly from database reader to Excel writer
-                while (await reader.read()) {
-                    const row: unknown[] = [];
-                    for (let i = 0; i < reader.fieldCount; i++) {
-                        let val = reader.getValue(i);
-
-                        // Apply conversion ONLY if column is strictly numeric in database
-                        if (colIsNumeric[i]) {
-                            val = convertToNumberIfNumericString(val);
+                try {
+                    // Stream rows directly from database reader to Excel writer
+                    while (await reader.read()) {
+                        // Check for cancellation - wasCancelled is set by the listener
+                        if (wasCancelled || cancellationToken?.isCancellationRequested) {
+                            wasCancelled = true;
+                            if (progressCallback) {
+                                progressCallback(`Export cancelled - finalizing ${rowCount.toLocaleString()} rows...`);
+                            }
+                            break; // Exit loop but continue to finalize
                         }
 
-                        row.push(val);
-                    }
-                    // Write row immediately
-                    writer.writeRow(row);
-                    rowCount++;
+                        const row: unknown[] = [];
+                        for (let i = 0; i < reader.fieldCount; i++) {
+                            let val = reader.getValue(i);
 
-                    // Progress update every 10000 rows
-                    if (rowCount % 10000 === 0 && progressCallback) {
-                        progressCallback(`Streaming ${rowCount.toLocaleString()} rows to "${sheetName}"...`);
+                            // Apply conversion ONLY if column is strictly numeric in database
+                            if (colIsNumeric[i]) {
+                                val = convertToNumberIfNumericString(val);
+                            }
+
+                            row.push(val);
+                        }
+                        // Write row immediately
+                        writer.writeRow(row);
+                        rowCount++;
+
+                        // Every 500 rows: yield to event loop to allow cancellation callback to execute
+                        // This is critical because the loop is so tight that callbacks never get a chance
+                        if (rowCount % 500 === 0) {
+                            await new Promise(resolve => setImmediate(resolve));
+                            
+                            // Check again after yielding
+                            if (wasCancelled) {
+                                if (progressCallback) {
+                                    progressCallback(`Export cancelled - finalizing ${rowCount.toLocaleString()} rows...`);
+                                }
+                                break;
+                            }
+                        }
+
+                        // Progress update every 10000 rows
+                        if (rowCount % 10000 === 0 && progressCallback) {
+                            progressCallback(`Streaming ${rowCount.toLocaleString()} rows to "${sheetName}"...`);
+                        }
+                    }
+                } catch (readErr: unknown) {
+                    // Handle read errors (including cancellation) but still finalize the sheet with partial data
+                    const readErrMsg = readErr instanceof Error ? readErr.message : String(readErr);
+                    // Don't log cancellation as error
+                    if (!wasCancelled && progressCallback) {
+                        progressCallback(`Read error after ${rowCount} rows: ${readErrMsg}`);
                     }
                 }
 
-                // Finalize the sheet
+                // Finalize the sheet (always, even if cancelled)
                 writer.endSheet();
 
                 totalRows += rowCount;
 
                 if (progressCallback) {
-                    progressCallback(`Written ${rowCount.toLocaleString()} rows to sheet "${sheetName}"`);
+                    const status = wasCancelled ? '(cancelled)' : '';
+                    progressCallback(`Written ${rowCount.toLocaleString()} rows to sheet "${sheetName}" ${status}`);
+                }
+
+                // If cancelled, stop processing further queries
+                if (wasCancelled) {
+                    break;
+                }
+                } finally {
+                    // Clean up cancellation listener
+                    if (cancelListener) {
+                        cancelListener.dispose();
+                    }
                 }
             } catch (err: unknown) {
                 // If one query fails, create an error sheet
@@ -231,7 +303,11 @@ export async function exportQueryToXlsb(
         const fileSizeMb = stats.size / (1024 * 1024);
 
         if (progressCallback) {
-            progressCallback(`XLSB file created successfully`);
+            if (wasCancelled) {
+                progressCallback(`XLSB file created with partial data (export was cancelled)`);
+            } else {
+                progressCallback(`XLSB file created successfully`);
+            }
             progressCallback(`  - Total Rows: ${totalRows.toLocaleString()}`);
             progressCallback(`  - File size: ${fileSizeMb.toFixed(1)} MB`);
             progressCallback(`  - Location: ${outputPath}`);
@@ -239,7 +315,9 @@ export async function exportQueryToXlsb(
 
         const exportResult: ExportResult = {
             success: true,
-            message: `Successfully exported ${totalRows} rows to ${outputPath}`,
+            message: wasCancelled 
+                ? `Export cancelled - saved ${totalRows} rows to ${outputPath}`
+                : `Successfully exported ${totalRows} rows to ${outputPath}`,
             details: {
                 rows_exported: totalRows,
                 columns: totalCols,

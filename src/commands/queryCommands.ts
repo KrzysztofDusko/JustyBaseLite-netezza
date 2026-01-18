@@ -144,30 +144,41 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
                     location: vscode.ProgressLocation.Notification,
                     title: `Executing SQL for ${sourceUri.split(/[\\/]/).pop()}...`,
                     cancellable: false
-                }, async () => {
-                    if (enableStreaming) {
-                        // Use streaming for large result sets
-                        await runQueriesWithStreaming(
-                            context,
-                            queries,
-                            connectionManager,
-                            sourceUri,
-                            msg => resultPanelProvider.log(sourceUri, msg),
-                            (queryIndex: number, chunk: StreamingChunk, sql: string) => {
-                                resultPanelProvider.appendStreamingChunk(sourceUri, queryIndex, chunk, sql);
-                            },
-                            streamingChunkSize
-                        );
-                    } else {
-                        // Use traditional batch loading
-                        await runQueriesSequentially(
-                            context,
-                            queries,
-                            connectionManager,
-                            sourceUri,
-                            msg => resultPanelProvider.log(sourceUri, msg),
-                            queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
-                        );
+                }, async (progress) => {
+                    // Listen for cancel event to update progress message immediately
+                    const cancelListener = resultPanelProvider.onDidCancel((cancelledUri) => {
+                        if (cancelledUri === sourceUri) {
+                            progress.report({ message: 'Cancelling query...' });
+                        }
+                    });
+
+                    try {
+                        if (enableStreaming) {
+                            // Use streaming for large result sets
+                            await runQueriesWithStreaming(
+                                context,
+                                queries,
+                                connectionManager,
+                                sourceUri,
+                                msg => resultPanelProvider.log(sourceUri, msg),
+                                (queryIndex: number, chunk: StreamingChunk, sql: string) => {
+                                    resultPanelProvider.appendStreamingChunk(sourceUri, queryIndex, chunk, sql);
+                                },
+                                streamingChunkSize
+                            );
+                        } else {
+                            // Use traditional batch loading
+                            await runQueriesSequentially(
+                                context,
+                                queries,
+                                connectionManager,
+                                sourceUri,
+                                msg => resultPanelProvider.log(sourceUri, msg),
+                                queryResults => resultPanelProvider.updateResults(queryResults, sourceUri, true)
+                            );
+                        }
+                    } finally {
+                        cancelListener.dispose();
                     }
                 });
 
@@ -175,6 +186,14 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
                 vscode.commands.executeCommand('netezza.results.focus');
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err);
+                
+                // If it's a cancellation error, log info but don't show error dialog or error result
+                if (msg.includes('Query cancelled')) {
+                    resultPanelProvider.log(sourceUri, 'Query execution cancelled by user.');
+                    resultPanelProvider.finalizeExecution(sourceUri);
+                    return;
+                }
+
                 resultPanelProvider.log(sourceUri, `Error: ${msg}`);
 
                 // Add error result BEFORE finalizing so it gets properly pinned
@@ -269,6 +288,14 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
                 vscode.commands.executeCommand('netezza.results.focus');
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err);
+                
+                // If it's a cancellation error, log info but don't show error dialog or error result
+                if (msg.includes('Query cancelled')) {
+                    resultPanelProvider.log(sourceUri, 'Query execution cancelled by user.');
+                    resultPanelProvider.finalizeExecution(sourceUri);
+                    return;
+                }
+
                 resultPanelProvider.log(sourceUri, `Error: ${msg}`);
 
                 // Add error result BEFORE finalizing so it gets properly pinned

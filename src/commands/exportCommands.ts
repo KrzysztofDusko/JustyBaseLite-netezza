@@ -27,7 +27,7 @@ function logExecutionTime(outputChannel: vscode.OutputChannel, operation: string
  * Register all export-related commands
  */
 export function registerExportCommands(deps: ExportCommandsDependencies): vscode.Disposable[] {
-    const { context, connectionManager, outputChannel } = deps;
+    const { connectionManager, outputChannel } = deps;
 
     return [
         // Export to XLSB
@@ -67,9 +67,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: 'Exporting to XLSB...',
-                        cancellable: false
+                        cancellable: true
                     },
-                    async progress => {
+                    async (progress, token) => {
                         const { exportQueryToXlsb } = await import('../export/xlsbExporter');
 
                         const result = await exportQueryToXlsb(
@@ -80,7 +80,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                             (message: string) => {
                                 progress.report({ message });
                                 outputChannel.appendLine(`[XLSB Export] ${message}`);
-                            }
+                            },
+                            undefined,
+                            token
                         );
 
                         if (!result.success) {
@@ -134,11 +136,11 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: 'Exporting to CSV...',
-                        cancellable: false
+                        cancellable: true
                     },
-                    async progress => {
+                    async (progress, token) => {
                         const { exportToCsv } = await import('../export/csvExporter');
-                        await exportToCsv(context, connectionDetails, text, uri.fsPath, progress);
+                        await exportToCsv(connectionDetails, text, uri.fsPath, progress, undefined, token);
                     }
                 );
 
@@ -180,9 +182,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: 'Exporting to XLSB and copying to clipboard...',
-                        cancellable: false
+                        cancellable: true
                     },
-                    async progress => {
+                    async (progress, token) => {
                         const { exportQueryToXlsb, getTempFilePath } = await import('../export/xlsbExporter');
 
                         const tempPath = getTempFilePath();
@@ -195,7 +197,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                             (message: string) => {
                                 progress.report({ message });
                                 outputChannel.appendLine(`[XLSB Clipboard] ${message}`);
-                            }
+                            },
+                            undefined,
+                            token
                         );
 
                         if (!result.success) {
@@ -263,9 +267,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     {
                         location: vscode.ProgressLocation.Notification,
                         title: 'Exporting to XLSB and opening...',
-                        cancellable: false
+                        cancellable: true
                     },
-                    async progress => {
+                    async (progress, token) => {
                         const { exportQueryToXlsb } = await import('../export/xlsbExporter');
 
                         const result = await exportQueryToXlsb(
@@ -276,7 +280,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                             (message: string) => {
                                 progress.report({ message });
                                 outputChannel.appendLine(`[XLSB Export] ${message}`);
-                            }
+                            },
+                            undefined,
+                            token
                         );
 
                         if (!result.success) {
@@ -334,9 +340,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         {
                             location: vscode.ProgressLocation.Notification,
                             title: 'Creating Excel file...',
-                            cancellable: false
+                            cancellable: true
                         },
-                        async progress => {
+                        async (progress) => {
                             // Detect if data is structured (has columns/rows) vs CSV (has csv property)
                             const isStructuredData = Array.isArray(dataToExport) &&
                                 dataToExport.length > 0 &&
@@ -431,9 +437,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         {
                             location: vscode.ProgressLocation.Notification,
                             title: 'Copying to clipboard as Excel...',
-                            cancellable: false
+                            cancellable: true
                         },
-                        async progress => {
+                        async (progress) => {
                             // Detect if data is structured (has columns/rows) vs CSV (has csv property)
                             const isStructuredData = Array.isArray(dataToExport) &&
                                 dataToExport.length > 0 &&
@@ -533,9 +539,9 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                         {
                             location: vscode.ProgressLocation.Notification,
                             title: 'Creating Excel XLSX file...',
-                            cancellable: false
+                            cancellable: true
                         },
-                        async progress => {
+                        async (progress) => {
                             // Detect if data is structured (has columns/rows) vs CSV (has csv property)
                             const isStructuredData = Array.isArray(dataToExport) &&
                                 dataToExport.length > 0 &&

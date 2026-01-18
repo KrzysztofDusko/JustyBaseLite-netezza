@@ -24,10 +24,16 @@ export class ConnectionManager {
     // Per-document connection selection: Map<documentUri, connectionName>
     private _documentConnections: Map<string, string> = new Map();
 
-    // Persistent connections: { [name]: odbc_connection }
+    // Per-document persistent connections: Map<documentUri, NzConnection>
+    private _documentPersistentConnections: Map<string, NzConnection> = new Map();
+
+    // Per-document keep connection open setting: Map<documentUri, boolean>
+    private _documentKeepConnectionOpen: Map<string, boolean> = new Map();
+
+    // Global persistent connections (deprecated, kept for backward compatibility): { [name]: odbc_connection }
     private _persistentConnections: Map<string, NzConnection> = new Map();
 
-    private _keepConnectionOpen: boolean = false;
+    private _keepConnectionOpen: boolean = true;
 
     // Promise that resolves when connections are loaded
     private _loadingPromise: Promise<void>;
@@ -159,6 +165,114 @@ export class ConnectionManager {
         return this._connections[targetName]?.database || null;
     }
 
+    // ========== Per-Document Keep Connection Open ==========
+
+    /**
+     * Set keep connection open for a specific document (tab)
+     */
+    setDocumentKeepConnectionOpen(documentUri: string, keepOpen: boolean): void {
+        this._documentKeepConnectionOpen.set(documentUri, keepOpen);
+        if (!keepOpen) {
+            // Close persistent connection for this document
+            this.closeDocumentPersistentConnection(documentUri);
+        }
+    }
+
+    /**
+     * Get keep connection open setting for a specific document (tab)
+     * Falls back to global setting if not set per-document
+     */
+    getDocumentKeepConnectionOpen(documentUri: string): boolean {
+        const perDoc = this._documentKeepConnectionOpen.get(documentUri);
+        if (perDoc !== undefined) {
+            return perDoc;
+        }
+        return this._keepConnectionOpen;
+    }
+
+    /**
+     * Check if document has explicit keep connection setting
+     */
+    hasDocumentKeepConnectionOpen(documentUri: string): boolean {
+        return this._documentKeepConnectionOpen.has(documentUri);
+    }
+
+    /**
+     * Toggle keep connection open for a specific document
+     */
+    toggleDocumentKeepConnectionOpen(documentUri: string): boolean {
+        const current = this.getDocumentKeepConnectionOpen(documentUri);
+        const newValue = !current;
+        this.setDocumentKeepConnectionOpen(documentUri, newValue);
+        return newValue;
+    }
+
+    /**
+     * Get persistent connection for a specific document (tab)
+     */
+    async getDocumentPersistentConnection(documentUri: string, connectionName?: string): Promise<NzConnection> {
+        const targetName = connectionName || this.getConnectionForExecution(documentUri);
+        if (!targetName) {
+            throw new Error('No connection selected for this document');
+        }
+
+        const details = await this.getConnection(targetName);
+        if (!details) {
+            throw new Error(`Connection '${targetName}' not found or invalid`);
+        }
+
+        const existing = this._documentPersistentConnections.get(documentUri);
+
+        // If existing connection is for a different connection name, close it
+        if (existing) {
+            // We need to track which connection each document is using
+            // For simplicity, we'll just return the existing one
+            // The caller should close and re-get if connection changed
+            return existing;
+        }
+
+        // Create new connection for this document
+        const { createNzConnection } = require('./nzConnectionFactory');
+
+        const conn = createNzConnection({
+            host: details.host,
+            port: details.port || 5480,
+            database: details.database,
+            user: details.user,
+            password: details.password
+        }) as NzConnection;
+        await conn.connect();
+
+        this._documentPersistentConnections.set(documentUri, conn);
+        return conn;
+    }
+
+    /**
+     * Close persistent connection for a specific document
+     */
+    async closeDocumentPersistentConnection(documentUri: string): Promise<void> {
+        const conn = this._documentPersistentConnections.get(documentUri);
+        if (conn) {
+            try {
+                await conn.close();
+            } catch (e) {
+                console.error(`Error closing document connection for ${documentUri}:`, e);
+            }
+            this._documentPersistentConnections.delete(documentUri);
+        }
+    }
+
+    /**
+     * Close all document persistent connections
+     */
+    async closeAllDocumentPersistentConnections(): Promise<void> {
+        for (const uri of this._documentPersistentConnections.keys()) {
+            await this.closeDocumentPersistentConnection(uri);
+        }
+    }
+
+    // ========== Legacy Global Keep Connection (for backward compatibility) ==========
+
     setKeepConnectionOpen(keepOpen: boolean) {
         this._keepConnectionOpen = keepOpen;
         if (!keepOpen) {
@@ -223,6 +337,7 @@ export class ConnectionManager {
 
     dispose() {
         this.closeAllPersistentConnections();
+        this.closeAllDocumentPersistentConnections();
         this._onDidChangeConnections.dispose();
         this._onDidChangeActiveConnection.dispose();
         this._onDidChangeDocumentConnection.dispose();
@@ -235,11 +350,15 @@ export class ConnectionManager {
 
     setDocumentConnection(documentUri: string, connectionName: string) {
         this._documentConnections.set(documentUri, connectionName);
+        // If connection changes, close existing persistent connection for this document
+        this.closeDocumentPersistentConnection(documentUri);
         this._onDidChangeDocumentConnection.fire(documentUri);
     }
 
     clearDocumentConnection(documentUri: string) {
         this._documentConnections.delete(documentUri);
+        this.closeDocumentPersistentConnection(documentUri);
+        this._documentKeepConnectionOpen.delete(documentUri);
         this._onDidChangeDocumentConnection.fire(documentUri);
     }
 

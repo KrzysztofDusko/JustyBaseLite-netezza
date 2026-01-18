@@ -61,10 +61,13 @@ export async function cancelQueryByUri(docUri: string | vscode.Uri): Promise<voi
 
     if (state) {
         state.isCancelled = true;
+        // Notify immediately to give feedback
+        vscode.window.showInformationMessage('Cancellation request sent.');
+        
         try {
             console.log(`[cancelQueryByUri] Calling cmd.cancel() for ${uriStr}`);
             await state.command.cancel();
-            vscode.window.showInformationMessage('Cancellation request sent.');
+            console.log(`[cancelQueryByUri] cmd.cancel() completed for ${uriStr}`);
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             console.error(`[cancelQueryByUri] Failed to cancel: ${msg}`);
@@ -205,15 +208,26 @@ function resolveConnectionName(
     return resolvedConnectionName;
 }
 
-async function getConnection(
+/**
+ * Get connection for a specific document (per-tab connection)
+ * Uses document-specific persistent connection if keepConnectionOpen is true
+ */
+async function getConnectionForDocument(
     connManager: ConnectionManager,
     resolvedConnectionName: string,
-    keepConnectionOpen: boolean
+    keepConnectionOpen: boolean,
+    documentUri?: string
 ): Promise<{ connection: NzConnection; shouldCloseConnection: boolean }> {
-    if (keepConnectionOpen) {
+    if (keepConnectionOpen && documentUri) {
+        // Use per-document persistent connection
+        const connection = await connManager.getDocumentPersistentConnection(documentUri, resolvedConnectionName);
+        return { connection, shouldCloseConnection: false };
+    } else if (keepConnectionOpen) {
+        // Fallback to global persistent connection (for silent queries without documentUri)
         const connection = await connManager.getPersistentConnection(resolvedConnectionName);
         return { connection, shouldCloseConnection: false };
     } else {
+        // Create new connection that will be closed after query
         const { createNzConnection } = require('./nzConnectionFactory');
         const details = await connManager.getConnection(resolvedConnectionName);
         if (!details) {
@@ -231,6 +245,62 @@ async function getConnection(
     }
 }
 
+/**
+ * Execute DROP SESSION on a new connection.
+ * If keepConnectionOpen is enabled, close the old persistent connection
+ * and establish a new one (per-document if documentUri is provided).
+ */
+async function executeDropSession(
+    sessionId: string,
+    connectionManager: ConnectionManager,
+    documentUri?: string
+): Promise<void> {
+    try {
+        const connName = connectionManager.getActiveConnectionName();
+        if (connName) {
+            const details = await connectionManager.getConnection(connName);
+            if (details) {
+                const { createNzConnection } = require('./nzConnectionFactory');
+                const connection = createNzConnection({
+                    host: details.host,
+                    port: details.port || 5480,
+                    database: details.database,
+                    user: details.user,
+                    password: details.password
+                }) as NzConnection;
+                await connection.connect();
+                try {
+                    const dropCmd = connection.createCommand(`DROP SESSION ${sessionId}`);
+                    const r = await dropCmd.executeReader();
+                    await r.close();
+                    vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
+                    
+                    // If keepConnectionOpen is enabled, we need to close the old persistent
+                    // connection (which had the dropped session) and establish a new one
+                    if (documentUri && connectionManager.getDocumentKeepConnectionOpen(documentUri)) {
+                        // Per-document persistent connection
+                        await connectionManager.closeDocumentPersistentConnection(documentUri);
+                        // Establish new persistent connection immediately
+                        await connectionManager.getDocumentPersistentConnection(documentUri, connName);
+                        console.log(`[executeDropSession] Re-established per-document persistent connection for ${documentUri}`);
+                    } else if (connectionManager.getKeepConnectionOpen()) {
+                        // Global persistent connection (legacy)
+                        await connectionManager.closePersistentConnection(connName);
+                        // Establish new persistent connection immediately
+                        await connectionManager.getPersistentConnection(connName);
+                        console.log(`[executeDropSession] Re-established global persistent connection for ${connName}`);
+                    }
+                } finally {
+                    await connection.close();
+                }
+            }
+        }
+    } catch (dropErr) {
+        const dropMsg = dropErr instanceof Error ? dropErr.message : String(dropErr);
+        vscode.window.showErrorMessage(`Failed to drop session: ${dropMsg}`);
+    }
+}
+
 
 async function consumeRestAndCancel(
     reader: NzDataReader,
@@ -240,7 +310,7 @@ async function consumeRestAndCancel(
     connectionManager?: ConnectionManager
 ): Promise<void> {
     const startTime = Date.now();
-    const timeoutMs = 10000; // 10 seconds
+    const timeoutMs = 5000; // 5 seconds
 
     try {
         let timedOut = false;
@@ -276,34 +346,45 @@ async function consumeRestAndCancel(
                 const selection = await vscode.window.showWarningMessage(msg, `Drop Session ${sessionId}`, 'Keep Waiting');
 
                 if (selection === `Drop Session ${sessionId}`) {
-                    // Execute DROP SESSION on a new connection
+                    // Execute DROP SESSION immediately
+                    await executeDropSession(sessionId, connectionManager, documentUri);
+                } else if (selection === 'Keep Waiting') {
+                    // Continue consuming for another 15 seconds
+                    const extendedTimeoutMs = 15000;
+                    const extendedStartTime = Date.now();
+                    let extendedTimedOut = false;
+
                     try {
-                        const connName = connectionManager.getActiveConnectionName();
-                        if (connName) {
-                            const details = await connectionManager.getConnection(connName);
-                            if (details) {
-                                const { createNzConnection } = require('./nzConnectionFactory');
-                                const connection = createNzConnection({
-                                    host: details.host,
-                                    port: details.port || 5480,
-                                    database: details.database,
-                                    user: details.user,
-                                    password: details.password
-                                }) as NzConnection;
-                                await connection.connect();
-                                try {
-                                    const dropCmd = connection.createCommand(`DROP SESSION ${sessionId}`);
-                                    const r = await dropCmd.executeReader();
-                                    await r.close();
-                                    vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
-                                } finally {
-                                    await connection.close();
+                        do {
+                            while (await reader.read()) {
+                                // Respect cancellation even during extended draining
+                                if (documentUri) {
+                                    const state = executingCommands.get(normalizeUriKey(documentUri));
+                                    if (state && state.isCancelled) {
+                                        break;
+                                    }
+                                }
+
+                                if (Date.now() - extendedStartTime > extendedTimeoutMs) {
+                                    extendedTimedOut = true;
+                                    break;
                                 }
                             }
-                        }
-                    } catch (dropErr) { // type unknown
-                        const dropMsg = dropErr instanceof Error ? dropErr.message : String(dropErr);
-                        vscode.window.showErrorMessage(`Failed to drop session: ${dropMsg}`);
+                            if (extendedTimedOut) break;
+
+                            if (Date.now() - extendedStartTime > extendedTimeoutMs) {
+                                extendedTimedOut = true;
+                                break;
+                            }
+                        } while (await reader.nextResult());
+                    } catch (extendedErr) {
+                        console.warn('Error during extended consume:', extendedErr);
+                        extendedTimedOut = true;
+                    }
+
+                    if (extendedTimedOut) {
+                        console.warn(`Extended consume timed out after ${extendedTimeoutMs}ms, forcing DROP SESSION`);
+                        await executeDropSession(sessionId, connectionManager, documentUri);
                     }
                 }
             }
@@ -404,7 +485,10 @@ export async function runQueryRaw(
     extensionUri?: vscode.Uri
 ): Promise<QueryResult> {
     const connManager = connectionManager || new ConnectionManager(context);
-    const keepConnectionOpen = connManager.getKeepConnectionOpen();
+    // Use per-document keep connection setting if documentUri is provided
+    const keepConnectionOpen = documentUri 
+        ? connManager.getDocumentKeepConnectionOpen(documentUri)
+        : connManager.getKeepConnectionOpen();
     const logger = createLogger(silent, logCallback);
 
     log(logger, 'Executing query...');
@@ -422,11 +506,12 @@ export async function runQueryRaw(
         log(logger, `Using connection: ${resolvedConnectionName}`);
         log(logger, 'Connecting to database...');
 
-        // 3. Get connection
-        const { connection, shouldCloseConnection } = await getConnection(
+        // 3. Get connection (use per-document connection if keepConnectionOpen)
+        const { connection, shouldCloseConnection } = await getConnectionForDocument(
             connManager,
             resolvedConnectionName,
-            keepConnectionOpen
+            keepConnectionOpen,
+            documentUri
         );
         log(logger, 'Connected.');
 
@@ -605,7 +690,10 @@ export async function runExplainQuery(
     documentUri?: string
 ): Promise<string> {
     const connManager = connectionManager || new ConnectionManager(context);
-    const keepConnectionOpen = connManager.getKeepConnectionOpen();
+    // Use per-document keep connection setting if documentUri is provided
+    const keepConnectionOpen = documentUri 
+        ? connManager.getDocumentKeepConnectionOpen(documentUri)
+        : connManager.getKeepConnectionOpen();
 
     // Collect all notices
     const notices: string[] = [];
@@ -613,10 +701,11 @@ export async function runExplainQuery(
     // Resolve connection name
     const resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
 
-    const { connection, shouldCloseConnection } = await getConnection(
+    const { connection, shouldCloseConnection } = await getConnectionForDocument(
         connManager,
         resolvedConnectionName,
-        keepConnectionOpen
+        keepConnectionOpen,
+        documentUri
     );
 
     try {
@@ -680,7 +769,10 @@ export async function runQueriesSequentially(
     extensionUri?: vscode.Uri
 ): Promise<QueryResult[]> {
     const connManager = connectionManager || new ConnectionManager(context);
-    const keepConnectionOpen = connManager.getKeepConnectionOpen();
+    // Use per-document keep connection setting if documentUri is provided
+    const keepConnectionOpen = documentUri 
+        ? connManager.getDocumentKeepConnectionOpen(documentUri)
+        : connManager.getKeepConnectionOpen();
 
     let outputChannel: vscode.OutputChannel | undefined;
     if (!logCallback) {
@@ -718,11 +810,12 @@ export async function runQueriesSequentially(
         if (outputChannel) outputChannel.appendLine('Connecting to database...');
         if (logCallback) logCallback('Connecting to database...');
 
-        // Use shared getConnection helper to eliminate code duplication
-        const { connection, shouldCloseConnection } = await getConnection(
+        // Use shared getConnectionForDocument helper to eliminate code duplication
+        const { connection, shouldCloseConnection } = await getConnectionForDocument(
             connManager,
             resolvedConnectionName,
-            keepConnectionOpen
+            keepConnectionOpen,
+            documentUri
         );
 
         // Attach listener for notices
@@ -958,7 +1051,9 @@ async function executeAndFetchWithLimit(
 
     // Track command
     if (documentUri) {
-        executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false, sessionId });
+        const normalizedKey = normalizeUriKey(documentUri);
+        console.log(`[executeWithStreaming] Registering command with key: ${normalizedKey}`);
+        executingCommands.set(normalizedKey, { command: cmd, isCancelled: false, sessionId });
     }
 
     try {
@@ -1062,7 +1157,9 @@ async function executeAndFetchStreaming(
 
     // Track command
     if (documentUri) {
-        executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false, sessionId });
+        const normalizedKey = normalizeUriKey(documentUri);
+        console.log(`[executeAndFetchStreaming] Registering command with key: ${normalizedKey}`);
+        executingCommands.set(normalizedKey, { command: cmd, isCancelled: false, sessionId });
     }
 
     try {
@@ -1082,12 +1179,16 @@ async function executeAndFetchStreaming(
                 columns.push({ name: reader.getName(i), type: reader.getTypeName(i) });
             }
 
+            let userCancelled = false;
             while (await reader.read()) {
                 // Check for cancellation
                 if (documentUri) {
                     const state = executingCommands.get(normalizeUriKey(documentUri));
                     if (state && state.isCancelled) {
-                        throw new Error('Query cancelled by user');
+                        userCancelled = true;
+                        // User cancelled during fetch - consume remaining data and cancel properly
+                        await consumeRestAndCancel(reader, cmd, documentUri, sessionId, connectionManager);
+                        break;
                     }
                 }
 
@@ -1111,6 +1212,9 @@ async function executeAndFetchStreaming(
                     });
                     chunk = [];
                     isFirstChunk = false;
+
+                    // Yield to event loop periodically to allow Cancel messages to be processed
+                    await new Promise(resolve => setImmediate(resolve));
                 }
 
                 // Check limit
@@ -1121,12 +1225,18 @@ async function executeAndFetchStreaming(
                 }
             }
 
+            // If user cancelled, return early with an error
+            if (userCancelled) {
+                // Return clear error type
+                return { totalRows, limitReached, error: new Error('Query cancelled') };
+            }
+
             // Send final chunk (even if empty, to signal completion)
             // But skip it if we were cancelled in the meantime
             if (documentUri) {
                 const state = executingCommands.get(normalizeUriKey(documentUri));
                 if (state && state.isCancelled) {
-                    return { totalRows, limitReached, error: caughtError };
+                    return { totalRows, limitReached, error: caughtError || new Error('Query cancelled') };
                 }
             }
 
@@ -1166,7 +1276,10 @@ export async function runQueriesWithStreaming(
     extensionUri?: vscode.Uri
 ): Promise<void> {
     const connManager = connectionManager || new ConnectionManager(context);
-    const keepConnectionOpen = connManager.getKeepConnectionOpen();
+    // Use per-document keep connection setting if documentUri is provided
+    const keepConnectionOpen = documentUri 
+        ? connManager.getDocumentKeepConnectionOpen(documentUri)
+        : connManager.getKeepConnectionOpen();
 
     let outputChannel: vscode.OutputChannel | undefined;
     if (!logCallback) {
@@ -1197,11 +1310,12 @@ export async function runQueriesWithStreaming(
             throw new Error(`Connection '${resolvedConnectionName}' not found`);
         }
 
-        // Use shared getConnection helper to eliminate code duplication
-        const { connection, shouldCloseConnection } = await getConnection(
+        // Use shared getConnectionForDocument helper to eliminate code duplication
+        const { connection, shouldCloseConnection } = await getConnectionForDocument(
             connManager,
             resolvedConnectionName,
-            keepConnectionOpen
+            keepConnectionOpen,
+            documentUri
         );
 
         // Attach listener for notices

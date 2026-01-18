@@ -18,7 +18,7 @@ class CsvExportStrategy implements IExportStrategy {
     readonly format = 'csv' as const;
 
     async export(
-        context: vscode.ExtensionContext,
+        _context: vscode.ExtensionContext,
         connectionDetails: ConnectionDetails,
         query: string,
         outputPath: string,
@@ -27,7 +27,6 @@ class CsvExportStrategy implements IExportStrategy {
     ): Promise<{ success: boolean; message?: string; rowsExported?: number }> {
         try {
             await exportToCsv(
-                context,
                 connectionDetails,
                 query,
                 outputPath,

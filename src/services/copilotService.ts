@@ -1665,4 +1665,1713 @@ Please:
 
         return markdown;
     }
+
+    /**
+     * Registers the @sql-copilot chat participant with handlers for /schema, /optimize, /fix, /explain commands.
+     * This allows users to use #schema-like functionality through slash commands in the Copilot Chat.
+     * 
+     * Usage in chat:
+     * - @sql-copilot /schema - Shows DDL for tables in current SQL file
+     * - @sql-copilot /optimize <question> - Optimizes SQL with Netezza best practices
+     * - @sql-copilot /fix <question> - Fixes SQL syntax errors
+     * - @sql-copilot /explain - Explains what the SQL does
+     */
+    public registerChatParticipant(extensionContext: vscode.ExtensionContext): vscode.Disposable | undefined {
+        try {
+            // Create chat participant handler
+            const handler: vscode.ChatRequestHandler = async (
+                request: vscode.ChatRequest,
+                chatContext: vscode.ChatContext,
+                stream: vscode.ChatResponseStream,
+                token: vscode.CancellationToken
+            ) => {
+                try {
+                    // Handle different commands
+                    if (request.command === 'schema') {
+                        return await this.handleSchemaCommand(request, chatContext, stream, token);
+                    } else if (request.command === 'optimize') {
+                        return await this.handleOptimizeCommand(request, chatContext, stream, token);
+                    } else if (request.command === 'fix') {
+                        return await this.handleFixCommand(request, chatContext, stream, token);
+                    } else if (request.command === 'explain') {
+                        return await this.handleExplainCommand(request, chatContext, stream, token);
+                    } else {
+                        // Default: handle as general SQL question with context
+                        return await this.handleGeneralQuery(request, chatContext, stream, token);
+                    }
+                } catch (e) {
+                    const msg = e instanceof Error ? e.message : String(e);
+                    stream.markdown(`❌ Error: ${msg}`);
+                    return { metadata: { error: msg } };
+                }
+            };
+
+            // Create the chat participant
+            const participant = vscode.chat.createChatParticipant('netezza.sqlcopilot', handler);
+            participant.iconPath = vscode.Uri.joinPath(extensionContext.extensionUri, 'Icon.png');
+            
+            // Add follow-up suggestions
+            participant.followupProvider = {
+                provideFollowups: (result, _context, _token) => {
+                    const metadata = result.metadata as { command?: string };
+                    if (metadata?.command === 'schema') {
+                        return [
+                            { prompt: 'Optimize the query for these tables', label: 'Optimize query', command: 'optimize' },
+                            { prompt: 'Explain how these tables relate', label: 'Explain schema' }
+                        ];
+                    }
+                    return [];
+                }
+            };
+
+            console.log('[CopilotService] Chat participant @sql-copilot registered successfully');
+            return participant;
+        } catch (e) {
+            console.error('[CopilotService] Failed to register chat participant:', e);
+            return undefined;
+        }
+    }
+
+    /**
+     * Handles /schema command - extracts tables from current SQL and returns their DDL
+     */
+    private async handleSchemaCommand(
+        request: vscode.ChatRequest,
+        _chatContext: vscode.ChatContext,
+        stream: vscode.ChatResponseStream,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.ChatResult> {
+        stream.progress('Analyzing SQL for table references...');
+
+        // Get current editor content
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            stream.markdown('⚠️ No SQL file is currently open. Please open a SQL file first.');
+            return { metadata: { command: 'schema', success: false } };
+        }
+
+        const document = editor.document;
+        const selection = editor.selection;
+        const sql = selection.isEmpty ? document.getText() : document.getText(selection);
+
+        if (!sql.trim()) {
+            stream.markdown('⚠️ No SQL content found. Please enter some SQL or open a SQL file.');
+            return { metadata: { command: 'schema', success: false } };
+        }
+
+        // Extract table references
+        const tableRefs = this.extractTableReferences(sql);
+        
+        if (tableRefs.length === 0) {
+            stream.markdown('ℹ️ No table references found in the current SQL.\n\nMake sure your SQL contains `FROM`, `JOIN`, `INSERT INTO`, `UPDATE`, or `DELETE FROM` clauses.');
+            return { metadata: { command: 'schema', success: false } };
+        }
+
+        stream.progress(`Found ${tableRefs.length} table(s). Fetching DDL...`);
+
+        // Get connection name
+        const connectionName = this.connectionManager.getDocumentConnection(document.uri.toString())
+            || this.connectionManager.getActiveConnectionName()
+            || undefined;
+
+        // Gather DDL
+        const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
+
+        // Format response
+        stream.markdown(`## 📊 Schema Context for Current SQL\n\n`);
+        stream.markdown(`**Connection:** ${connectionName || 'Not connected'}\n\n`);
+        stream.markdown(`**Tables found:** ${tableRefs.map(t => `\`${t.database ? t.database + '.' : ''}${t.schema ? t.schema + '.' : ''}${t.name}\``).join(', ')}\n\n`);
+        
+        if (ddlContext.includes('CREATE TABLE') || ddlContext.includes('-- Table:')) {
+            stream.markdown(`### Table Definitions (DDL)\n\n\`\`\`sql\n${ddlContext}\n\`\`\`\n`);
+        } else {
+            stream.markdown(`### Schema Information\n\n${ddlContext}\n`);
+        }
+
+        // Add reference to the file
+        if (document.uri.scheme === 'file') {
+            stream.reference(document.uri);
+        }
+
+        // If user provided additional prompt, add that context
+        if (request.prompt.trim()) {
+            stream.markdown(`\n---\n\n**Your question:** ${request.prompt}\n\n`);
+            stream.markdown(`*Use the schema information above to answer your question about the SQL.*`);
+        }
+
+        return { metadata: { command: 'schema', success: true, tableCount: tableRefs.length } };
+    }
+
+    /**
+     * Handles /optimize command - optimizes SQL with Netezza best practices
+     */
+    private async handleOptimizeCommand(
+        request: vscode.ChatRequest,
+        _chatContext: vscode.ChatContext,
+        stream: vscode.ChatResponseStream,
+        token: vscode.CancellationToken
+    ): Promise<vscode.ChatResult> {
+        stream.progress('Gathering context and optimizing SQL...');
+
+        const context = await this.gatherContext();
+        const basePrompt = this.getPrompt('optimize');
+        let prompt = `${basePrompt}\n\n${this.NETEZZA_OPTIMIZATION_RULES}`;
+        
+        if (this.isProcedureCode(context.selectedSql)) {
+            prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
+        }
+
+        if (request.prompt.trim()) {
+            prompt += `\n\nAdditional user instructions: ${request.prompt}`;
+        }
+
+        // Build messages for the model
+        const systemPrompt = this.buildSystemPrompt(context);
+        const fullPrompt = `${systemPrompt}\n\n${prompt}`;
+
+        const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
+        
+        // Use the request's model to generate response
+        const response = await request.model.sendRequest(messages, {}, token);
+        
+        for await (const chunk of response.text) {
+            stream.markdown(chunk);
+        }
+
+        return { metadata: { command: 'optimize', success: true } };
+    }
+
+    /**
+     * Handles /fix command - fixes SQL syntax errors
+     */
+    private async handleFixCommand(
+        request: vscode.ChatRequest,
+        _chatContext: vscode.ChatContext,
+        stream: vscode.ChatResponseStream,
+        token: vscode.CancellationToken
+    ): Promise<vscode.ChatResult> {
+        stream.progress('Analyzing SQL for errors...');
+
+        const context = await this.gatherContext();
+        let prompt = this.getPrompt('fix');
+        
+        if (this.isProcedureCode(context.selectedSql)) {
+            prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
+        }
+
+        if (request.prompt.trim()) {
+            prompt += `\n\nAdditional context about the error: ${request.prompt}`;
+        }
+
+        const systemPrompt = this.buildSystemPrompt(context);
+        const fullPrompt = `${systemPrompt}\n\n${prompt}`;
+
+        const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
+        const response = await request.model.sendRequest(messages, {}, token);
+        
+        for await (const chunk of response.text) {
+            stream.markdown(chunk);
+        }
+
+        return { metadata: { command: 'fix', success: true } };
+    }
+
+    /**
+     * Handles /explain command - explains what the SQL does
+     */
+    private async handleExplainCommand(
+        request: vscode.ChatRequest,
+        _chatContext: vscode.ChatContext,
+        stream: vscode.ChatResponseStream,
+        token: vscode.CancellationToken
+    ): Promise<vscode.ChatResult> {
+        stream.progress('Analyzing SQL...');
+
+        const context = await this.gatherContext();
+        let prompt = this.getPrompt('explain');
+        
+        if (request.prompt.trim()) {
+            prompt += `\n\nFocus on: ${request.prompt}`;
+        }
+
+        const systemPrompt = this.buildSystemPrompt(context);
+        const fullPrompt = `${systemPrompt}\n\n${prompt}`;
+
+        const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
+        const response = await request.model.sendRequest(messages, {}, token);
+        
+        for await (const chunk of response.text) {
+            stream.markdown(chunk);
+        }
+
+        return { metadata: { command: 'explain', success: true } };
+    }
+
+    /**
+     * Handles general queries without specific command
+     */
+    private async handleGeneralQuery(
+        request: vscode.ChatRequest,
+        _chatContext: vscode.ChatContext,
+        stream: vscode.ChatResponseStream,
+        token: vscode.CancellationToken
+    ): Promise<vscode.ChatResult> {
+        stream.progress('Processing your SQL question...');
+
+        // Try to gather context if there's an open SQL file
+        let context: CopilotContext;
+        try {
+            context = await this.gatherContext();
+        } catch {
+            // No active editor or no SQL - use minimal context
+            const connectionName = this.connectionManager.getActiveConnectionName();
+            context = {
+                selectedSql: '',
+                ddlContext: 'No SQL file open',
+                variables: '',
+                recentQueries: '',
+                connectionInfo: connectionName ? `Connected to: ${connectionName}` : 'No connection'
+            };
+        }
+
+        const systemPrompt = this.buildSystemPrompt(context);
+        const fullPrompt = `${systemPrompt}\n\nUser question: ${request.prompt}`;
+
+        const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
+        const response = await request.model.sendRequest(messages, {}, token);
+        
+        for await (const chunk of response.text) {
+            stream.markdown(chunk);
+        }
+
+        return { metadata: { command: 'general', success: true } };
+    }
+
+    /**
+     * Gets schema context for provided SQL string.
+     * Used by SchemaTool when SQL is passed as parameter.
+     */
+    public async getSchemaForSql(sql: string): Promise<string> {
+        if (!sql.trim()) {
+            return 'No SQL content provided.';
+        }
+
+        const tableRefs = this.extractTableReferences(sql);
+        
+        if (tableRefs.length === 0) {
+            return 'No table references found in the provided SQL.';
+        }
+
+        const connectionName = this.connectionManager.getActiveConnectionName() || undefined;
+        const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
+
+        return `Tables: ${tableRefs.map(t => t.name).join(', ')}\n\n${ddlContext}`;
+    }
+
+    /**
+     * Gets schema context as a string for use in chat variables.
+     * This method can be called externally to get the schema context for the current SQL.
+     */
+    public async getSchemaContextForCurrentSql(): Promise<string> {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            return 'No SQL file is currently open.';
+        }
+
+        const document = editor.document;
+        const selection = editor.selection;
+        const sql = selection.isEmpty ? document.getText() : document.getText(selection);
+
+        if (!sql.trim()) {
+            return 'No SQL content found.';
+        }
+
+        const tableRefs = this.extractTableReferences(sql);
+        
+        if (tableRefs.length === 0) {
+            return 'No table references found in the current SQL.';
+        }
+
+        const connectionName = this.connectionManager.getDocumentConnection(document.uri.toString())
+            || this.connectionManager.getActiveConnectionName()
+            || undefined;
+
+        const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
+
+        return `Tables: ${tableRefs.map(t => t.name).join(', ')}\n\n${ddlContext}`;
+    }
+
+    /**
+     * Gets column metadata for specified tables.
+     * Used by ColumnsTool to fetch column definitions.
+     */
+    public async getColumnsForTables(tables: string[], database?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        // Convert table strings to TableReference objects
+        const tableRefs: TableReference[] = [];
+        
+        for (const tableSpec of tables) {
+            // Parse table specification: can be TABLE, SCHEMA.TABLE, or DB.SCHEMA.TABLE
+            const parts = tableSpec.split('.');
+            let db: string | undefined;
+            let schema: string | undefined;
+            let tableName: string;
+
+            if (parts.length === 3) {
+                [db, schema, tableName] = parts;
+            } else if (parts.length === 2) {
+                [schema, tableName] = parts;
+                db = database;
+            } else {
+                tableName = parts[0];
+                db = database;
+            }
+
+            tableRefs.push({
+                database: db,
+                schema: schema || undefined,
+                name: tableName
+            });
+        }
+
+        if (tableRefs.length === 0) {
+            return 'No valid table references provided.';
+        }
+
+        // Use existing gatherTablesDDL method which handles connection and caching
+        const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
+        
+        return ddlContext;
+    }
+
+    /**
+     * Gets list of tables from a database.
+     * Used by TablesTool to list available tables.
+     */
+    public async getTablesFromDatabase(database: string, schema?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            // Build query to get tables from the database
+            let query: string;
+            if (schema) {
+                query = `
+                    SELECT 
+                        SCHEMA AS schema_name,
+                        TABLENAME AS table_name,
+                        CASE RELKIND 
+                            WHEN 'r' THEN 'TABLE'
+                            WHEN 'v' THEN 'VIEW'
+                            WHEN 'm' THEN 'MATERIALIZED VIEW'
+                            WHEN 'e' THEN 'EXTERNAL TABLE'
+                            ELSE RELKIND
+                        END AS object_type,
+                        OWNER AS owner
+                    FROM ${database}._V_TABLE
+                    WHERE SCHEMA = '${schema.toUpperCase()}'
+                    ORDER BY SCHEMA, TABLENAME
+                `;
+            } else {
+                query = `
+                    SELECT 
+                        SCHEMA AS schema_name,
+                        TABLENAME AS table_name,
+                        CASE RELKIND 
+                            WHEN 'r' THEN 'TABLE'
+                            WHEN 'v' THEN 'VIEW'
+                            WHEN 'm' THEN 'MATERIALIZED VIEW'
+                            WHEN 'e' THEN 'EXTERNAL TABLE'
+                            ELSE RELKIND
+                        END AS object_type,
+                        OWNER AS owner
+                    FROM ${database}._V_TABLE
+                    ORDER BY SCHEMA, TABLENAME
+                `;
+            }
+
+            // Get connection details
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            // Execute query using connection
+            const connection = await createConnectionFromDetails(connectionDetails);
+
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                const result = await executeQueryHelper(connection, query);
+                
+                if (!result || result.length === 0) {
+                    const schemaInfo = schema ? ` in schema ${schema}` : '';
+                    return `No tables found in database ${database}${schemaInfo}.`;
+                }
+
+                // Format results as markdown table
+                const lines: string[] = [
+                    `## Tables in ${database}${schema ? '.' + schema : ''}\n`,
+                    '| Schema | Table Name | Type | Owner |',
+                    '|--------|------------|------|-------|'
+                ];
+
+                for (const row of result) {
+                    const schemaName = (row as Record<string, unknown>).SCHEMA_NAME || (row as Record<string, unknown>).schema_name || '';
+                    const tableName = (row as Record<string, unknown>).TABLE_NAME || (row as Record<string, unknown>).table_name || '';
+                    const objType = (row as Record<string, unknown>).OBJECT_TYPE || (row as Record<string, unknown>).object_type || '';
+                    const owner = (row as Record<string, unknown>).OWNER || (row as Record<string, unknown>).owner || '';
+                    lines.push(`| ${schemaName} | ${tableName} | ${objType} | ${owner} |`);
+                }
+
+                lines.push(`\n**Total:** ${result.length} object(s)`);
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to retrieve tables: ${msg}`;
+        }
+    }
+
+    // ========== NEW LANGUAGE MODEL TOOLS - HELPER METHODS ==========
+
+    /**
+     * Executes a SELECT query and returns formatted results.
+     * Used by ExecuteQueryTool. Only allows SELECT queries for safety.
+     * @param sql The SQL query to execute (must be SELECT)
+     * @param maxRows Maximum number of rows to return (default 100)
+     */
+    public async executeSelectQuery(sql: string, maxRows: number = 100): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        // Security: Only allow SELECT statements
+        const normalizedSql = sql.trim().toUpperCase();
+        if (!normalizedSql.startsWith('SELECT') && !normalizedSql.startsWith('WITH')) {
+            return 'Error: Only SELECT queries are allowed for safety. Use the extension commands for DDL/DML operations.';
+        }
+
+        // Check for dangerous keywords
+        const dangerousKeywords = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'TRUNCATE', 'ALTER', 'CREATE', 'GRANT', 'REVOKE'];
+        for (const keyword of dangerousKeywords) {
+            // Check if keyword appears as a statement (not in a subquery or CTE)
+            const regex = new RegExp(`^\\s*(${keyword})\\s+`, 'im');
+            if (regex.test(sql)) {
+                return `Error: ${keyword} statements are not allowed. Only SELECT queries are permitted.`;
+            }
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                // Add LIMIT clause if not present to prevent huge result sets
+                let safeSql = sql.trim();
+                if (!safeSql.toUpperCase().includes(' LIMIT ')) {
+                    safeSql = `${safeSql.replace(/;?\s*$/, '')} LIMIT ${maxRows}`;
+                }
+
+                const result = await executeQueryHelper(connection, safeSql);
+
+                if (!result || result.length === 0) {
+                    return 'Query executed successfully. No rows returned.';
+                }
+
+                // Format as markdown table
+                const columns = Object.keys(result[0]);
+                const lines: string[] = [
+                    `## Query Results (${result.length} row${result.length > 1 ? 's' : ''})\n`,
+                    '| ' + columns.join(' | ') + ' |',
+                    '|' + columns.map(() => '---').join('|') + '|'
+                ];
+
+                for (const row of result.slice(0, maxRows)) {
+                    const values = columns.map(col => {
+                        const val = (row as Record<string, unknown>)[col];
+                        if (val === null) return 'NULL';
+                        if (val === undefined) return '';
+                        return String(val).replace(/\|/g, '\\|').substring(0, 100); // Truncate long values
+                    });
+                    lines.push('| ' + values.join(' | ') + ' |');
+                }
+
+                if (result.length > maxRows) {
+                    lines.push(`\n*... and ${result.length - maxRows} more rows (limited to ${maxRows})*`);
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Query execution failed: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets sample data from a table.
+     * Used by SampleDataTool.
+     * @param tableName The table name (can be SCHEMA.TABLE or DB.SCHEMA.TABLE)
+     * @param database Optional database name
+     * @param sampleSize Number of rows to return (default 10)
+     */
+    public async getSampleData(tableName: string, database?: string, sampleSize: number = 10): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            // Parse table name
+            const parts = tableName.split('.');
+            let db: string | undefined;
+            let schema: string | undefined;
+            let table: string;
+
+            if (parts.length === 3) {
+                [db, schema, table] = parts;
+            } else if (parts.length === 2) {
+                [schema, table] = parts;
+                db = database;
+            } else {
+                table = parts[0];
+                db = database;
+            }
+
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            if (!db) {
+                db = await this.connectionManager.getCurrentDatabase(connectionName) || undefined;
+            }
+            if (!db) {
+                return 'Could not determine database. Please specify database name.';
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                // Find schema if not specified
+                if (!schema) {
+                    schema = await this.findTableSchema(connection, db, table);
+                }
+                if (!schema) {
+                    return `Table "${table}" not found in database "${db}".`;
+                }
+
+                const fullTableName = `${db}.${schema}.${table}`;
+                const sql = `SELECT * FROM ${fullTableName} LIMIT ${sampleSize}`;
+                const result = await executeQueryHelper(connection, sql);
+
+                if (!result || result.length === 0) {
+                    return `Table ${fullTableName} is empty or has no accessible rows.`;
+                }
+
+                // Format as markdown table
+                const columns = Object.keys(result[0]);
+                const lines: string[] = [
+                    `## Sample Data from ${fullTableName}\n`,
+                    `*Showing ${result.length} of ${sampleSize} requested rows*\n`,
+                    '| ' + columns.join(' | ') + ' |',
+                    '|' + columns.map(() => '---').join('|') + '|'
+                ];
+
+                for (const row of result) {
+                    const values = columns.map(col => {
+                        const val = (row as Record<string, unknown>)[col];
+                        if (val === null) return 'NULL';
+                        if (val === undefined) return '';
+                        return String(val).replace(/\|/g, '\\|').substring(0, 50);
+                    });
+                    lines.push('| ' + values.join(' | ') + ' |');
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to get sample data: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets EXPLAIN plan for a SQL query.
+     * Used by ExplainPlanTool.
+     * @param sql The SQL query to explain
+     * @param verbose Whether to use EXPLAIN VERBOSE
+     */
+    public async getExplainPlan(sql: string, verbose: boolean = false): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                const explainCmd = verbose ? 'EXPLAIN VERBOSE' : 'EXPLAIN';
+                const explainSql = `${explainCmd} ${sql}`;
+                const result = await executeQueryHelper(connection, explainSql);
+
+                if (!result || result.length === 0) {
+                    return 'No explain plan returned.';
+                }
+
+                // Format explain plan output
+                const lines: string[] = [
+                    `## Execution Plan${verbose ? ' (Verbose)' : ''}\n`,
+                    '```'
+                ];
+
+                for (const row of result) {
+                    // Netezza EXPLAIN returns rows with PLANTEXT or similar column
+                    const values = Object.values(row as Record<string, unknown>);
+                    lines.push(String(values[0] || ''));
+                }
+
+                lines.push('```\n');
+                lines.push('### Plan Analysis Tips:');
+                lines.push('- Look for **Redistribute** or **Broadcast** operations (expensive)');
+                lines.push('- Check if **Zone Maps** are being used for filtering');
+                lines.push('- Watch for **Spool** operations that may indicate temp table usage');
+                lines.push('- **SPU** operations show parallel processing distribution');
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to get explain plan: ${msg}`;
+        }
+    }
+
+    /**
+     * Searches schema for tables/columns matching a pattern.
+     * Used by SearchSchemaTool.
+     * @param pattern Search pattern (supports % wildcards)
+     * @param searchType What to search: 'tables', 'columns', or 'all'
+     * @param database Database to search in
+     */
+    public async searchSchema(pattern: string, searchType: 'tables' | 'columns' | 'all' = 'all', database?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            let db = database;
+            if (!db) {
+                db = await this.connectionManager.getCurrentDatabase(connectionName) || undefined;
+            }
+            if (!db) {
+                return 'Could not determine database. Please specify database name.';
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            const lines: string[] = [`## Schema Search Results for "${pattern}" in ${db}\n`];
+            const searchPattern = pattern.toUpperCase().replace(/\*/g, '%');
+
+            try {
+                // Search tables
+                if (searchType === 'tables' || searchType === 'all') {
+                    const tableQuery = `
+                        SELECT SCHEMA, TABLENAME, 
+                            CASE RELKIND WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE RELKIND END AS TYPE
+                        FROM ${db}._V_TABLE
+                        WHERE UPPER(TABLENAME) LIKE '${searchPattern}'
+                        ORDER BY SCHEMA, TABLENAME
+                        LIMIT 50
+                    `;
+                    const tableResults = await executeQueryHelper(connection, tableQuery);
+
+                    if (tableResults && tableResults.length > 0) {
+                        lines.push('### Tables/Views Found\n');
+                        lines.push('| Schema | Name | Type |');
+                        lines.push('|--------|------|------|');
+                        for (const row of tableResults) {
+                            const r = row as Record<string, unknown>;
+                            lines.push(`| ${r.SCHEMA} | ${r.TABLENAME} | ${r.TYPE} |`);
+                        }
+                        lines.push(`\n*Found ${tableResults.length} table(s)/view(s)*\n`);
+                    } else if (searchType === 'tables') {
+                        lines.push('No tables or views found matching the pattern.\n');
+                    }
+                }
+
+                // Search columns
+                if (searchType === 'columns' || searchType === 'all') {
+                    const columnQuery = `
+                        SELECT t.SCHEMA, t.TABLENAME, c.NAME AS COLUMN_NAME, c.TYPE AS DATA_TYPE
+                        FROM ${db}._V_TABLE t
+                        JOIN ${db}._V_RELATION_COLUMN c ON t.OBJID = c.OBJID
+                        WHERE UPPER(c.NAME) LIKE '${searchPattern}'
+                        ORDER BY t.SCHEMA, t.TABLENAME, c.NAME
+                        LIMIT 100
+                    `;
+                    const columnResults = await executeQueryHelper(connection, columnQuery);
+
+                    if (columnResults && columnResults.length > 0) {
+                        lines.push('### Columns Found\n');
+                        lines.push('| Schema | Table | Column | Data Type |');
+                        lines.push('|--------|-------|--------|-----------|');
+                        for (const row of columnResults) {
+                            const r = row as Record<string, unknown>;
+                            lines.push(`| ${r.SCHEMA} | ${r.TABLENAME} | ${r.COLUMN_NAME} | ${r.DATA_TYPE} |`);
+                        }
+                        lines.push(`\n*Found ${columnResults.length} column(s)*\n`);
+                    } else if (searchType === 'columns') {
+                        lines.push('No columns found matching the pattern.\n');
+                    }
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Schema search failed: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets table statistics including row count, size, and data skew.
+     * Used by TableStatsTool.
+     * @param tableName The table name
+     * @param database Optional database name
+     */
+    public async getTableStats(tableName: string, database?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            // Parse table name
+            const parts = tableName.split('.');
+            let db: string | undefined;
+            let schema: string | undefined;
+            let table: string;
+
+            if (parts.length === 3) {
+                [db, schema, table] = parts;
+            } else if (parts.length === 2) {
+                [schema, table] = parts;
+                db = database;
+            } else {
+                table = parts[0];
+                db = database;
+            }
+
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            if (!db) {
+                db = await this.connectionManager.getCurrentDatabase(connectionName) || undefined;
+            }
+            if (!db) {
+                return 'Could not determine database. Please specify database name.';
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                // Find schema if not specified
+                if (!schema) {
+                    schema = await this.findTableSchema(connection, db, table);
+                }
+                if (!schema) {
+                    return `Table "${table}" not found in database "${db}".`;
+                }
+
+                const fullTableName = `${db}.${schema}.${table}`;
+                const lines: string[] = [`## Table Statistics: ${fullTableName}\n`];
+
+                // Get row count
+                try {
+                    const countQuery = `SELECT COUNT(*) AS ROW_COUNT FROM ${fullTableName}`;
+                    const countResult = await executeQueryHelper(connection, countQuery);
+                    if (countResult && countResult.length > 0) {
+                        const count = (countResult[0] as Record<string, unknown>).ROW_COUNT;
+                        lines.push(`**Row Count:** ${Number(count).toLocaleString()}`);
+                    }
+                } catch {
+                    lines.push('**Row Count:** Unable to retrieve');
+                }
+
+                // Get table info from system catalog
+                const infoQuery = `
+                    SELECT 
+                        t.RELTUPLES AS EST_ROWS,
+                        t.RELPAGES AS PAGES,
+                        t.RELNATTS AS COLUMNS,
+                        d.ATTNAME AS DIST_KEY,
+                        t.OWNER
+                    FROM ${db}._V_TABLE t
+                    LEFT JOIN ${db}._V_TABLE_DIST_MAP d ON t.OBJID = d.OBJID
+                    WHERE t.SCHEMA = '${schema}' AND t.TABLENAME = '${table}'
+                `;
+                const infoResult = await executeQueryHelper(connection, infoQuery);
+                if (infoResult && infoResult.length > 0) {
+                    const info = infoResult[0] as Record<string, unknown>;
+                    lines.push(`**Estimated Rows (catalog):** ${Number(info.EST_ROWS || 0).toLocaleString()}`);
+                    lines.push(`**Pages:** ${info.PAGES || 'N/A'}`);
+                    lines.push(`**Columns:** ${info.COLUMNS || 'N/A'}`);
+                    lines.push(`**Distribution Key:** ${info.DIST_KEY || 'RANDOM'}`);
+                    lines.push(`**Owner:** ${info.OWNER || 'N/A'}`);
+                }
+
+                // Check data skew (distribution across SPUs)
+                lines.push('\n### Data Distribution (Skew Check)\n');
+                try {
+                    const skewQuery = `
+                        SELECT DATASLICEID, COUNT(*) AS ROW_COUNT
+                        FROM ${fullTableName}
+                        GROUP BY DATASLICEID
+                        ORDER BY DATASLICEID
+                    `;
+                    const skewResult = await executeQueryHelper(connection, skewQuery);
+                    if (skewResult && skewResult.length > 0) {
+                        const counts = skewResult.map(r => Number((r as Record<string, unknown>).ROW_COUNT));
+                        const min = Math.min(...counts);
+                        const max = Math.max(...counts);
+                        const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
+                        const skewRatio = max > 0 ? ((max - min) / max * 100).toFixed(1) : '0';
+
+                        lines.push(`**SPU Count:** ${skewResult.length}`);
+                        lines.push(`**Min Rows/SPU:** ${min.toLocaleString()}`);
+                        lines.push(`**Max Rows/SPU:** ${max.toLocaleString()}`);
+                        lines.push(`**Avg Rows/SPU:** ${Math.round(avg).toLocaleString()}`);
+                        lines.push(`**Skew Ratio:** ${skewRatio}%`);
+
+                        if (Number(skewRatio) > 20) {
+                            lines.push('\n⚠️ **Warning:** High data skew detected. Consider reviewing distribution key.');
+                        } else {
+                            lines.push('\n✅ Data distribution looks balanced.');
+                        }
+                    }
+                } catch {
+                    lines.push('Unable to retrieve skew information (DATASLICEID may not be available).');
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to get table statistics: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets object dependencies (what uses this table, what this view depends on).
+     * Used by DependenciesTool.
+     * @param objectName The object name (table, view, procedure)
+     * @param database Optional database name
+     */
+    public async getObjectDependencies(objectName: string, database?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            let db = database;
+            if (!db) {
+                db = await this.connectionManager.getCurrentDatabase(connectionName) || undefined;
+            }
+            if (!db) {
+                return 'Could not determine database. Please specify database name.';
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            // Parse object name
+            const parts = objectName.split('.');
+            let objName = parts[parts.length - 1].toUpperCase();
+
+            const lines: string[] = [`## Dependencies for ${objectName}\n`];
+
+            try {
+                // Find views that depend on this object
+                const dependentViewsQuery = `
+                    SELECT v.SCHEMA, v.VIEWNAME, v.OWNER
+                    FROM ${db}._V_VIEW v
+                    WHERE UPPER(v.DEFINITION) LIKE '%${objName}%'
+                    AND v.VIEWNAME != '${objName}'
+                    ORDER BY v.SCHEMA, v.VIEWNAME
+                    LIMIT 50
+                `;
+                const dependentViews = await executeQueryHelper(connection, dependentViewsQuery);
+
+                if (dependentViews && dependentViews.length > 0) {
+                    lines.push('### Views that reference this object\n');
+                    lines.push('| Schema | View Name | Owner |');
+                    lines.push('|--------|-----------|-------|');
+                    for (const row of dependentViews) {
+                        const r = row as Record<string, unknown>;
+                        lines.push(`| ${r.SCHEMA} | ${r.VIEWNAME} | ${r.OWNER} |`);
+                    }
+                    lines.push('');
+                } else {
+                    lines.push('### Views that reference this object\n');
+                    lines.push('No views found that reference this object.\n');
+                }
+
+                // If it's a view, show what it depends on
+                const viewDefQuery = `
+                    SELECT DEFINITION
+                    FROM ${db}._V_VIEW
+                    WHERE UPPER(VIEWNAME) = '${objName}'
+                    LIMIT 1
+                `;
+                const viewDef = await executeQueryHelper(connection, viewDefQuery);
+
+                if (viewDef && viewDef.length > 0) {
+                    lines.push('### View Definition (for dependency analysis)\n');
+                    lines.push('```sql');
+                    lines.push(String((viewDef[0] as Record<string, unknown>).DEFINITION || ''));
+                    lines.push('```\n');
+                }
+
+                // Find procedures that reference this object
+                const procQuery = `
+                    SELECT SCHEMA, PROCEDURE AS PROC_NAME, OWNER
+                    FROM ${db}._V_PROCEDURE
+                    WHERE UPPER(PROCEDURESOURCE) LIKE '%${objName}%'
+                    ORDER BY SCHEMA, PROCEDURE
+                    LIMIT 25
+                `;
+                const procs = await executeQueryHelper(connection, procQuery);
+
+                if (procs && procs.length > 0) {
+                    lines.push('### Procedures that reference this object\n');
+                    lines.push('| Schema | Procedure | Owner |');
+                    lines.push('|--------|-----------|-------|');
+                    for (const row of procs) {
+                        const r = row as Record<string, unknown>;
+                        lines.push(`| ${r.SCHEMA} | ${r.PROC_NAME} | ${r.OWNER} |`);
+                    }
+                    lines.push('');
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to get dependencies: ${msg}`;
+        }
+    }
+
+    /**
+     * Validates SQL syntax without executing.
+     * Used by ValidateSqlTool.
+     * @param sql The SQL to validate
+     */
+    public async validateSql(sql: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                // Use EXPLAIN to validate syntax without executing
+                // EXPLAIN will parse and plan the query, catching syntax errors
+                const explainSql = `EXPLAIN ${sql}`;
+                await executeQueryHelper(connection, explainSql);
+
+                // If no error, SQL is valid
+                return `✅ **SQL is valid**\n\nThe SQL syntax is correct and all referenced objects exist.`;
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                
+                // Parse error message for helpful feedback
+                const lines: string[] = [
+                    '❌ **SQL Validation Failed**\n',
+                    '### Error Details\n',
+                    '```',
+                    msg,
+                    '```\n'
+                ];
+
+                // Try to extract helpful information from error
+                if (msg.includes('does not exist')) {
+                    lines.push('💡 **Suggestion:** Check if the table/column name is spelled correctly and exists in the database.');
+                } else if (msg.includes('syntax error')) {
+                    lines.push('💡 **Suggestion:** Review SQL syntax near the indicated position.');
+                } else if (msg.includes('permission denied')) {
+                    lines.push('💡 **Suggestion:** You may not have permission to access this object.');
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Validation failed: ${msg}`;
+        }
+    }
+}
+
+/**
+ * Interface for Schema Tool input parameters
+ */
+export interface ISchemaToolParameters {
+    sql?: string;
+}
+
+/**
+ * Language Model Tool for getting SQL schema (DDL) from referenced tables.
+ * This tool can be automatically invoked by Copilot when it needs database schema information.
+ * 
+ * Usage:
+ * - Copilot can call this tool automatically in agent mode
+ * - Users can reference it with #schema in chat
+ * 
+ * The tool extracts table references from SQL and fetches their DDL from the connected database.
+ */
+export class SchemaTool implements vscode.LanguageModelTool<ISchemaToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    /**
+     * Prepares the tool invocation with confirmation message
+     */
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<ISchemaToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        // Determine what SQL we'll analyze
+        const sqlSource = options.input.sql 
+            ? 'provided SQL' 
+            : 'current editor';
+
+        return {
+            invocationMessage: `Fetching table schema from ${sqlSource}...`,
+            confirmationMessages: {
+                title: 'Get SQL Schema',
+                message: new vscode.MarkdownString(
+                    `Analyze SQL and fetch table schemas (DDL) from the connected Netezza database?\n\n` +
+                    `**Source:** ${sqlSource}`
+                )
+            }
+        };
+    }
+
+    /**
+     * Invokes the tool to get schema information
+     */
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<ISchemaToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            let schemaInfo: string;
+
+            if (options.input.sql) {
+                // Use provided SQL
+                schemaInfo = await this.copilotService.getSchemaForSql(options.input.sql);
+            } else {
+                // Use current editor
+                schemaInfo = await this.copilotService.getSchemaContextForCurrentSql();
+            }
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(schemaInfo)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get SQL schema: ${errorMsg}. Make sure you have an active database connection.`);
+        }
+    }
+}
+
+/**
+ * Interface for GetColumns Tool input parameters
+ */
+export interface IColumnsToolParameters {
+    tables: string[];
+    database?: string;
+}
+
+/**
+ * Language Model Tool for getting column metadata for specified tables.
+ * Users can reference it with #getColumns in chat.
+ */
+export class ColumnsTool implements vscode.LanguageModelTool<IColumnsToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IColumnsToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const tableCount = options.input.tables?.length || 0;
+        const dbInfo = options.input.database ? ` from database ${options.input.database}` : '';
+
+        return {
+            invocationMessage: `Fetching column metadata for ${tableCount} table(s)${dbInfo}...`,
+            confirmationMessages: {
+                title: 'Get Table Columns',
+                message: new vscode.MarkdownString(
+                    `Fetch column definitions for the following tables${dbInfo}?\n\n` +
+                    `**Tables:** ${options.input.tables?.join(', ') || 'none'}`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IColumnsToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { tables, database } = options.input;
+            
+            if (!tables || tables.length === 0) {
+                throw new Error('No tables specified. Please provide at least one table name.');
+            }
+
+            const columnsInfo = await this.copilotService.getColumnsForTables(tables, database);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(columnsInfo)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get columns: ${errorMsg}. Make sure you have an active database connection.`);
+        }
+    }
+}
+
+/**
+ * Interface for GetTables Tool input parameters
+ */
+export interface ITablesToolParameters {
+    database: string;
+    schema?: string;
+}
+
+/**
+ * Language Model Tool for getting list of tables from a database.
+ * Users can reference it with #getTables in chat.
+ */
+export class TablesTool implements vscode.LanguageModelTool<ITablesToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<ITablesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const schemaInfo = options.input.schema ? ` (schema: ${options.input.schema})` : '';
+
+        return {
+            invocationMessage: `Fetching tables from database ${options.input.database}${schemaInfo}...`,
+            confirmationMessages: {
+                title: 'Get Tables List',
+                message: new vscode.MarkdownString(
+                    `Fetch list of tables from database **${options.input.database}**${schemaInfo}?`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<ITablesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { database, schema } = options.input;
+            
+            if (!database) {
+                throw new Error('Database name is required.');
+            }
+
+            const tablesInfo = await this.copilotService.getTablesFromDatabase(database, schema);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(tablesInfo)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get tables: ${errorMsg}. Make sure you have an active database connection.`);
+        }
+    }
+}
+
+// ========== NEW LANGUAGE MODEL TOOLS ==========
+
+/**
+ * Interface for ExecuteQuery Tool input parameters
+ */
+export interface IExecuteQueryToolParameters {
+    sql: string;
+    maxRows?: number;
+}
+
+/**
+ * Language Model Tool for executing SELECT queries.
+ * Only allows read-only SELECT queries for safety.
+ * Users can reference it with #executeQuery in chat.
+ */
+export class ExecuteQueryTool implements vscode.LanguageModelTool<IExecuteQueryToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IExecuteQueryToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const maxRows = options.input.maxRows || 100;
+        const sqlPreview = options.input.sql?.substring(0, 100) + (options.input.sql?.length > 100 ? '...' : '');
+
+        return {
+            invocationMessage: `Executing SELECT query (max ${maxRows} rows)...`,
+            confirmationMessages: {
+                title: 'Execute SQL Query',
+                message: new vscode.MarkdownString(
+                    `Execute the following SQL query (read-only)?\n\n\`\`\`sql\n${sqlPreview}\n\`\`\`\n\n**Max Rows:** ${maxRows}`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IExecuteQueryToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { sql, maxRows } = options.input;
+            
+            if (!sql) {
+                throw new Error('SQL query is required.');
+            }
+
+            const result = await this.copilotService.executeSelectQuery(sql, maxRows || 100);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Query execution failed: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for SampleData Tool input parameters
+ */
+export interface ISampleDataToolParameters {
+    table: string;
+    database?: string;
+    sampleSize?: number;
+}
+
+/**
+ * Language Model Tool for getting sample data from a table.
+ * Users can reference it with #sampleData in chat.
+ */
+export class SampleDataTool implements vscode.LanguageModelTool<ISampleDataToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<ISampleDataToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const size = options.input.sampleSize || 10;
+        const dbInfo = options.input.database ? ` from ${options.input.database}` : '';
+
+        return {
+            invocationMessage: `Fetching ${size} sample rows from ${options.input.table}${dbInfo}...`,
+            confirmationMessages: {
+                title: 'Get Sample Data',
+                message: new vscode.MarkdownString(
+                    `Fetch ${size} sample rows from table **${options.input.table}**${dbInfo}?`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<ISampleDataToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { table, database, sampleSize } = options.input;
+            
+            if (!table) {
+                throw new Error('Table name is required.');
+            }
+
+            const result = await this.copilotService.getSampleData(table, database, sampleSize || 10);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get sample data: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for ExplainPlan Tool input parameters
+ */
+export interface IExplainPlanToolParameters {
+    sql: string;
+    verbose?: boolean;
+}
+
+/**
+ * Language Model Tool for getting query execution plan.
+ * Users can reference it with #explainPlan in chat.
+ */
+export class ExplainPlanTool implements vscode.LanguageModelTool<IExplainPlanToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IExplainPlanToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const mode = options.input.verbose ? 'verbose' : 'standard';
+        const sqlPreview = options.input.sql?.substring(0, 80) + (options.input.sql?.length > 80 ? '...' : '');
+
+        return {
+            invocationMessage: `Getting ${mode} execution plan...`,
+            confirmationMessages: {
+                title: 'Get Execution Plan',
+                message: new vscode.MarkdownString(
+                    `Get ${mode} execution plan for:\n\n\`\`\`sql\n${sqlPreview}\n\`\`\``
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IExplainPlanToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { sql, verbose } = options.input;
+            
+            if (!sql) {
+                throw new Error('SQL query is required.');
+            }
+
+            const result = await this.copilotService.getExplainPlan(sql, verbose || false);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get execution plan: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for SearchSchema Tool input parameters
+ */
+export interface ISearchSchemaToolParameters {
+    pattern: string;
+    searchType?: 'tables' | 'columns' | 'all';
+    database?: string;
+}
+
+/**
+ * Language Model Tool for searching schema objects.
+ * Users can reference it with #searchSchema in chat.
+ */
+export class SearchSchemaTool implements vscode.LanguageModelTool<ISearchSchemaToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<ISearchSchemaToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const searchType = options.input.searchType || 'all';
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : '';
+
+        return {
+            invocationMessage: `Searching ${searchType} for "${options.input.pattern}"${dbInfo}...`,
+            confirmationMessages: {
+                title: 'Search Schema',
+                message: new vscode.MarkdownString(
+                    `Search for ${searchType} matching pattern **"${options.input.pattern}"**${dbInfo}?`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<ISearchSchemaToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { pattern, searchType, database } = options.input;
+            
+            if (!pattern) {
+                throw new Error('Search pattern is required.');
+            }
+
+            const result = await this.copilotService.searchSchema(pattern, searchType || 'all', database);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Schema search failed: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for TableStats Tool input parameters
+ */
+export interface ITableStatsToolParameters {
+    table: string;
+    database?: string;
+}
+
+/**
+ * Language Model Tool for getting table statistics.
+ * Users can reference it with #tableStats in chat.
+ */
+export class TableStatsTool implements vscode.LanguageModelTool<ITableStatsToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<ITableStatsToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : '';
+
+        return {
+            invocationMessage: `Getting statistics for ${options.input.table}${dbInfo}...`,
+            confirmationMessages: {
+                title: 'Get Table Statistics',
+                message: new vscode.MarkdownString(
+                    `Fetch statistics (row count, skew, distribution) for **${options.input.table}**${dbInfo}?`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<ITableStatsToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { table, database } = options.input;
+            
+            if (!table) {
+                throw new Error('Table name is required.');
+            }
+
+            const result = await this.copilotService.getTableStats(table, database);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get table statistics: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for Dependencies Tool input parameters
+ */
+export interface IDependenciesToolParameters {
+    object: string;
+    database?: string;
+}
+
+/**
+ * Language Model Tool for getting object dependencies.
+ * Users can reference it with #dependencies in chat.
+ */
+export class DependenciesTool implements vscode.LanguageModelTool<IDependenciesToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IDependenciesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : '';
+
+        return {
+            invocationMessage: `Finding dependencies for ${options.input.object}${dbInfo}...`,
+            confirmationMessages: {
+                title: 'Get Object Dependencies',
+                message: new vscode.MarkdownString(
+                    `Find all objects that depend on **${options.input.object}**${dbInfo}?`
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IDependenciesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { object, database } = options.input;
+            
+            if (!object) {
+                throw new Error('Object name is required.');
+            }
+
+            const result = await this.copilotService.getObjectDependencies(object, database);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get dependencies: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for ValidateSql Tool input parameters
+ */
+export interface IValidateSqlToolParameters {
+    sql: string;
+}
+
+/**
+ * Language Model Tool for validating SQL syntax.
+ * Users can reference it with #validateSql in chat.
+ */
+export class ValidateSqlTool implements vscode.LanguageModelTool<IValidateSqlToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IValidateSqlToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const sqlPreview = options.input.sql?.substring(0, 80) + (options.input.sql?.length > 80 ? '...' : '');
+
+        return {
+            invocationMessage: 'Validating SQL syntax...',
+            confirmationMessages: {
+                title: 'Validate SQL',
+                message: new vscode.MarkdownString(
+                    `Validate syntax of:\n\n\`\`\`sql\n${sqlPreview}\n\`\`\``
+                )
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IValidateSqlToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { sql } = options.input;
+            
+            if (!sql) {
+                throw new Error('SQL is required.');
+            }
+
+            const result = await this.copilotService.validateSql(sql);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`SQL validation failed: ${errorMsg}`);
+        }
+    }
 }

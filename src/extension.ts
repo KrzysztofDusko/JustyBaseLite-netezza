@@ -23,7 +23,19 @@ import { activateSqlLinter } from './providers/sqlLinterProvider';
 import { NetezzaLinterCodeActionProvider } from './providers/linterCodeActions';
 import { EtlDesignerView } from './views/etlDesignerView';
 import { EtlProjectManager } from './etl/etlProjectManager';
-import { CopilotService } from './services/copilotService';
+import { 
+    CopilotService, 
+    SchemaTool, 
+    ColumnsTool, 
+    TablesTool,
+    ExecuteQueryTool,
+    SampleDataTool,
+    ExplainPlanTool,
+    SearchSchemaTool,
+    TableStatsTool,
+    DependenciesTool,
+    ValidateSqlTool
+} from './services/copilotService';
 
 // Import modular command registrations
 import { registerSchemaCommands } from './commands/schemaCommands';
@@ -144,10 +156,17 @@ export async function activate(context: vscode.ExtensionContext) {
     const { updateFn: updateActiveConnectionStatusBar } =
         createActiveConnectionStatusBar(context, connectionManager);
 
+    // Function to update keep connection status bar
+    const updateKeepConnectionStatusBarFn = () => {
+        updateKeepConnectionStatusBar(keepConnectionStatusBar, connectionManager);
+    };
+
     // Initial update and listen for changes
     updateActiveConnectionStatusBar();
+    updateKeepConnectionStatusBarFn();
     connectionManager.onDidChangeActiveConnection(connectionName => {
         updateActiveConnectionStatusBar();
+        updateKeepConnectionStatusBarFn();
         if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
             metadataCache.triggerConnectionPrefetch(connectionName, q =>
                 runQueryRaw(context, q, true, connectionManager, connectionName!)
@@ -157,6 +176,7 @@ export async function activate(context: vscode.ExtensionContext) {
     connectionManager.onDidChangeConnections(updateActiveConnectionStatusBar);
     connectionManager.onDidChangeDocumentConnection((documentUri: string) => {
         updateActiveConnectionStatusBar();
+        updateKeepConnectionStatusBarFn();
         const connectionName = connectionManager.getDocumentConnection(documentUri);
         if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
             metadataCache.triggerConnectionPrefetch(connectionName, q =>
@@ -164,7 +184,10 @@ export async function activate(context: vscode.ExtensionContext) {
             );
         }
     });
-    vscode.window.onDidChangeActiveTextEditor(updateActiveConnectionStatusBar);
+    vscode.window.onDidChangeActiveTextEditor(() => {
+        updateActiveConnectionStatusBar();
+        updateKeepConnectionStatusBarFn();
+    });
 
     // ========== Schema Explorer ==========
     console.log('Netezza extension: Registering SchemaSearchProvider...');
@@ -368,6 +391,74 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(...copilotDisposables);
 
+    // ========== Chat Participant Registration ==========
+    // Register the @sql-copilot chat participant with handlers for /schema, /optimize, /fix, /explain
+    const sqlCopilotParticipant = copilotService.registerChatParticipant(context);
+    if (sqlCopilotParticipant) {
+        context.subscriptions.push(sqlCopilotParticipant);
+    }
+
+    // ========== Language Model Tool Registration ==========
+    // Register the #schema tool that Copilot can automatically invoke in agent mode
+    const schemaTool = new SchemaTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_sql_schema', schemaTool)
+    );
+
+    // Register the #getColumns tool for getting column metadata
+    const columnsTool = new ColumnsTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_columns', columnsTool)
+    );
+
+    // Register the #getTables tool for listing tables in a database
+    const tablesTool = new TablesTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_tables', tablesTool)
+    );
+
+    // Register the #executeQuery tool for executing SELECT queries
+    const executeQueryTool = new ExecuteQueryTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_execute_query', executeQueryTool)
+    );
+
+    // Register the #sampleData tool for getting sample data from tables
+    const sampleDataTool = new SampleDataTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_sample_data', sampleDataTool)
+    );
+
+    // Register the #explainPlan tool for getting query execution plans
+    const explainPlanTool = new ExplainPlanTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_explain_plan', explainPlanTool)
+    );
+
+    // Register the #searchSchema tool for searching tables/columns by pattern
+    const searchSchemaTool = new SearchSchemaTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_search_schema', searchSchemaTool)
+    );
+
+    // Register the #tableStats tool for getting table statistics and skew
+    const tableStatsTool = new TableStatsTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_table_stats', tableStatsTool)
+    );
+
+    // Register the #dependencies tool for finding object dependencies
+    const dependenciesTool = new DependenciesTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_dependencies', dependenciesTool)
+    );
+
+    // Register the #validateSql tool for validating SQL syntax
+    const validateSqlTool = new ValidateSqlTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_validate_sql', validateSqlTool)
+    );
+
     // ========== Core Commands (kept in extension.ts) ==========
     context.subscriptions.push(
         vscode.commands.registerCommand('netezza.viewEditData', (item: EditDataItem) => {
@@ -422,6 +513,26 @@ END_PROC;`;
             await vscode.window.showTextDocument(doc);
         }),
 
+        // Toggle Keep Connection for current tab (per-document)
+        vscode.commands.registerCommand('netezza.toggleKeepConnectionForTab', () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.languageId !== 'sql') {
+                vscode.window.showWarningMessage('Please open a SQL file first.');
+                return;
+            }
+            
+            const documentUri = editor.document.uri.toString();
+            const newState = connectionManager.toggleDocumentKeepConnectionOpen(documentUri);
+            updateKeepConnectionStatusBar(keepConnectionStatusBar, connectionManager);
+
+            vscode.window.showInformationMessage(
+                newState
+                    ? `Keep connection: ENABLED for this tab - connection will remain open after queries`
+                    : `Keep connection: DISABLED for this tab - connection will be closed after each query`
+            );
+        }),
+
+        // Toggle Keep Connection globally (legacy, kept for backward compatibility)
         vscode.commands.registerCommand('netezza.toggleKeepConnectionOpen', () => {
             const currentState = connectionManager.getKeepConnectionOpen();
             connectionManager.setKeepConnectionOpen(!currentState);
@@ -430,8 +541,8 @@ END_PROC;`;
             const newState = !currentState;
             vscode.window.showInformationMessage(
                 newState
-                    ? 'Keep connection open: ENABLED - connection will remain open after queries'
-                    : 'Keep connection open: DISABLED - connection will be closed after each query'
+                    ? 'Keep connection open (global): ENABLED - connection will remain open after queries'
+                    : 'Keep connection open (global): DISABLED - connection will be closed after each query'
             );
         }),
 

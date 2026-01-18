@@ -22,6 +22,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     private _executingSources: Set<string> = new Set();
     private _cancelledSources: Set<string> = new Set();
 
+    // Event emitter for cancel notifications
+    private _onDidCancel = new vscode.EventEmitter<string>();
+    public readonly onDidCancel = this._onDidCancel.event;
+
     constructor(extensionUri: vscode.Uri) {
         this._extensionUri = extensionUri;
     }
@@ -117,6 +121,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'cancelQuery':
                     if (message.sourceUri) {
                         // Call the command to cancel
+                        console.log(`[resultPanelView] Received cancelQuery message for: ${message.sourceUri}`);
                         vscode.commands.executeCommand('netezza.cancelQuery', message.sourceUri, message.currentRowCounts);
                     }
                     return;
@@ -274,6 +279,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * Check if execution for the given source has been cancelled.
+     */
+    public isCancelled(sourceUri: string): boolean {
+        return this._cancelledSources.has(sourceUri);
+    }
 
     /**
      * Notify the frontend that execution for the given source has been cancelled.
@@ -284,6 +295,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             this._executingSources.delete(sourceUri);
         }
         this._cancelledSources.add(sourceUri);
+
+        // Emit cancel event for progress notification update
+        this._onDidCancel.fire(sourceUri);
 
         // Mark current result sets as cancelled in our state
         const results = this._resultsMap.get(sourceUri) || [];
