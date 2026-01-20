@@ -534,3 +534,19 @@ Add to your `.vscode/settings.json` (optional):
 - [SQL Linter](./SQL_LINTER.md) - Automated SQL validation
 - [Schema Comparison](./SCHEMA_COMPARE.md) - Compare table structures
 - [Export/Import](./EXPORT_IMPORT.md) - Data movement workflows
+
+## New Language-Model Tools (added)
+
+The extension now exposes additional language-model tools for discovery and object-definition retrieval. These are useful when running Copilot in agent mode or when invoking tools directly with the `#toolName` syntax.
+
+- `#getDatabases`: Lists accessible databases for the current connection.
+- `#getSchemas`: Lists schemas in a specific database or across all databases when `database` is omitted.
+- `#getProcedures`: Lists procedures; can return full procedure source when requested.
+- `#getViews`: Lists views; can return view definitions when requested.
+- `#getExternalTables`: Lists external tables and includes the `DATAOBJECT` field when available.
+- `#getObjectDefinition`: Retrieves the full source/definition of a view or procedure (supports cross-database lookup when `database` is omitted).
+
+Notes:
+- When `database` is not provided, these tools will search global system views and return results across all databases the connected user can access (results include the `Database` column for disambiguation).
+- External table entries may include a `DATAOBJECT` or external object name; use `#getExternalTables` to retrieve that information.
+

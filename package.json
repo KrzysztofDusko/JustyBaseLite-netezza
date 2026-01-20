@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -227,6 +227,11 @@
         "icon": "$(database)"
       },
       {
+        "command": "netezza.selectDatabaseForTab",
+        "title": "Select Database for SQL Tab",
+        "icon": "$(server)"
+      },
+      {
         "command": "netezza.clearAutocompleteCache",
         "title": "Netezza: Clear Autocomplete Cache",
         "icon": "$(trash)"
@@ -440,8 +445,8 @@
         "displayName": "Get Tables List",
         "toolReferenceName": "getTables",
         "icon": "$(list-flat)",
-        "userDescription": "Gets list of tables from specified database in connected Netezza server",
-        "modelDescription": "This tool retrieves a list of all tables and views from the specified database in the connected IBM Netezza server. Returns table names along with their schema, type (TABLE/VIEW), and owner information. Use this when you need to explore what tables exist in a database or find available objects. Requires an active database connection.",
+        "userDescription": "Gets list of tables from a database or all databases in connected Netezza server",
+        "modelDescription": "This tool retrieves a list of all tables and views from the connected IBM Netezza server. IMPORTANT: A Netezza connection provides access to multiple databases. When 'database' parameter is NOT specified, this tool searches across ALL accessible databases in the connection. When 'database' IS specified, it searches only in that specific database. Returns table names along with their database, schema, type (TABLE/VIEW), and owner information. Use this when you need to explore what tables exist. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
         "tags": ["sql", "database", "tables", "netezza", "metadata"],
         "inputSchema": {
@@ -449,14 +454,14 @@
           "properties": {
             "database": {
               "type": "string",
-              "description": "Database name to list tables from. Required."
+              "description": "Database name to list tables from. Optional - if not specified, searches ALL databases accessible via the connection."
             },
             "schema": {
               "type": "string",
               "description": "Optional schema name to filter tables. If not provided, returns tables from all schemas."
             }
           },
-          "required": ["database"]
+          "required": []
         }
       },
       {
@@ -540,8 +545,8 @@
         "displayName": "Search Schema",
         "toolReferenceName": "searchSchema",
         "icon": "$(search)",
-        "userDescription": "Search for tables or columns by name pattern",
-        "modelDescription": "This tool searches the database schema for tables and/or columns matching a name pattern. Use SQL wildcards (% for any characters, _ for single character) in the pattern. Helpful for finding tables when you only know part of the name, discovering columns across tables, or exploring the schema. Returns matching objects with their schema, type, and metadata. Requires an active database connection.",
+        "userDescription": "Search for tables or columns by name pattern across all databases",
+        "modelDescription": "This tool searches the database schema for tables and/or columns matching a name pattern. IMPORTANT: A Netezza connection provides access to multiple databases. When 'database' parameter is NOT specified, this tool searches across ALL accessible databases in the connection. When 'database' IS specified, it searches only in that specific database. Use SQL wildcards (% for any characters, _ for single character) in the pattern. Returns matching objects with their database, schema, type, and metadata. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
         "tags": ["sql", "database", "search", "netezza", "schema", "metadata"],
         "inputSchema": {
@@ -558,7 +563,7 @@
             },
             "database": {
               "type": "string",
-              "description": "Database to search in. Uses current database if not specified."
+              "description": "Database to search in. Optional - if not specified, searches ALL databases accessible via the connection."
             }
           },
           "required": ["pattern"]
@@ -631,12 +636,157 @@
           },
           "required": ["sql"]
         }
+      },
+      {
+        "name": "netezza_get_databases",
+        "displayName": "Get Databases",
+        "toolReferenceName": "getDatabases",
+        "icon": "$(database)",
+        "userDescription": "Get list of all databases accessible via the connection",
+        "modelDescription": "This tool retrieves a list of all databases accessible via the current Netezza connection. IMPORTANT: A Netezza connection provides access to multiple databases. Use this tool to discover what databases are available before exploring their contents with other tools. Returns database names with their owner and creation date. Requires an active database connection.",
+        "canBeReferencedInPrompt": true,
+        "tags": ["sql", "database", "netezza", "metadata", "list"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "netezza_get_schemas",
+        "displayName": "Get Schemas",
+        "toolReferenceName": "getSchemas",
+        "icon": "$(symbol-namespace)",
+        "userDescription": "Get list of schemas in a database or across all databases",
+        "modelDescription": "This tool retrieves a list of schemas from the connected IBM Netezza server. When 'database' parameter is specified, returns schemas from that specific database. When 'database' is NOT specified, returns schemas from ALL accessible databases. Use this to explore the schema structure of the database. Requires an active database connection.",
+        "canBeReferencedInPrompt": true,
+        "tags": ["sql", "database", "schema", "netezza", "metadata"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "database": {
+              "type": "string",
+              "description": "Database name. Optional - if not specified, returns schemas from all databases."
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "netezza_get_procedures",
+        "displayName": "Get Procedures",
+        "toolReferenceName": "getProcedures",
+        "icon": "$(symbol-method)",
+        "userDescription": "Get list of stored procedures",
+        "modelDescription": "This tool retrieves a list of stored procedures from the connected IBM Netezza server. When 'database' is specified, searches only in that database. When not specified, searches ALL accessible databases. Optionally filter by schema. Returns procedure names with their signature, return type, and owner. Use getObjectDefinition tool to retrieve the actual source code of a procedure. Requires an active database connection.",
+        "canBeReferencedInPrompt": true,
+        "tags": ["sql", "database", "procedure", "netezza", "metadata"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "database": {
+              "type": "string",
+              "description": "Database name. Optional - if not specified, searches all databases."
+            },
+            "schema": {
+              "type": "string",
+              "description": "Schema name to filter procedures. Optional."
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "netezza_get_views",
+        "displayName": "Get Views",
+        "toolReferenceName": "getViews",
+        "icon": "$(eye)",
+        "userDescription": "Get list of views",
+        "modelDescription": "This tool retrieves a list of views from the connected IBM Netezza server. When 'database' is specified, searches only in that database. When not specified, searches ALL accessible databases. Optionally filter by schema. Returns view names with their schema and owner. Use getObjectDefinition tool to retrieve the actual SQL definition of a view. Requires an active database connection.",
+        "canBeReferencedInPrompt": true,
+        "tags": ["sql", "database", "view", "netezza", "metadata"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "database": {
+              "type": "string",
+              "description": "Database name. Optional - if not specified, searches all databases."
+            },
+            "schema": {
+              "type": "string",
+              "description": "Schema name to filter views. Optional."
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "netezza_get_external_tables",
+        "displayName": "Get External Tables",
+        "toolReferenceName": "getExternalTables",
+        "icon": "$(cloud)",
+        "userDescription": "Get list of external tables with data object information",
+        "modelDescription": "This tool retrieves a list of external tables from the connected IBM Netezza server, including their associated data objects (DATAOBJECT/EXTOBJNAME). External tables in Netezza reference external data sources. When 'database' is specified, searches only in that database. When not specified, searches ALL accessible databases. Use 'dataObjectPattern' to search for tables by their data object name (supports % wildcard). Returns table names with their data object name, location, and owner. Requires an active database connection.",
+        "canBeReferencedInPrompt": true,
+        "tags": ["sql", "database", "external", "netezza", "metadata", "dataobject"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "database": {
+              "type": "string",
+              "description": "Database name. Optional - if not specified, searches all databases."
+            },
+            "schema": {
+              "type": "string",
+              "description": "Schema name to filter external tables. Optional."
+            },
+            "dataObjectPattern": {
+              "type": "string",
+              "description": "Pattern to search for in data object names. Use % as wildcard. Example: '%parquet%' finds all external tables with parquet data objects."
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "netezza_get_object_definition",
+        "displayName": "Get Object Definition",
+        "toolReferenceName": "getObjectDefinition",
+        "icon": "$(code)",
+        "userDescription": "Get source code of a view or stored procedure",
+        "modelDescription": "This tool retrieves the full source code/definition of a view or stored procedure from the connected IBM Netezza database. For views, it returns the SELECT statement that defines the view. For procedures, it returns the full procedure source code including arguments, return type, and body. Use this when you need to understand the logic of a view or procedure, analyze dependencies, or help modify existing code. Object name can be specified as NAME, SCHEMA.NAME, or DATABASE.SCHEMA.NAME format. Requires an active database connection.",
+        "canBeReferencedInPrompt": true,
+        "tags": ["sql", "database", "view", "procedure", "netezza", "source", "definition"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "objectName": {
+              "type": "string",
+              "description": "Name of the view or procedure. Can be NAME, SCHEMA.NAME, or DATABASE.SCHEMA.NAME format."
+            },
+            "objectType": {
+              "type": "string",
+              "enum": ["view", "procedure"],
+              "description": "Type of object: 'view' or 'procedure'."
+            },
+            "database": {
+              "type": "string",
+              "description": "Database name. Optional if included in objectName or to search all databases."
+            }
+          },
+          "required": ["objectName", "objectType"]
+        }
       }
     ],
     "menus": {
       "editor/title": [
         {
           "command": "netezza.selectConnectionForTab",
+          "when": "resourceLangId == sql",
+          "group": "navigation@1"
+        },
+        {
+          "command": "netezza.selectDatabaseForTab",
           "when": "resourceLangId == sql",
           "group": "navigation@1"
         },

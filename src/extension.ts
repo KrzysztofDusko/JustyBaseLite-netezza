@@ -34,7 +34,13 @@ import {
     SearchSchemaTool,
     TableStatsTool,
     DependenciesTool,
-    ValidateSqlTool
+    ValidateSqlTool,
+    DatabasesTool,
+    SchemasTool,
+    ProceduresTool,
+    ViewsTool,
+    ExternalTablesTool,
+    GetObjectDefinitionTool
 } from './services/copilotService';
 
 // Import modular command registrations
@@ -47,6 +53,7 @@ import { registerQueryCommands } from './commands/queryCommands';
 import {
     createKeepConnectionStatusBar,
     createActiveConnectionStatusBar,
+    createActiveDatabaseStatusBar,
     updateKeepConnectionStatusBar
 } from './services/statusBarManager';
 import {
@@ -128,6 +135,33 @@ async function checkForConflictingExtensions(_context: vscode.ExtensionContext):
     }
 }
 
+/**
+ * Get list of databases from the Netezza server
+ */
+async function getDatabaseList(
+    context: vscode.ExtensionContext,
+    connectionManager: ConnectionManager,
+    connectionName: string
+): Promise<string[]> {
+    const query = `SELECT DATABASE FROM _V_DATABASE ORDER BY DATABASE`;
+    
+    const result = await runQueryRaw(
+        context,
+        query,
+        true, // silent
+        connectionManager,
+        connectionName,
+        undefined, // no documentUri - this is a utility query
+        undefined, // no logCallback
+        undefined  // no extensionUri
+    );
+
+    if (result.data && result.data.length > 0) {
+        return result.data.map(row => String(row[0]));
+    }
+    return [];
+}
+
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Netezza extension: Activating...');
 
@@ -141,10 +175,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const schemaProvider = new SchemaProvider(context, connectionManager, metadataCache);
     const resultPanelProvider = new ResultPanelView(context.extensionUri);
 
-    // Ensure persistent connection is closed when extension is deactivated
+    // Ensure persistent connections are closed when extension is deactivated
     context.subscriptions.push({
         dispose: () => {
-            connectionManager.closeAllPersistentConnections();
+            connectionManager.closeAllDocumentPersistentConnections();
         }
     });
 
@@ -155,6 +189,8 @@ export async function activate(context: vscode.ExtensionContext) {
     const keepConnectionStatusBar = createKeepConnectionStatusBar(context, connectionManager);
     const { updateFn: updateActiveConnectionStatusBar } =
         createActiveConnectionStatusBar(context, connectionManager);
+    const { updateFn: updateActiveDatabaseStatusBar } =
+        createActiveDatabaseStatusBar(context, connectionManager);
 
     // Function to update keep connection status bar
     const updateKeepConnectionStatusBarFn = () => {
@@ -163,9 +199,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initial update and listen for changes
     updateActiveConnectionStatusBar();
+    updateActiveDatabaseStatusBar();
     updateKeepConnectionStatusBarFn();
     connectionManager.onDidChangeActiveConnection(connectionName => {
         updateActiveConnectionStatusBar();
+        updateActiveDatabaseStatusBar();
         updateKeepConnectionStatusBarFn();
         if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
             metadataCache.triggerConnectionPrefetch(connectionName, q =>
@@ -176,6 +214,7 @@ export async function activate(context: vscode.ExtensionContext) {
     connectionManager.onDidChangeConnections(updateActiveConnectionStatusBar);
     connectionManager.onDidChangeDocumentConnection((documentUri: string) => {
         updateActiveConnectionStatusBar();
+        updateActiveDatabaseStatusBar();
         updateKeepConnectionStatusBarFn();
         const connectionName = connectionManager.getDocumentConnection(documentUri);
         if (connectionName && !metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
@@ -184,8 +223,12 @@ export async function activate(context: vscode.ExtensionContext) {
             );
         }
     });
+    connectionManager.onDidChangeDocumentDatabase(() => {
+        updateActiveDatabaseStatusBar();
+    });
     vscode.window.onDidChangeActiveTextEditor(() => {
         updateActiveConnectionStatusBar();
+        updateActiveDatabaseStatusBar();
         updateKeepConnectionStatusBarFn();
     });
 
@@ -224,9 +267,15 @@ export async function activate(context: vscode.ExtensionContext) {
     // Sync result view with active editor
     context.subscriptions.push(
         vscode.window.onDidChangeActiveTextEditor(editor => {
-            if (editor && editor.document) {
-                const sourceUri = editor.document.uri.toString();
-                resultPanelProvider.setActiveSource(sourceUri);
+            // Only switch result context if the new editor is a SQL file with allowed URI scheme
+            // Ignore code blocks from Copilot chat, output panels, and other non-editable sources
+            if (editor && editor.document && editor.document.languageId === 'sql') {
+                const scheme = editor.document.uri.scheme;
+                // Only allow 'file' (saved files) and 'untitled' (new unsaved files)
+                if (scheme === 'file' || scheme === 'untitled') {
+                    const sourceUri = editor.document.uri.toString();
+                    resultPanelProvider.setActiveSource(sourceUri);
+                }
             }
         })
     );
@@ -459,6 +508,42 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.lm.registerTool('netezza_validate_sql', validateSqlTool)
     );
 
+    // Register the #getDatabases tool for listing databases
+    const databasesTool = new DatabasesTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_databases', databasesTool)
+    );
+
+    // Register the #getSchemas tool for listing schemas
+    const schemasTool = new SchemasTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_schemas', schemasTool)
+    );
+
+    // Register the #getProcedures tool for listing procedures
+    const proceduresTool = new ProceduresTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_procedures', proceduresTool)
+    );
+
+    // Register the #getViews tool for listing views
+    const viewsTool = new ViewsTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_views', viewsTool)
+    );
+
+    // Register the #getExternalTables tool for listing external tables
+    const externalTablesTool = new ExternalTablesTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_external_tables', externalTablesTool)
+    );
+
+    // Register the #getObjectDefinition tool for getting view/procedure source code
+    const getObjectDefinitionTool = new GetObjectDefinitionTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_get_object_definition', getObjectDefinitionTool)
+    );
+
     // ========== Core Commands (kept in extension.ts) ==========
     context.subscriptions.push(
         vscode.commands.registerCommand('netezza.viewEditData', (item: EditDataItem) => {
@@ -532,20 +617,6 @@ END_PROC;`;
             );
         }),
 
-        // Toggle Keep Connection globally (legacy, kept for backward compatibility)
-        vscode.commands.registerCommand('netezza.toggleKeepConnectionOpen', () => {
-            const currentState = connectionManager.getKeepConnectionOpen();
-            connectionManager.setKeepConnectionOpen(!currentState);
-            updateKeepConnectionStatusBar(keepConnectionStatusBar, connectionManager);
-
-            const newState = !currentState;
-            vscode.window.showInformationMessage(
-                newState
-                    ? 'Keep connection open (global): ENABLED - connection will remain open after queries'
-                    : 'Keep connection open (global): DISABLED - connection will be closed after each query'
-            );
-        }),
-
 
         vscode.commands.registerCommand('netezza.selectActiveConnection', async () => {
             const connections = await connectionManager.getConnections();
@@ -598,6 +669,53 @@ END_PROC;`;
             if (selected) {
                 connectionManager.setDocumentConnection(documentUri, selected.name);
                 vscode.window.showInformationMessage(`Connection for this tab set to: ${selected.name}`);
+            }
+        }),
+
+        // Select database for current tab (changes database with reconnect)
+        vscode.commands.registerCommand('netezza.selectDatabaseForTab', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor || editor.document.languageId !== 'sql') {
+                vscode.window.showWarningMessage('This command is only available for SQL files');
+                return;
+            }
+
+            const documentUri = editor.document.uri.toString();
+            const connectionName = connectionManager.getConnectionForExecution(documentUri);
+            
+            if (!connectionName) {
+                vscode.window.showWarningMessage('No connection selected. Please select a connection first.');
+                return;
+            }
+
+            // Get list of databases from the server
+            try {
+                const databases = await getDatabaseList(context, connectionManager, connectionName);
+                
+                if (databases.length === 0) {
+                    vscode.window.showWarningMessage('No databases found on server.');
+                    return;
+                }
+
+                const currentDatabase = await connectionManager.getEffectiveDatabase(documentUri);
+                
+                const items = databases.map(db => ({
+                    label: db,
+                    description: db === currentDatabase ? '$(check) Currently selected' : '',
+                    database: db
+                }));
+
+                const selected = await vscode.window.showQuickPick(items, {
+                    placeHolder: `Select database for this SQL tab (current: ${currentDatabase || 'default'})`
+                });
+
+                if (selected) {
+                    connectionManager.setDocumentDatabase(documentUri, selected.database);
+                    vscode.window.showInformationMessage(`Database for this tab set to: ${selected.database} (reconnecting...)`);
+                }
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                vscode.window.showErrorMessage(`Failed to get database list: ${msg}`);
             }
         }),
 

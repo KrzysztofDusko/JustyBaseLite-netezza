@@ -15,15 +15,20 @@ Distinct from other extensions, JustyBaseLite includes a **custom Node.js-based 
 
 ![AI Copilot Chat](docs/screenshots/ai_fix_errors_chat.png)
 
+📖 Read the full Copilot documentation: [Copilot SQL Assistant](docs/COPILOT_SQL_ASSISTANT.md)
+
 - **Auto Mode**: Apply suggested fixes or optimizations using the built-in diff editor (modal review dialog). Options: Apply Changes, Apply & Close Diff, Discard.
 - **Interactive Mode**: Open Copilot Chat for a back-and-forth discussion; suggestions stay in Chat unless you explicitly apply them with `/edit`.
 - **Generate SQL from Description**: Describe what you need in natural language, and Copilot generates the SQL using your database schema context.
+- **enhanced Agent Capabilities**: Includes 10+ automated tools (schema search, object definitions, table stats) that Copilot can use to autonomously explore your database and provide better answers.
 - **Describe Data**: From the Results panel you can request Copilot to describe a result set (first 50 rows). A privacy confirmation modal appears before any data is sent.
 - **Commands**: Fix/Optimize/Explain/Ask/Generate (each available in Auto and Interactive variants).
 
 
 ### 🚀 Query Execution
 - **Zero Configuration**: Connect immediately using host, user, and password. No ODBC setup required.
+- **Per-Tab Database**: Switch active database for specific tabs using the status bar selector.
+- **Auto-Recovery**: Automatically detects broken connections and retries queries.
 - **Progressive Results**: Results appear immediately as queries finish, even when running multiple statements.
 - **Sequential Execution**: Run complex scripts with multiple statements safely.
 - **Run Selection**: Execute selected text or the current statement (`Ctrl+Enter` / `F5`).

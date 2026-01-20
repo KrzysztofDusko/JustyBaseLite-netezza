@@ -133,6 +133,7 @@ export function registerQueryCommands(deps: QueryCommandsDependencies): vscode.D
             }
 
             try {
+                resultPanelProvider.setActiveSource(sourceUri);
                 resultPanelProvider.startExecution(sourceUri);
 
                 // Check if streaming is enabled

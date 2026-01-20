@@ -141,6 +141,23 @@ function createLogger(silent: boolean, logCallback?: (msg: string) => void): Out
     return { outputChannel, logCallback };
 }
 
+/**
+ * Check if error indicates a broken/closed connection that should trigger retry
+ */
+function isConnectionBrokenError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const msg = error.message.toLowerCase();
+    return (
+        msg.includes('socket closed') ||
+        msg.includes('socket destroyed') ||
+        msg.includes('connection reset') ||
+        msg.includes('connection closed') ||
+        msg.includes('econnreset') ||
+        msg.includes('epipe') ||
+        msg.includes('broken pipe')
+    );
+}
+
 function log(logger: OutputLogger, message: string): void {
     if (logger.outputChannel) {
         logger.outputChannel.appendLine(message);
@@ -211,6 +228,9 @@ function resolveConnectionName(
 /**
  * Get connection for a specific document (per-tab connection)
  * Uses document-specific persistent connection if keepConnectionOpen is true
+ * 
+ * IMPORTANT: When documentUri is not provided, ALWAYS creates a new connection
+ * to avoid conflicts with document connections (e.g., Object Search vs SQL execution)
  */
 async function getConnectionForDocument(
     connManager: ConnectionManager,
@@ -222,12 +242,9 @@ async function getConnectionForDocument(
         // Use per-document persistent connection
         const connection = await connManager.getDocumentPersistentConnection(documentUri, resolvedConnectionName);
         return { connection, shouldCloseConnection: false };
-    } else if (keepConnectionOpen) {
-        // Fallback to global persistent connection (for silent queries without documentUri)
-        const connection = await connManager.getPersistentConnection(resolvedConnectionName);
-        return { connection, shouldCloseConnection: false };
     } else {
-        // Create new connection that will be closed after query
+        // No documentUri means this is a background/utility query (e.g., Object Search, metadata refresh)
+        // ALWAYS create a new connection to avoid conflicts with document connections
         const { createNzConnection } = require('./nzConnectionFactory');
         const details = await connManager.getConnection(resolvedConnectionName);
         if (!details) {
@@ -283,12 +300,6 @@ async function executeDropSession(
                         // Establish new persistent connection immediately
                         await connectionManager.getDocumentPersistentConnection(documentUri, connName);
                         console.log(`[executeDropSession] Re-established per-document persistent connection for ${documentUri}`);
-                    } else if (connectionManager.getKeepConnectionOpen()) {
-                        // Global persistent connection (legacy)
-                        await connectionManager.closePersistentConnection(connName);
-                        // Establish new persistent connection immediately
-                        await connectionManager.getPersistentConnection(connName);
-                        console.log(`[executeDropSession] Re-established global persistent connection for ${connName}`);
                     }
                 } finally {
                     await connection.close();
@@ -486,9 +497,10 @@ export async function runQueryRaw(
 ): Promise<QueryResult> {
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
+    // Default to true for background queries without documentUri
     const keepConnectionOpen = documentUri 
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
-        : connManager.getKeepConnectionOpen();
+        : true;
     const logger = createLogger(silent, logCallback);
 
     log(logger, 'Executing query...');
@@ -497,16 +509,27 @@ export async function runQueryRaw(
         log(logger, `Target Connection: ${connectionName}`);
     }
 
+    // Resolve variables and connection name BEFORE try block so they're available in catch for retry
+    let queryToExecute: string;
+    let resolvedConnectionName: string;
+    
     try {
-        // 1. Resolve variables in query
-        const queryToExecute = await resolveQueryVariables(query, silent, extensionUri || context.extensionUri);
+        queryToExecute = await resolveQueryVariables(query, silent, extensionUri || context.extensionUri);
+        resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
+    } catch (resolveError: unknown) {
+        const errObj = resolveError as { message?: string };
+        const errorMessage = `Error: ${errObj.message || String(resolveError)}`;
+        log(logger, errorMessage);
+        throw new Error(errorMessage);
+    }
 
-        // 2. Resolve connection name
-        const resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
-        log(logger, `Using connection: ${resolvedConnectionName}`);
-        log(logger, 'Connecting to database...');
+    log(logger, `Using connection: ${resolvedConnectionName}`);
+    log(logger, 'Connecting to database...');
 
-        // 3. Get connection (use per-document connection if keepConnectionOpen)
+    try {
+        // 1. Variables and connection name already resolved above
+
+        // 2. Get connection (use per-document connection if keepConnectionOpen)
         const { connection, shouldCloseConnection } = await getConnectionForDocument(
             connManager,
             resolvedConnectionName,
@@ -580,6 +603,81 @@ export async function runQueryRaw(
             }
         }
     } catch (error: unknown) {
+        // Check if this is a broken connection error and we have a persistent connection
+        if (isConnectionBrokenError(error) && documentUri && keepConnectionOpen) {
+            log(logger, 'Connection was closed by server. Reconnecting and retrying...');
+            
+            // Close the broken persistent connection
+            await connManager.closeDocumentPersistentConnection(documentUri);
+            
+            // Retry once with a fresh connection
+            try {
+                const { connection: retryConnection, shouldCloseConnection: retryClose } = await getConnectionForDocument(
+                    connManager,
+                    resolvedConnectionName,
+                    keepConnectionOpen,
+                    documentUri
+                );
+                log(logger, 'Reconnected. Retrying query...');
+
+                let retrySessionId: string | undefined;
+                try {
+                    const sidCmd = retryConnection.createCommand('SELECT CURRENT_SID');
+                    const sidReader = await sidCmd.executeReader();
+                    if (await sidReader.read()) {
+                        retrySessionId = String(sidReader.getValue(0));
+                    }
+                    await sidReader.close();
+                } catch {
+                    // Ignore if we can't get SID
+                }
+
+                try {
+                    const config = vscode.workspace.getConfiguration('netezza');
+                    const queryTimeout = config.get<number>('queryTimeout', 1800);
+                    
+                    const { columns, data, limitReached } = await executeQueryAndFetch(
+                        retryConnection,
+                        queryToExecute,
+                        queryTimeout,
+                        documentUri,
+                        retrySessionId
+                    );
+
+                    await logQueryToHistory(context, connManager, resolvedConnectionName, query);
+
+                    if (columns.length > 0) {
+                        log(logger, 'Query completed (after reconnect).');
+                        return {
+                            columns,
+                            data,
+                            rowsAffected: undefined,
+                            limitReached,
+                            sql: queryToExecute
+                        };
+                    } else {
+                        log(logger, 'Query executed successfully after reconnect (no results).');
+                        return {
+                            columns: [],
+                            data: [],
+                            rowsAffected: undefined,
+                            message: 'Query executed successfully (no results).',
+                            sql: queryToExecute
+                        };
+                    }
+                } finally {
+                    if (retryClose && retryConnection) {
+                        await retryConnection.close();
+                    }
+                }
+            } catch (retryError: unknown) {
+                const retryErrObj = retryError as { message?: string };
+                const retryErrorMessage = `Error (after reconnect attempt): ${retryErrObj.message || String(retryError)}`;
+                log(logger, retryErrorMessage);
+                throw new Error(retryErrorMessage);
+            }
+        }
+
         const errObj = error as { message?: string };
         const errorMessage = `Error: ${errObj.message || String(error)}`;
         log(logger, errorMessage);
@@ -691,9 +789,10 @@ export async function runExplainQuery(
 ): Promise<string> {
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
+    // Default to true for background queries without documentUri
     const keepConnectionOpen = documentUri 
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
-        : connManager.getKeepConnectionOpen();
+        : true;
 
     // Collect all notices
     const notices: string[] = [];
@@ -766,13 +865,15 @@ export async function runQueriesSequentially(
     documentUri?: string,
     logCallback?: (msg: string) => void,
     resultCallback?: (results: QueryResult[]) => void,
-    extensionUri?: vscode.Uri
+    extensionUri?: vscode.Uri,
+    _isRetry: boolean = false
 ): Promise<QueryResult[]> {
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
+    // Default to true for background queries without documentUri
     const keepConnectionOpen = documentUri 
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
-        : connManager.getKeepConnectionOpen();
+        : true;
 
     let outputChannel: vscode.OutputChannel | undefined;
     if (!logCallback) {
@@ -1009,6 +1110,37 @@ export async function runQueriesSequentially(
             }
         }
     } catch (error: unknown) {
+        // Check if this is a broken connection error and we have a persistent connection
+        // Only retry once (check _isRetry flag to prevent infinite loop)
+        if (!_isRetry && isConnectionBrokenError(error) && documentUri && keepConnectionOpen) {
+            if (outputChannel) outputChannel.appendLine('Connection was closed by server. Reconnecting and retrying...');
+            if (logCallback) logCallback('Connection was closed by server. Reconnecting and retrying...');
+            
+            // Close the broken persistent connection
+            await connManager.closeDocumentPersistentConnection(documentUri);
+            
+            // Retry once by recursively calling the function with _isRetry=true
+            // This will create a new connection and re-execute all queries
+            try {
+                return await runQueriesSequentially(
+                    context,
+                    queries,
+                    connManager,
+                    documentUri,
+                    logCallback,
+                    resultCallback,
+                    extensionUri,
+                    true // _isRetry = true to prevent further retries
+                );
+            } catch (retryError: unknown) {
+                const retryErrObj = retryError as { message?: string };
+                const retryErrorMessage = `Error (after reconnect attempt): ${retryErrObj.message || String(retryError)}`;
+                if (outputChannel) outputChannel.appendLine(retryErrorMessage);
+                if (logCallback) logCallback(retryErrorMessage);
+                throw new Error(retryErrorMessage);
+            }
+        }
+
         const errObj = error as { message?: string };
         const errorMessage = `Error: ${errObj.message || String(error)}`;
         if (outputChannel) outputChannel.appendLine(errorMessage);
@@ -1273,13 +1405,15 @@ export async function runQueriesWithStreaming(
     logCallback?: (msg: string) => void,
     chunkCallback?: (queryIndex: number, chunk: StreamingChunk, sql: string) => void,
     chunkSize: number = 5000,
-    extensionUri?: vscode.Uri
+    extensionUri?: vscode.Uri,
+    _isRetry: boolean = false
 ): Promise<void> {
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
+    // Default to true for background queries without documentUri
     const keepConnectionOpen = documentUri 
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
-        : connManager.getKeepConnectionOpen();
+        : true;
 
     let outputChannel: vscode.OutputChannel | undefined;
     if (!logCallback) {
@@ -1443,6 +1577,38 @@ export async function runQueriesWithStreaming(
             }
         }
     } catch (error: unknown) {
+        // Check if this is a broken connection error and we have a persistent connection
+        // Only retry once (check _isRetry flag to prevent infinite loop)
+        if (!_isRetry && isConnectionBrokenError(error) && documentUri && keepConnectionOpen) {
+            if (outputChannel) outputChannel.appendLine('Connection was closed by server. Reconnecting and retrying...');
+            if (logCallback) logCallback('Connection was closed by server. Reconnecting and retrying...');
+            
+            // Close the broken persistent connection
+            await connManager.closeDocumentPersistentConnection(documentUri);
+            
+            // Retry once by recursively calling the function with _isRetry=true
+            // This will create a new connection and re-execute all queries
+            try {
+                return await runQueriesWithStreaming(
+                    context,
+                    queries,
+                    connManager,
+                    documentUri,
+                    logCallback,
+                    chunkCallback,
+                    chunkSize,
+                    extensionUri,
+                    true // _isRetry = true to prevent further retries
+                );
+            } catch (retryError: unknown) {
+                const retryErrObj = retryError as { message?: string };
+                const retryErrorMessage = `Error (after reconnect attempt): ${retryErrObj.message || String(retryError)}`;
+                if (outputChannel) outputChannel.appendLine(retryErrorMessage);
+                if (logCallback) logCallback(retryErrorMessage);
+                throw new Error(retryErrorMessage);
+            }
+        }
+
         const errObj = error as { message?: string };
         const errorMessage = `Error: ${errObj.message || String(error)}`;
         if (outputChannel) outputChannel.appendLine(errorMessage);

@@ -741,12 +741,14 @@ IMPORTANT NOTES:
 
         return `You are an expert in IBM Netezza Performance Server (NPS) / IBM PureData System for Analytics SQL.${languageInstruction}
 
-IMPORTANT NETEZZA SQL CONVENTIONS:
-- Table references: Use DATABASE..TABLE (two dots) or DATABASE.SCHEMA.TABLE (three parts)
-- DATABASE..TABLE syntax is valid and CORRECT in Netezza (do NOT change it to DATABASE.SCHEMA.TABLE)
-- Three-part names: DATABASE.SCHEMA.TABLE are also valid
-- Netezza supports specific SQL extensions and performance features
-- Preserve Netezza-specific syntax like DISTRIBUTE ON, ORGANIZE ON, etc.
+IMPORTANT NETEZZA SQL NAMING CONVENTIONS:
+- Three-part name: DATABASE.SCHEMA.OBJECT - fully qualified reference to a table/view/procedure
+- Two-part name with double dots: DATABASE..OBJECT - references object in the specified database (searches across schemas or uses default schema depending on configuration)
+- Two-part name with single dot: SCHEMA.OBJECT - uses current/default database with specified schema
+- Single name: OBJECT - uses current database and current schema
+- System views like _V_TABLE, _V_VIEW, _V_PROCEDURE are in each database; use DATABASE.._V_TABLE to query a specific database's system views
+- DATABASE..TABLE syntax is valid and CORRECT in Netezza - do NOT "fix" it by adding a schema name!
+- Netezza supports specific SQL extensions: DISTRIBUTE ON, ORGANIZE ON, GROOM TABLE, GENERATE STATISTICS, etc.
 
 DATABASE CONNECTION:
 ${context.connectionInfo}
@@ -1287,6 +1289,15 @@ ${context.selectedSql}
     private buildGenerateSqlPrompt(userDescription: string, schemaOverview: string): string {
         return `You are a Netezza SQL expert. The user wants to generate a SQL query based on their description.
 
+IMPORTANT NETEZZA SQL NAMING CONVENTIONS:
+- Three-part name: DATABASE.SCHEMA.OBJECT - fully qualified reference to a table/view/procedure
+- Two-part name with double dots: DATABASE..OBJECT - references object in the specified database (searches across schemas or uses default schema depending on configuration)
+- Two-part name with single dot: SCHEMA.OBJECT - uses current/default database with specified schema
+- Single name: OBJECT - uses current database and current schema
+- System views like _V_TABLE, _V_VIEW, _V_PROCEDURE are in each database; use DATABASE.._V_TABLE to query a specific database's system views
+- DATABASE..TABLE syntax is valid and CORRECT in Netezza - do NOT "fix" it by adding a schema name!
+- Netezza supports: DISTRIBUTE ON, ORGANIZE ON, GROOM TABLE, GENERATE STATISTICS, zone maps, etc.
+
 USER REQUEST:
 ${userDescription}
 
@@ -1574,11 +1585,14 @@ Please generate the SQL query:`;
                 // Build comprehensive prompt with DDL context
                 let prompt = `${fixPrompt}${languageInstruction}
 
-IMPORTANT NETEZZA SQL CONVENTIONS:
-- Table references: Use DATABASE..TABLE (two dots) or DATABASE.SCHEMA.TABLE (three parts)
-- DATABASE..TABLE syntax is valid and CORRECT in Netezza (do NOT change it to DATABASE.SCHEMA.TABLE)
-- Three-part names: DATABASE.SCHEMA.TABLE are also valid
-- Netezza supports specific SQL extensions and performance features
+IMPORTANT NETEZZA SQL NAMING CONVENTIONS:
+- Three-part name: DATABASE.SCHEMA.OBJECT - fully qualified reference to a table/view/procedure
+- Two-part name with double dots: DATABASE..OBJECT - references object in the specified database (searches across schemas or uses default schema depending on configuration)
+- Two-part name with single dot: SCHEMA.OBJECT - uses current/default database with specified schema
+- Single name: OBJECT - uses current database and current schema
+- System views like _V_TABLE, _V_VIEW, _V_PROCEDURE are in each database; use DATABASE.._V_TABLE to query a specific database's system views
+- DATABASE..TABLE syntax is valid and CORRECT in Netezza - do NOT "fix" it by adding a schema name!
+- Netezza supports specific SQL extensions: DISTRIBUTE ON, ORGANIZE ON, GROOM TABLE, GENERATE STATISTICS, etc.
 
 **Error from IBM Netezza:**
 \`\`\`
@@ -2049,53 +2063,17 @@ Please:
     }
 
     /**
-     * Gets list of tables from a database.
+     * Gets list of tables from a database or all databases.
      * Used by TablesTool to list available tables.
+     * When database is not specified, returns tables from ALL accessible databases.
      */
-    public async getTablesFromDatabase(database: string, schema?: string): Promise<string> {
+    public async getTablesFromDatabase(database?: string, schema?: string): Promise<string> {
         const connectionName = this.connectionManager.getActiveConnectionName();
         if (!connectionName) {
             return 'No active database connection. Please connect to a Netezza database first.';
         }
 
         try {
-            // Build query to get tables from the database
-            let query: string;
-            if (schema) {
-                query = `
-                    SELECT 
-                        SCHEMA AS schema_name,
-                        TABLENAME AS table_name,
-                        CASE RELKIND 
-                            WHEN 'r' THEN 'TABLE'
-                            WHEN 'v' THEN 'VIEW'
-                            WHEN 'm' THEN 'MATERIALIZED VIEW'
-                            WHEN 'e' THEN 'EXTERNAL TABLE'
-                            ELSE RELKIND
-                        END AS object_type,
-                        OWNER AS owner
-                    FROM ${database}._V_TABLE
-                    WHERE SCHEMA = '${schema.toUpperCase()}'
-                    ORDER BY SCHEMA, TABLENAME
-                `;
-            } else {
-                query = `
-                    SELECT 
-                        SCHEMA AS schema_name,
-                        TABLENAME AS table_name,
-                        CASE RELKIND 
-                            WHEN 'r' THEN 'TABLE'
-                            WHEN 'v' THEN 'VIEW'
-                            WHEN 'm' THEN 'MATERIALIZED VIEW'
-                            WHEN 'e' THEN 'EXTERNAL TABLE'
-                            ELSE RELKIND
-                        END AS object_type,
-                        OWNER AS owner
-                    FROM ${database}._V_TABLE
-                    ORDER BY SCHEMA, TABLENAME
-                `;
-            }
-
             // Get connection details
             const connectionDetails = await this.connectionManager.getConnection(connectionName);
             if (!connectionDetails) {
@@ -2104,35 +2082,118 @@ Please:
 
             // Execute query using connection
             const connection = await createConnectionFromDetails(connectionDetails);
-
             if (!connection) {
                 return 'Could not establish database connection.';
             }
 
             try {
+                // Build query to get tables
+                // When database is not specified, search across ALL databases using global system view
+                let query: string;
+                let headerText: string;
+                const searchAllDatabases = !database;
+
+                if (searchAllDatabases) {
+                    // Use global _V_OBJECT_DATA view to search across all databases
+                    if (schema) {
+                        query = `
+                            SELECT 
+                                DBNAME AS database_name,
+                                SCHEMA AS schema_name,
+                                OBJNAME AS table_name,
+                                OBJTYPE AS object_type,
+                                OWNER AS owner
+                            FROM _V_OBJECT_DATA
+                            WHERE OBJTYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
+                            AND SCHEMA = '${schema.toUpperCase()}'
+                            ORDER BY DBNAME, SCHEMA, OBJNAME
+                            LIMIT 500
+                        `;
+                        headerText = `## Tables in all databases, schema ${schema}\n`;
+                    } else {
+                        query = `
+                            SELECT 
+                                DBNAME AS database_name,
+                                SCHEMA AS schema_name,
+                                OBJNAME AS table_name,
+                                OBJTYPE AS object_type,
+                                OWNER AS owner
+                            FROM _V_OBJECT_DATA
+                            WHERE OBJTYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
+                            ORDER BY DBNAME, SCHEMA, OBJNAME
+                            LIMIT 500
+                        `;
+                        headerText = '## Tables in all databases\n';
+                    }
+                } else {
+                    // Search in specific database
+                    if (schema) {
+                        query = `
+                            SELECT 
+                                '${database}' AS database_name,
+                                SCHEMA AS schema_name,
+                                TABLENAME AS table_name,
+                                CASE RELKIND 
+                                    WHEN 'r' THEN 'TABLE'
+                                    WHEN 'v' THEN 'VIEW'
+                                    WHEN 'm' THEN 'MATERIALIZED VIEW'
+                                    WHEN 'e' THEN 'EXTERNAL TABLE'
+                                    ELSE RELKIND
+                                END AS object_type,
+                                OWNER AS owner
+                            FROM ${database}.._V_TABLE
+                            WHERE SCHEMA = '${schema.toUpperCase()}'
+                            ORDER BY SCHEMA, TABLENAME
+                        `;
+                    } else {
+                        query = `
+                            SELECT 
+                                '${database}' AS database_name,
+                                SCHEMA AS schema_name,
+                                TABLENAME AS table_name,
+                                CASE RELKIND 
+                                    WHEN 'r' THEN 'TABLE'
+                                    WHEN 'v' THEN 'VIEW'
+                                    WHEN 'm' THEN 'MATERIALIZED VIEW'
+                                    WHEN 'e' THEN 'EXTERNAL TABLE'
+                                    ELSE RELKIND
+                                END AS object_type,
+                                OWNER AS owner
+                            FROM ${database}.._V_TABLE
+                            ORDER BY SCHEMA, TABLENAME
+                        `;
+                    }
+                    headerText = `## Tables in ${database}${schema ? '.' + schema : ''}\n`;
+                }
+
                 const result = await executeQueryHelper(connection, query);
                 
                 if (!result || result.length === 0) {
                     const schemaInfo = schema ? ` in schema ${schema}` : '';
-                    return `No tables found in database ${database}${schemaInfo}.`;
+                    const dbInfo = database ? ` in database ${database}` : ' across all databases';
+                    return `No tables found${dbInfo}${schemaInfo}.`;
                 }
 
                 // Format results as markdown table
                 const lines: string[] = [
-                    `## Tables in ${database}${schema ? '.' + schema : ''}\n`,
-                    '| Schema | Table Name | Type | Owner |',
-                    '|--------|------------|------|-------|'
+                    headerText,
+                    '| Database | Schema | Table Name | Type | Owner |',
+                    '|----------|--------|------------|------|-------|'
                 ];
 
                 for (const row of result) {
+                    const dbName = (row as Record<string, unknown>).DATABASE_NAME || (row as Record<string, unknown>).database_name || '';
                     const schemaName = (row as Record<string, unknown>).SCHEMA_NAME || (row as Record<string, unknown>).schema_name || '';
                     const tableName = (row as Record<string, unknown>).TABLE_NAME || (row as Record<string, unknown>).table_name || '';
                     const objType = (row as Record<string, unknown>).OBJECT_TYPE || (row as Record<string, unknown>).object_type || '';
                     const owner = (row as Record<string, unknown>).OWNER || (row as Record<string, unknown>).owner || '';
-                    lines.push(`| ${schemaName} | ${tableName} | ${objType} | ${owner} |`);
+                    lines.push(`| ${dbName} | ${schemaName} | ${tableName} | ${objType} | ${owner} |`);
                 }
 
                 lines.push(`\n**Total:** ${result.length} object(s)`);
+                if (searchAllDatabases && result.length === 500) {
+                    lines.push('\n*Note: Results limited to 500. Specify a database name to see all objects.*');
+                }
 
                 return lines.join('\n');
             } finally {
@@ -2141,6 +2202,549 @@ Please:
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             return `Failed to retrieve tables: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets list of all databases accessible via the connection.
+     * Used by DatabasesTool.
+     */
+    public async getDatabases(): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                const query = `
+                    SELECT DATABASE, OWNER, CREATEDATE
+                    FROM system.._v_database
+                    ORDER BY DATABASE
+                `;
+                const result = await executeQueryHelper(connection, query);
+
+                if (!result || result.length === 0) {
+                    return 'No databases found.';
+                }
+
+                const lines: string[] = [
+                    '## Databases\n',
+                    '| Database | Owner | Created |',
+                    '|----------|-------|---------|'
+                ];
+
+                for (const row of result) {
+                    const r = row as Record<string, unknown>;
+                    const createDate = r.CREATEDATE ? String(r.CREATEDATE).substring(0, 10) : '';
+                    lines.push(`| ${r.DATABASE} | ${r.OWNER} | ${createDate} |`);
+                }
+
+                lines.push(`\n**Total:** ${result.length} database(s)`);
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to retrieve databases: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets list of schemas in a database.
+     * Used by SchemasTool.
+     */
+    public async getSchemas(database?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                let query: string;
+                let headerText: string;
+
+                if (database) {
+                    query = `
+                        SELECT SCHEMA, OWNER, CREATEDATE
+                        FROM ${database}.._V_SCHEMA
+                        ORDER BY SCHEMA
+                    `;
+                    headerText = `## Schemas in ${database}\n`;
+                } else {
+                    // Get schemas from all databases using global view
+                    query = `
+                        SELECT DISTINCT DBNAME AS DATABASE, SCHEMA, OWNER
+                        FROM _V_OBJECT_DATA
+                        WHERE OBJTYPE IN ('TABLE', 'VIEW', 'PROCEDURE')
+                        ORDER BY DBNAME, SCHEMA
+                        LIMIT 200
+                    `;
+                    headerText = '## Schemas across all databases\n';
+                }
+
+                const result = await executeQueryHelper(connection, query);
+
+                if (!result || result.length === 0) {
+                    return database ? `No schemas found in database ${database}.` : 'No schemas found.';
+                }
+
+                const lines: string[] = [headerText];
+
+                if (database) {
+                    lines.push('| Schema | Owner | Created |');
+                    lines.push('|--------|-------|---------|');
+                    for (const row of result) {
+                        const r = row as Record<string, unknown>;
+                        const createDate = r.CREATEDATE ? String(r.CREATEDATE).substring(0, 10) : '';
+                        lines.push(`| ${r.SCHEMA} | ${r.OWNER} | ${createDate} |`);
+                    }
+                } else {
+                    lines.push('| Database | Schema | Owner |');
+                    lines.push('|----------|--------|-------|');
+                    for (const row of result) {
+                        const r = row as Record<string, unknown>;
+                        lines.push(`| ${r.DATABASE} | ${r.SCHEMA} | ${r.OWNER} |`);
+                    }
+                }
+
+                lines.push(`\n**Total:** ${result.length} schema(s)`);
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to retrieve schemas: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets list of procedures.
+     * Used by ProceduresTool.
+     */
+    public async getProcedures(database?: string, schema?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                let query: string;
+                let headerText: string;
+                const searchAllDatabases = !database;
+
+                if (searchAllDatabases) {
+                    // Search across all databases
+                    query = `
+                        SELECT DBNAME AS DATABASE, SCHEMA, OBJNAME AS PROCEDURE_NAME, OWNER
+                        FROM _V_OBJECT_DATA
+                        WHERE OBJTYPE = 'PROCEDURE'
+                        ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                        ORDER BY DBNAME, SCHEMA, OBJNAME
+                        LIMIT 200
+                    `;
+                    headerText = schema ? `## Procedures in schema ${schema} across all databases\n` : '## Procedures across all databases\n';
+                } else {
+                    query = `
+                        SELECT '${database}' AS DATABASE, SCHEMA, PROCEDURE AS PROCEDURE_NAME, 
+                               PROCEDURESIGNATURE, RETURNS, OWNER, DESCRIPTION
+                        FROM ${database}.._V_PROCEDURE
+                        ${schema ? `WHERE SCHEMA = '${schema.toUpperCase()}'` : ''}
+                        ORDER BY SCHEMA, PROCEDURE
+                        LIMIT 200
+                    `;
+                    headerText = schema ? `## Procedures in ${database}.${schema}\n` : `## Procedures in ${database}\n`;
+                }
+
+                const result = await executeQueryHelper(connection, query);
+
+                if (!result || result.length === 0) {
+                    return 'No procedures found.';
+                }
+
+                const lines: string[] = [headerText];
+
+                if (searchAllDatabases) {
+                    lines.push('| Database | Schema | Procedure | Owner |');
+                    lines.push('|----------|--------|-----------|-------|');
+                    for (const row of result) {
+                        const r = row as Record<string, unknown>;
+                        lines.push(`| ${r.DATABASE} | ${r.SCHEMA} | ${r.PROCEDURE_NAME} | ${r.OWNER} |`);
+                    }
+                } else {
+                    lines.push('| Schema | Procedure | Signature | Returns | Owner |');
+                    lines.push('|--------|-----------|-----------|---------|-------|');
+                    for (const row of result) {
+                        const r = row as Record<string, unknown>;
+                        const sig = r.PROCEDURESIGNATURE ? String(r.PROCEDURESIGNATURE).substring(0, 50) : '';
+                        lines.push(`| ${r.SCHEMA} | ${r.PROCEDURE_NAME} | ${sig} | ${r.RETURNS || ''} | ${r.OWNER} |`);
+                    }
+                }
+
+                lines.push(`\n**Total:** ${result.length} procedure(s)`);
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to retrieve procedures: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets list of views.
+     * Used by ViewsTool.
+     */
+    public async getViews(database?: string, schema?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                let query: string;
+                let headerText: string;
+                const searchAllDatabases = !database;
+
+                if (searchAllDatabases) {
+                    // Search across all databases
+                    query = `
+                        SELECT DBNAME AS DATABASE, SCHEMA, OBJNAME AS VIEW_NAME, OWNER
+                        FROM _V_OBJECT_DATA
+                        WHERE OBJTYPE = 'VIEW'
+                        ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                        ORDER BY DBNAME, SCHEMA, OBJNAME
+                        LIMIT 200
+                    `;
+                    headerText = schema ? `## Views in schema ${schema} across all databases\n` : '## Views across all databases\n';
+                } else {
+                    query = `
+                        SELECT '${database}' AS DATABASE, SCHEMA, VIEWNAME AS VIEW_NAME, OWNER
+                        FROM ${database}.._V_VIEW
+                        ${schema ? `WHERE SCHEMA = '${schema.toUpperCase()}'` : ''}
+                        ORDER BY SCHEMA, VIEWNAME
+                        LIMIT 200
+                    `;
+                    headerText = schema ? `## Views in ${database}.${schema}\n` : `## Views in ${database}\n`;
+                }
+
+                const result = await executeQueryHelper(connection, query);
+
+                if (!result || result.length === 0) {
+                    return 'No views found.';
+                }
+
+                const lines: string[] = [headerText];
+                lines.push('| Database | Schema | View | Owner |');
+                lines.push('|----------|--------|------|-------|');
+                for (const row of result) {
+                    const r = row as Record<string, unknown>;
+                    lines.push(`| ${r.DATABASE} | ${r.SCHEMA} | ${r.VIEW_NAME} | ${r.OWNER} |`);
+                }
+
+                lines.push(`\n**Total:** ${result.length} view(s)`);
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to retrieve views: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets list of external tables with data object information.
+     * Used by ExternalTablesTool.
+     */
+    public async getExternalTables(database?: string, schema?: string, dataObjectPattern?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                let query: string;
+                let headerText: string;
+                const searchAllDatabases = !database;
+                const dataObjFilter = dataObjectPattern ? dataObjectPattern.toUpperCase().replace(/\*/g, '%') : null;
+
+                if (searchAllDatabases) {
+                    // Search across all databases using global views
+                    query = `
+                        SELECT E1.DATABASE, E1.SCHEMA, E1.TABLENAME AS TABLE_NAME, 
+                               E2.EXTOBJNAME AS DATA_OBJECT, E2.OWNER
+                        FROM _V_EXTERNAL E1
+                        LEFT JOIN _V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE 
+                            AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
+                        WHERE 1=1
+                        ${schema ? `AND E1.SCHEMA = '${schema.toUpperCase()}'` : ''}
+                        ${dataObjFilter ? `AND UPPER(E2.EXTOBJNAME) LIKE '${dataObjFilter}'` : ''}
+                        ORDER BY E1.DATABASE, E1.SCHEMA, E1.TABLENAME
+                        LIMIT 200
+                    `;
+                    headerText = '## External Tables across all databases\n';
+                } else {
+                    query = `
+                        SELECT E1.DATABASE, E1.SCHEMA, E1.TABLENAME AS TABLE_NAME, 
+                               E2.EXTOBJNAME AS DATA_OBJECT, E2.OWNER, E1.REMOTESOURCE AS LOCATION
+                        FROM ${database}.._V_EXTERNAL E1
+                        LEFT JOIN ${database}.._V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE 
+                            AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
+                        WHERE 1=1
+                        ${schema ? `AND E1.SCHEMA = '${schema.toUpperCase()}'` : ''}
+                        ${dataObjFilter ? `AND UPPER(E2.EXTOBJNAME) LIKE '${dataObjFilter}'` : ''}
+                        ORDER BY E1.SCHEMA, E1.TABLENAME
+                        LIMIT 200
+                    `;
+                    headerText = schema ? `## External Tables in ${database}.${schema}\n` : `## External Tables in ${database}\n`;
+                }
+
+                const result = await executeQueryHelper(connection, query);
+
+                if (!result || result.length === 0) {
+                    return dataObjFilter 
+                        ? `No external tables found matching data object pattern "${dataObjectPattern}".`
+                        : 'No external tables found.';
+                }
+
+                const lines: string[] = [headerText];
+                
+                if (searchAllDatabases) {
+                    lines.push('| Database | Schema | Table | Data Object | Owner |');
+                    lines.push('|----------|--------|-------|-------------|-------|');
+                    for (const row of result) {
+                        const r = row as Record<string, unknown>;
+                        lines.push(`| ${r.DATABASE} | ${r.SCHEMA} | ${r.TABLE_NAME} | ${r.DATA_OBJECT || ''} | ${r.OWNER || ''} |`);
+                    }
+                } else {
+                    lines.push('| Schema | Table | Data Object | Owner | Location |');
+                    lines.push('|--------|-------|-------------|-------|----------|');
+                    for (const row of result) {
+                        const r = row as Record<string, unknown>;
+                        const loc = r.LOCATION ? String(r.LOCATION).substring(0, 50) : '';
+                        lines.push(`| ${r.SCHEMA} | ${r.TABLE_NAME} | ${r.DATA_OBJECT || ''} | ${r.OWNER || ''} | ${loc} |`);
+                    }
+                }
+
+                lines.push(`\n**Total:** ${result.length} external table(s)`);
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to retrieve external tables: ${msg}`;
+        }
+    }
+
+    /**
+     * Gets the source code/definition of a view or procedure.
+     * Used by GetObjectDefinitionTool.
+     */
+    public async getObjectDefinition(objectName: string, objectType: 'view' | 'procedure', database?: string): Promise<string> {
+        const connectionName = this.connectionManager.getActiveConnectionName();
+        if (!connectionName) {
+            return 'No active database connection. Please connect to a Netezza database first.';
+        }
+
+        try {
+            const connectionDetails = await this.connectionManager.getConnection(connectionName);
+            if (!connectionDetails) {
+                return `Connection "${connectionName}" not found.`;
+            }
+
+            const connection = await createConnectionFromDetails(connectionDetails);
+            if (!connection) {
+                return 'Could not establish database connection.';
+            }
+
+            try {
+                // Parse object name
+                const parts = objectName.split('.');
+                let db: string | undefined;
+                let schema: string | undefined;
+                let objName: string;
+
+                if (parts.length === 3) {
+                    [db, schema, objName] = parts;
+                } else if (parts.length === 2) {
+                    // Could be DB..NAME or SCHEMA.NAME
+                    if (parts[0] === '') {
+                        // ..NAME format - invalid
+                        objName = parts[1];
+                    } else if (parts[1] === '') {
+                        // DB.. format - use db, no schema
+                        db = parts[0];
+                        objName = '';
+                    } else {
+                        [schema, objName] = parts;
+                    }
+                } else {
+                    objName = parts[0];
+                }
+
+                // Use provided database if not in name
+                if (!db && database) {
+                    db = database;
+                }
+
+                objName = objName.toUpperCase();
+
+                let query: string;
+                let definitionField: string;
+
+                if (objectType === 'view') {
+                    if (db) {
+                        query = `
+                            SELECT SCHEMA, VIEWNAME, OWNER, DEFINITION
+                            FROM ${db}.._V_VIEW
+                            WHERE UPPER(VIEWNAME) = '${objName}'
+                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                            LIMIT 1
+                        `;
+                    } else {
+                        // Search across all databases
+                        query = `
+                            SELECT DATABASE, SCHEMA, VIEWNAME, OWNER, DEFINITION
+                            FROM _V_VIEW
+                            WHERE UPPER(VIEWNAME) = '${objName}'
+                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                            LIMIT 5
+                        `;
+                    }
+                    definitionField = 'DEFINITION';
+                } else {
+                    // Procedure
+                    if (db) {
+                        query = `
+                            SELECT SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, ARGUMENTS, 
+                                   EXECUTEDASOWNER, OWNER, DESCRIPTION, PROCEDURESOURCE
+                            FROM ${db}.._V_PROCEDURE
+                            WHERE UPPER(PROCEDURE) = '${objName}'
+                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                            LIMIT 10
+                        `;
+                    } else {
+                        // Search across all databases
+                        query = `
+                            SELECT DATABASE, SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, 
+                                   OWNER, PROCEDURESOURCE
+                            FROM _V_PROCEDURE
+                            WHERE UPPER(PROCEDURE) = '${objName}'
+                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                            LIMIT 10
+                        `;
+                    }
+                    definitionField = 'PROCEDURESOURCE';
+                }
+
+                const result = await executeQueryHelper(connection, query);
+
+                if (!result || result.length === 0) {
+                    return `${objectType === 'view' ? 'View' : 'Procedure'} "${objectName}" not found.`;
+                }
+
+                const lines: string[] = [];
+
+                for (const row of result) {
+                    const r = row as Record<string, unknown>;
+                    const dbName = r.DATABASE || db || '';
+                    const schemaName = r.SCHEMA || '';
+                    const name = r.VIEWNAME || r.PROCEDURE || '';
+
+                    if (objectType === 'view') {
+                        lines.push(`## View: ${dbName}.${schemaName}.${name}\n`);
+                        lines.push(`**Owner:** ${r.OWNER}\n`);
+                        lines.push('### Definition\n');
+                        lines.push('```sql');
+                        lines.push(String(r[definitionField] || ''));
+                        lines.push('```\n');
+                    } else {
+                        lines.push(`## Procedure: ${dbName}.${schemaName}.${name}\n`);
+                        lines.push(`**Signature:** ${r.PROCEDURESIGNATURE || ''}`);
+                        lines.push(`**Returns:** ${r.RETURNS || 'void'}`);
+                        if (r.ARGUMENTS) {
+                            lines.push(`**Arguments:** ${r.ARGUMENTS}`);
+                        }
+                        lines.push(`**Owner:** ${r.OWNER}`);
+                        if (r.EXECUTEDASOWNER !== undefined) {
+                            lines.push(`**Execute as Owner:** ${r.EXECUTEDASOWNER ? 'Yes' : 'No'}`);
+                        }
+                        if (r.DESCRIPTION) {
+                            lines.push(`**Description:** ${r.DESCRIPTION}`);
+                        }
+                        lines.push('\n### Source Code\n');
+                        lines.push('```sql');
+                        lines.push(String(r[definitionField] || ''));
+                        lines.push('```\n');
+                    }
+                }
+
+                return lines.join('\n');
+            } finally {
+                connection.close();
+            }
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            return `Failed to get ${objectType} definition: ${msg}`;
         }
     }
 
@@ -2403,42 +3007,53 @@ Please:
                 return `Connection "${connectionName}" not found.`;
             }
 
-            let db = database;
-            if (!db) {
-                db = await this.connectionManager.getCurrentDatabase(connectionName) || undefined;
-            }
-            if (!db) {
-                return 'Could not determine database. Please specify database name.';
-            }
-
             const connection = await createConnectionFromDetails(connectionDetails);
             if (!connection) {
                 return 'Could not establish database connection.';
             }
 
-            const lines: string[] = [`## Schema Search Results for "${pattern}" in ${db}\n`];
             const searchPattern = pattern.toUpperCase().replace(/\*/g, '%');
+            // When database is specified, search only in that database
+            // When not specified, search across ALL databases using global system views
+            const searchAllDatabases = !database;
+            const dbScope = database ? ` in ${database}` : ' across all databases';
+            const lines: string[] = [`## Schema Search Results for "${pattern}"${dbScope}\n`];
 
             try {
                 // Search tables
                 if (searchType === 'tables' || searchType === 'all') {
-                    const tableQuery = `
-                        SELECT SCHEMA, TABLENAME, 
-                            CASE RELKIND WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE RELKIND END AS TYPE
-                        FROM ${db}._V_TABLE
-                        WHERE UPPER(TABLENAME) LIKE '${searchPattern}'
-                        ORDER BY SCHEMA, TABLENAME
-                        LIMIT 50
-                    `;
+                    let tableQuery: string;
+                    if (searchAllDatabases) {
+                        // Use global _V_OBJECT_DATA view to search across all databases
+                        tableQuery = `
+                            SELECT DBNAME AS DATABASE, SCHEMA, OBJNAME AS TABLENAME, 
+                                CASE OBJTYPE WHEN 'TABLE' THEN 'TABLE' WHEN 'VIEW' THEN 'VIEW' 
+                                     WHEN 'MATERIALIZED VIEW' THEN 'MVIEW' WHEN 'EXTERNAL TABLE' THEN 'EXTERNAL' ELSE OBJTYPE END AS TYPE
+                            FROM _V_OBJECT_DATA 
+                            WHERE UPPER(OBJNAME) LIKE '${searchPattern}'
+                            AND OBJTYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
+                            ORDER BY DBNAME, SCHEMA, OBJNAME
+                            LIMIT 100
+                        `;
+                    } else {
+                        tableQuery = `
+                            SELECT '${database}' AS DATABASE, SCHEMA, TABLENAME, 
+                                CASE RELKIND WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE RELKIND END AS TYPE
+                            FROM ${database}.._V_TABLE
+                            WHERE UPPER(TABLENAME) LIKE '${searchPattern}'
+                            ORDER BY SCHEMA, TABLENAME
+                            LIMIT 100
+                        `;
+                    }
                     const tableResults = await executeQueryHelper(connection, tableQuery);
 
                     if (tableResults && tableResults.length > 0) {
                         lines.push('### Tables/Views Found\n');
-                        lines.push('| Schema | Name | Type |');
-                        lines.push('|--------|------|------|');
+                        lines.push('| Database | Schema | Name | Type |');
+                        lines.push('|----------|--------|------|------|');
                         for (const row of tableResults) {
                             const r = row as Record<string, unknown>;
-                            lines.push(`| ${r.SCHEMA} | ${r.TABLENAME} | ${r.TYPE} |`);
+                            lines.push(`| ${r.DATABASE} | ${r.SCHEMA} | ${r.TABLENAME} | ${r.TYPE} |`);
                         }
                         lines.push(`\n*Found ${tableResults.length} table(s)/view(s)*\n`);
                     } else if (searchType === 'tables') {
@@ -2448,23 +3063,37 @@ Please:
 
                 // Search columns
                 if (searchType === 'columns' || searchType === 'all') {
-                    const columnQuery = `
-                        SELECT t.SCHEMA, t.TABLENAME, c.NAME AS COLUMN_NAME, c.TYPE AS DATA_TYPE
-                        FROM ${db}._V_TABLE t
-                        JOIN ${db}._V_RELATION_COLUMN c ON t.OBJID = c.OBJID
-                        WHERE UPPER(c.NAME) LIKE '${searchPattern}'
-                        ORDER BY t.SCHEMA, t.TABLENAME, c.NAME
-                        LIMIT 100
-                    `;
+                    let columnQuery: string;
+                    if (searchAllDatabases) {
+                        // Use global _V_RELATION_COLUMN joined with _V_OBJECT_DATA to search across all databases
+                        columnQuery = `
+                            SELECT O.DBNAME AS DATABASE, O.SCHEMA, O.OBJNAME AS TABLENAME, 
+                                   C.ATTNAME AS COLUMN_NAME, C.FORMAT_TYPE AS DATA_TYPE
+                            FROM _V_RELATION_COLUMN C
+                            JOIN _V_OBJECT_DATA O ON C.OBJID = O.OBJID
+                            WHERE UPPER(C.ATTNAME) LIKE '${searchPattern}'
+                            ORDER BY O.DBNAME, O.SCHEMA, O.OBJNAME, C.ATTNAME
+                            LIMIT 100
+                        `;
+                    } else {
+                        columnQuery = `
+                            SELECT '${database}' AS DATABASE, t.SCHEMA, t.TABLENAME, c.NAME AS COLUMN_NAME, c.TYPE AS DATA_TYPE
+                            FROM ${database}.._V_TABLE t
+                            JOIN ${database}.._V_RELATION_COLUMN c ON t.OBJID = c.OBJID
+                            WHERE UPPER(c.NAME) LIKE '${searchPattern}'
+                            ORDER BY t.SCHEMA, t.TABLENAME, c.NAME
+                            LIMIT 100
+                        `;
+                    }
                     const columnResults = await executeQueryHelper(connection, columnQuery);
 
                     if (columnResults && columnResults.length > 0) {
                         lines.push('### Columns Found\n');
-                        lines.push('| Schema | Table | Column | Data Type |');
-                        lines.push('|--------|-------|--------|-----------|');
+                        lines.push('| Database | Schema | Table | Column | Data Type |');
+                        lines.push('|----------|--------|-------|--------|-----------|');
                         for (const row of columnResults) {
                             const r = row as Record<string, unknown>;
-                            lines.push(`| ${r.SCHEMA} | ${r.TABLENAME} | ${r.COLUMN_NAME} | ${r.DATA_TYPE} |`);
+                            lines.push(`| ${r.DATABASE} | ${r.SCHEMA} | ${r.TABLENAME} | ${r.COLUMN_NAME} | ${r.DATA_TYPE} |`);
                         }
                         lines.push(`\n*Found ${columnResults.length} column(s)*\n`);
                     } else if (searchType === 'columns') {
@@ -2555,21 +3184,15 @@ Please:
                 // Get table info from system catalog
                 const infoQuery = `
                     SELECT 
-                        t.RELTUPLES AS EST_ROWS,
-                        t.RELPAGES AS PAGES,
-                        t.RELNATTS AS COLUMNS,
                         d.ATTNAME AS DIST_KEY,
                         t.OWNER
-                    FROM ${db}._V_TABLE t
-                    LEFT JOIN ${db}._V_TABLE_DIST_MAP d ON t.OBJID = d.OBJID
+                    FROM ${db}.._V_TABLE t
+                    LEFT JOIN ${db}.._V_TABLE_DIST_MAP d ON t.OBJID = d.OBJID
                     WHERE t.SCHEMA = '${schema}' AND t.TABLENAME = '${table}'
                 `;
                 const infoResult = await executeQueryHelper(connection, infoQuery);
                 if (infoResult && infoResult.length > 0) {
                     const info = infoResult[0] as Record<string, unknown>;
-                    lines.push(`**Estimated Rows (catalog):** ${Number(info.EST_ROWS || 0).toLocaleString()}`);
-                    lines.push(`**Pages:** ${info.PAGES || 'N/A'}`);
-                    lines.push(`**Columns:** ${info.COLUMNS || 'N/A'}`);
                     lines.push(`**Distribution Key:** ${info.DIST_KEY || 'RANDOM'}`);
                     lines.push(`**Owner:** ${info.OWNER || 'N/A'}`);
                 }
@@ -2650,7 +3273,7 @@ Please:
 
             // Parse object name
             const parts = objectName.split('.');
-            let objName = parts[parts.length - 1].toUpperCase();
+            const objName = parts[parts.length - 1].toUpperCase();
 
             const lines: string[] = [`## Dependencies for ${objectName}\n`];
 
@@ -2658,7 +3281,7 @@ Please:
                 // Find views that depend on this object
                 const dependentViewsQuery = `
                     SELECT v.SCHEMA, v.VIEWNAME, v.OWNER
-                    FROM ${db}._V_VIEW v
+                    FROM ${db}.._V_VIEW v
                     WHERE UPPER(v.DEFINITION) LIKE '%${objName}%'
                     AND v.VIEWNAME != '${objName}'
                     ORDER BY v.SCHEMA, v.VIEWNAME
@@ -2683,7 +3306,7 @@ Please:
                 // If it's a view, show what it depends on
                 const viewDefQuery = `
                     SELECT DEFINITION
-                    FROM ${db}._V_VIEW
+                    FROM ${db}.._V_VIEW
                     WHERE UPPER(VIEWNAME) = '${objName}'
                     LIMIT 1
                 `;
@@ -2699,7 +3322,7 @@ Please:
                 // Find procedures that reference this object
                 const procQuery = `
                     SELECT SCHEMA, PROCEDURE AS PROC_NAME, OWNER
-                    FROM ${db}._V_PROCEDURE
+                    FROM ${db}.._V_PROCEDURE
                     WHERE UPPER(PROCEDURESOURCE) LIKE '%${objName}%'
                     ORDER BY SCHEMA, PROCEDURE
                     LIMIT 25
@@ -2924,12 +3547,13 @@ export class ColumnsTool implements vscode.LanguageModelTool<IColumnsToolParamet
  * Interface for GetTables Tool input parameters
  */
 export interface ITablesToolParameters {
-    database: string;
+    database?: string;
     schema?: string;
 }
 
 /**
- * Language Model Tool for getting list of tables from a database.
+ * Language Model Tool for getting list of tables from a database or all databases.
+ * When database is not specified, searches across ALL accessible databases.
  * Users can reference it with #getTables in chat.
  */
 export class TablesTool implements vscode.LanguageModelTool<ITablesToolParameters> {
@@ -2941,13 +3565,14 @@ export class TablesTool implements vscode.LanguageModelTool<ITablesToolParameter
         _token: vscode.CancellationToken
     ): Promise<vscode.PreparedToolInvocation> {
         const schemaInfo = options.input.schema ? ` (schema: ${options.input.schema})` : '';
+        const dbInfo = options.input.database ? `database ${options.input.database}` : 'all databases';
 
         return {
-            invocationMessage: `Fetching tables from database ${options.input.database}${schemaInfo}...`,
+            invocationMessage: `Fetching tables from ${dbInfo}${schemaInfo}...`,
             confirmationMessages: {
                 title: 'Get Tables List',
                 message: new vscode.MarkdownString(
-                    `Fetch list of tables from database **${options.input.database}**${schemaInfo}?`
+                    `Fetch list of tables from **${dbInfo}**${schemaInfo}?`
                 )
             }
         };
@@ -2960,10 +3585,7 @@ export class TablesTool implements vscode.LanguageModelTool<ITablesToolParameter
         try {
             const { database, schema } = options.input;
             
-            if (!database) {
-                throw new Error('Database name is required.');
-            }
-
+            // Database is now optional - when not specified, searches all databases
             const tablesInfo = await this.copilotService.getTablesFromDatabase(database, schema);
 
             return new vscode.LanguageModelToolResult([
@@ -3372,6 +3994,313 @@ export class ValidateSqlTool implements vscode.LanguageModelTool<IValidateSqlToo
         } catch (e) {
             const errorMsg = e instanceof Error ? e.message : String(e);
             throw new Error(`SQL validation failed: ${errorMsg}`);
+        }
+    }
+}
+
+// ========== NEW TOOLS - Databases, Schemas, Procedures, Views, External Tables ==========
+
+/**
+ * Interface for Databases Tool input parameters
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface IDatabasesToolParameters {
+    // No parameters - lists all databases
+}
+
+/**
+ * Language Model Tool for getting list of databases.
+ * Users can reference it with #databases in chat.
+ */
+export class DatabasesTool implements vscode.LanguageModelTool<IDatabasesToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        _options: vscode.LanguageModelToolInvocationPrepareOptions<IDatabasesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        return {
+            invocationMessage: 'Fetching list of databases...',
+            confirmationMessages: {
+                title: 'Get Databases',
+                message: new vscode.MarkdownString('Fetch list of all databases accessible via the current connection?')
+            }
+        };
+    }
+
+    async invoke(
+        _options: vscode.LanguageModelToolInvocationOptions<IDatabasesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const result = await this.copilotService.getDatabases();
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get databases: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for Schemas Tool input parameters
+ */
+export interface ISchemasToolParameters {
+    database?: string;
+}
+
+/**
+ * Language Model Tool for getting list of schemas.
+ * Users can reference it with #schemas in chat.
+ */
+export class SchemasTool implements vscode.LanguageModelTool<ISchemasToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<ISchemasToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : ' across all databases';
+
+        return {
+            invocationMessage: `Fetching schemas${dbInfo}...`,
+            confirmationMessages: {
+                title: 'Get Schemas',
+                message: new vscode.MarkdownString(`Fetch list of schemas${dbInfo}?`)
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<ISchemasToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const result = await this.copilotService.getSchemas(options.input.database);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get schemas: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for Procedures Tool input parameters
+ */
+export interface IProceduresToolParameters {
+    database?: string;
+    schema?: string;
+}
+
+/**
+ * Language Model Tool for getting list of procedures.
+ * Users can reference it with #procedures in chat.
+ */
+export class ProceduresTool implements vscode.LanguageModelTool<IProceduresToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IProceduresToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : ' across all databases';
+        const schemaInfo = options.input.schema ? `, schema ${options.input.schema}` : '';
+
+        return {
+            invocationMessage: `Fetching procedures${dbInfo}${schemaInfo}...`,
+            confirmationMessages: {
+                title: 'Get Procedures',
+                message: new vscode.MarkdownString(`Fetch list of stored procedures${dbInfo}${schemaInfo}?`)
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IProceduresToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const result = await this.copilotService.getProcedures(options.input.database, options.input.schema);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get procedures: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for Views Tool input parameters
+ */
+export interface IViewsToolParameters {
+    database?: string;
+    schema?: string;
+}
+
+/**
+ * Language Model Tool for getting list of views.
+ * Users can reference it with #views in chat.
+ */
+export class ViewsTool implements vscode.LanguageModelTool<IViewsToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IViewsToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : ' across all databases';
+        const schemaInfo = options.input.schema ? `, schema ${options.input.schema}` : '';
+
+        return {
+            invocationMessage: `Fetching views${dbInfo}${schemaInfo}...`,
+            confirmationMessages: {
+                title: 'Get Views',
+                message: new vscode.MarkdownString(`Fetch list of views${dbInfo}${schemaInfo}?`)
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IViewsToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const result = await this.copilotService.getViews(options.input.database, options.input.schema);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get views: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for ExternalTables Tool input parameters
+ */
+export interface IExternalTablesToolParameters {
+    database?: string;
+    schema?: string;
+    dataObjectPattern?: string;
+}
+
+/**
+ * Language Model Tool for getting list of external tables.
+ * Users can reference it with #externalTables in chat.
+ */
+export class ExternalTablesTool implements vscode.LanguageModelTool<IExternalTablesToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IExternalTablesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : ' across all databases';
+        const schemaInfo = options.input.schema ? `, schema ${options.input.schema}` : '';
+        const dataObjInfo = options.input.dataObjectPattern ? `, data object matching "${options.input.dataObjectPattern}"` : '';
+
+        return {
+            invocationMessage: `Fetching external tables${dbInfo}${schemaInfo}${dataObjInfo}...`,
+            confirmationMessages: {
+                title: 'Get External Tables',
+                message: new vscode.MarkdownString(`Fetch list of external tables${dbInfo}${schemaInfo}${dataObjInfo}?`)
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IExternalTablesToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const result = await this.copilotService.getExternalTables(
+                options.input.database, 
+                options.input.schema,
+                options.input.dataObjectPattern
+            );
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get external tables: ${errorMsg}`);
+        }
+    }
+}
+
+/**
+ * Interface for GetObjectDefinition Tool input parameters
+ */
+export interface IGetObjectDefinitionToolParameters {
+    objectName: string;
+    objectType: 'view' | 'procedure';
+    database?: string;
+}
+
+/**
+ * Language Model Tool for getting view/procedure source code.
+ * Users can reference it with #objectDefinition in chat.
+ */
+export class GetObjectDefinitionTool implements vscode.LanguageModelTool<IGetObjectDefinitionToolParameters> {
+    
+    constructor(private copilotService: CopilotService) {}
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<IGetObjectDefinitionToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const dbInfo = options.input.database ? ` in ${options.input.database}` : '';
+        const typeName = options.input.objectType === 'view' ? 'view' : 'procedure';
+
+        return {
+            invocationMessage: `Fetching ${typeName} definition for ${options.input.objectName}${dbInfo}...`,
+            confirmationMessages: {
+                title: `Get ${typeName.charAt(0).toUpperCase() + typeName.slice(1)} Definition`,
+                message: new vscode.MarkdownString(`Fetch source code of ${typeName} **${options.input.objectName}**${dbInfo}?`)
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<IGetObjectDefinitionToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        try {
+            const { objectName, objectType, database } = options.input;
+            
+            if (!objectName) {
+                throw new Error('Object name is required.');
+            }
+            if (!objectType || (objectType !== 'view' && objectType !== 'procedure')) {
+                throw new Error('Object type must be "view" or "procedure".');
+            }
+
+            const result = await this.copilotService.getObjectDefinition(objectName, objectType, database);
+
+            return new vscode.LanguageModelToolResult([
+                new vscode.LanguageModelTextPart(result)
+            ]);
+        } catch (e) {
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            throw new Error(`Failed to get object definition: ${errorMsg}`);
         }
     }
 }

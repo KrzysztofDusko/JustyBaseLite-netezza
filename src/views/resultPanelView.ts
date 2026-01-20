@@ -152,12 +152,29 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         this._postMessageToWebview({ command: 'copySelection' });
     }
 
+    /**
+     * Check if a URI scheme is valid for result tracking.
+     * Only 'file' (saved files) and 'untitled' (new unsaved files) are allowed.
+     * This prevents creating result tabs for Copilot chat code blocks, output panels, etc.
+     */
+    private _isValidSourceUri(sourceUri: string): boolean {
+        return sourceUri.startsWith('file:') || sourceUri.startsWith('untitled:');
+    }
+
     public setActiveSource(sourceUri: string) {
-        if (this._activeSourceUri === sourceUri) return;
-        this._activeSourceUri = sourceUri;
-        if (!this._resultsMap.has(sourceUri)) {
-            this._resultsMap.set(sourceUri, []);
+        // Ignore invalid URI schemes (e.g., vscode-chat-code-block, output, etc.)
+        if (!this._isValidSourceUri(sourceUri)) {
+            return;
         }
+        if (this._activeSourceUri === sourceUri) return;
+        
+        // Only switch to this source if it already has results
+        // Don't create empty tabs for files that never ran SQL
+        if (!this._resultsMap.has(sourceUri)) {
+            return;
+        }
+        
+        this._activeSourceUri = sourceUri;
         this._updateWebview();
     }
 
@@ -166,6 +183,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
      * Clears unpinned results and sets up an initial "Execution Log" result set.
      */
     public startExecution(sourceUri: string) {
+        // Ignore invalid URI schemes
+        if (!this._isValidSourceUri(sourceUri)) {
+            return;
+        }
         this._executingSources.add(sourceUri);
         this._cancelledSources.delete(sourceUri);
         // Clear unpinned results for this source
@@ -325,20 +346,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
      */
     public finalizeExecution(sourceUri: string) {
         this._executingSources.delete(sourceUri);
-        // Unpin all auto-pinned results for this source, EXCEPT errors
-        // We want errors to persist until explicitly cleared or replaced
-        const results = this._resultsMap.get(sourceUri) || [];
+        // Unpin all auto-pinned results for this source (including errors)
 
         for (const resultId of this._autoPinnedResults) {
             const pin = this._pinnedResults.get(resultId);
             if (pin && pin.sourceUri === sourceUri) {
-                // Check if the result is an error
-                const rs = results[pin.resultSetIndex];
-                if (rs && rs.isError) {
-                    // this.log(sourceUri, `DEBUG: Preserving error tab(ID: ${ resultId }, Index: ${ pin.resultSetIndex })`);
-                    continue; // Keep pin for error
-                }
-                // this.log(sourceUri, `DEBUG: Unpinning tab(ID: ${ resultId }, Index: ${ pin.resultSetIndex })`);
                 this._pinnedResults.delete(resultId);
             }
         }

@@ -28,12 +28,12 @@ export class ConnectionManager {
     private _documentPersistentConnections: Map<string, NzConnection> = new Map();
 
     // Per-document keep connection open setting: Map<documentUri, boolean>
+    // Default is true for new documents
     private _documentKeepConnectionOpen: Map<string, boolean> = new Map();
 
-    // Global persistent connections (deprecated, kept for backward compatibility): { [name]: odbc_connection }
-    private _persistentConnections: Map<string, NzConnection> = new Map();
-
-    private _keepConnectionOpen: boolean = true;
+    // Per-document database override: Map<documentUri, databaseName>
+    // When set, overrides the default database from connection details
+    private _documentDatabaseOverride: Map<string, string> = new Map();
 
     // Promise that resolves when connections are loaded
     private _loadingPromise: Promise<void>;
@@ -47,6 +47,9 @@ export class ConnectionManager {
 
     private _onDidChangeDocumentConnection = new vscode.EventEmitter<string>();
     readonly onDidChangeDocumentConnection = this._onDidChangeDocumentConnection.event;
+
+    private _onDidChangeDocumentDatabase = new vscode.EventEmitter<string>();
+    readonly onDidChangeDocumentDatabase = this._onDidChangeDocumentDatabase.event;
 
     constructor(private context: vscode.ExtensionContext) {
         this._loadingPromise = this.loadConnections();
@@ -120,9 +123,9 @@ export class ConnectionManager {
     async deleteConnection(name: string) {
         await this.ensureLoaded();
         if (this._connections[name]) {
-            // Close persistent connection if exists
-            await this.closePersistentConnection(name);
-
+            // Close any document persistent connections using this connection
+            // (documents will need to reconnect with different connection)
+            
             delete this._connections[name];
 
             // If active connection was deleted, reset active
@@ -180,14 +183,15 @@ export class ConnectionManager {
 
     /**
      * Get keep connection open setting for a specific document (tab)
-     * Falls back to global setting if not set per-document
+     * Default is true for new documents
      */
     getDocumentKeepConnectionOpen(documentUri: string): boolean {
         const perDoc = this._documentKeepConnectionOpen.get(documentUri);
         if (perDoc !== undefined) {
             return perDoc;
         }
-        return this._keepConnectionOpen;
+        // Default: keep connection open for new documents
+        return true;
     }
 
     /**
@@ -209,6 +213,7 @@ export class ConnectionManager {
 
     /**
      * Get persistent connection for a specific document (tab)
+     * Uses document-specific database override if set
      */
     async getDocumentPersistentConnection(documentUri: string, connectionName?: string): Promise<NzConnection> {
         const targetName = connectionName || this.getConnectionForExecution(documentUri);
@@ -221,6 +226,9 @@ export class ConnectionManager {
             throw new Error(`Connection '${targetName}' not found or invalid`);
         }
 
+        // Get effective database (override or default from connection)
+        const effectiveDatabase = this._documentDatabaseOverride.get(documentUri) || details.database;
+
         const existing = this._documentPersistentConnections.get(documentUri);
 
         // If existing connection is for a different connection name, close it
@@ -231,13 +239,13 @@ export class ConnectionManager {
             return existing;
         }
 
-        // Create new connection for this document
+        // Create new connection for this document with effective database
         const { createNzConnection } = require('./nzConnectionFactory');
 
         const conn = createNzConnection({
             host: details.host,
             port: details.port || 5480,
-            database: details.database,
+            database: effectiveDatabase,
             user: details.user,
             password: details.password
         }) as NzConnection;
@@ -271,76 +279,57 @@ export class ConnectionManager {
         }
     }
 
-    // ========== Legacy Global Keep Connection (for backward compatibility) ==========
-
-    setKeepConnectionOpen(keepOpen: boolean) {
-        this._keepConnectionOpen = keepOpen;
-        if (!keepOpen) {
-            this.closeAllPersistentConnections();
-        }
-    }
-
-    getKeepConnectionOpen(): boolean {
-        return this._keepConnectionOpen;
-    }
-
-    async getPersistentConnection(name?: string): Promise<NzConnection> {
-        const targetName = name || this._activeConnectionName;
-        if (!targetName) {
-            throw new Error('No connection selected');
-        }
-
-        const details = await this.getConnection(targetName);
-        if (!details) {
-            throw new Error(`Connection '${targetName}' not found or invalid`);
-        }
-
-        let existing = this._persistentConnections.get(targetName);
-
-        if (!existing) {
-            // Use typed factory function for proper type safety
-            const { createNzConnection } = require('./nzConnectionFactory');
-
-            const conn = createNzConnection({
-                host: details.host,
-                port: details.port || 5480,
-                database: details.database,
-                user: details.user,
-                password: details.password
-            }) as NzConnection;
-            await conn.connect();
-            existing = conn;
-
-            this._persistentConnections.set(targetName, existing);
-        }
-
-        return existing;
-    }
-
-    async closePersistentConnection(name: string) {
-        const conn = this._persistentConnections.get(name);
-        if (conn) {
-            try {
-                await conn.close();
-            } catch (e) {
-                console.error(`Error closing connection ${name}:`, e);
-            }
-            this._persistentConnections.delete(name);
-        }
-    }
-
-    async closeAllPersistentConnections() {
-        for (const name of this._persistentConnections.keys()) {
-            await this.closePersistentConnection(name);
-        }
-    }
-
     dispose() {
-        this.closeAllPersistentConnections();
         this.closeAllDocumentPersistentConnections();
         this._onDidChangeConnections.dispose();
         this._onDidChangeActiveConnection.dispose();
         this._onDidChangeDocumentConnection.dispose();
+        this._onDidChangeDocumentDatabase.dispose();
+    }
+
+    // ========== Per-Document Database Override ==========
+
+    /**
+     * Get database override for a specific document (tab)
+     * Returns undefined if no override set (use connection's default database)
+     */
+    getDocumentDatabase(documentUri: string): string | undefined {
+        return this._documentDatabaseOverride.get(documentUri);
+    }
+
+    /**
+     * Set database override for a specific document (tab)
+     * This will close the existing persistent connection to force reconnect with new database
+     */
+    setDocumentDatabase(documentUri: string, database: string): void {
+        this._documentDatabaseOverride.set(documentUri, database);
+        // Close persistent connection to force reconnect with new database
+        this.closeDocumentPersistentConnection(documentUri);
+        this._onDidChangeDocumentDatabase.fire(documentUri);
+    }
+
+    /**
+     * Clear database override for a specific document (revert to connection's default)
+     */
+    clearDocumentDatabase(documentUri: string): void {
+        this._documentDatabaseOverride.delete(documentUri);
+        this.closeDocumentPersistentConnection(documentUri);
+        this._onDidChangeDocumentDatabase.fire(documentUri);
+    }
+
+    /**
+     * Get the effective database for a document
+     * Returns override if set, otherwise falls back to connection's default database
+     */
+    async getEffectiveDatabase(documentUri: string): Promise<string | null> {
+        const override = this._documentDatabaseOverride.get(documentUri);
+        if (override) {
+            return override;
+        }
+        const connectionName = this.getConnectionForExecution(documentUri);
+        if (!connectionName) return null;
+        const details = await this.getConnection(connectionName);
+        return details?.database || null;
     }
 
     // Per-document connection management
@@ -357,6 +346,7 @@ export class ConnectionManager {
 
     clearDocumentConnection(documentUri: string) {
         this._documentConnections.delete(documentUri);
+        this._documentDatabaseOverride.delete(documentUri);
         this.closeDocumentPersistentConnection(documentUri);
         this._documentKeepConnectionOpen.delete(documentUri);
         this._onDidChangeDocumentConnection.fire(documentUri);

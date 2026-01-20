@@ -63,6 +63,10 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
+                // Get query timeout from configuration
+                const config = vscode.workspace.getConfiguration('netezza');
+                const queryTimeout = config.get<number>('queryTimeout', 1800);
+
                 await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
@@ -81,7 +85,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                                 progress.report({ message });
                                 outputChannel.appendLine(`[XLSB Export] ${message}`);
                             },
-                            undefined,
+                            queryTimeout,
                             token
                         );
 
@@ -132,6 +136,10 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
+                // Get query timeout from configuration
+                const config = vscode.workspace.getConfiguration('netezza');
+                const queryTimeout = config.get<number>('queryTimeout', 1800);
+
                 await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
@@ -140,7 +148,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     },
                     async (progress, token) => {
                         const { exportToCsv } = await import('../export/csvExporter');
-                        await exportToCsv(connectionDetails, text, uri.fsPath, progress, undefined, token);
+                        await exportToCsv(connectionDetails, text, uri.fsPath, progress, queryTimeout, token);
                     }
                 );
 
@@ -176,6 +184,10 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
+                // Get query timeout from configuration
+                const config = vscode.workspace.getConfiguration('netezza');
+                const queryTimeout = config.get<number>('queryTimeout', 1800);
+
                 const startTime = Date.now();
 
                 await vscode.window.withProgress(
@@ -198,7 +210,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                                 progress.report({ message });
                                 outputChannel.appendLine(`[XLSB Clipboard] ${message}`);
                             },
-                            undefined,
+                            queryTimeout,
                             token
                         );
 
@@ -263,6 +275,10 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                     throw new Error('Connection not configured. Please connect via Netezza: Connect...');
                 }
 
+                // Get query timeout from configuration
+                const config = vscode.workspace.getConfiguration('netezza');
+                const queryTimeout = config.get<number>('queryTimeout', 1800);
+
                 await vscode.window.withProgress(
                     {
                         location: vscode.ProgressLocation.Notification,
@@ -281,7 +297,7 @@ export function registerExportCommands(deps: ExportCommandsDependencies): vscode
                                 progress.report({ message });
                                 outputChannel.appendLine(`[XLSB Export] ${message}`);
                             },
-                            undefined,
+                            queryTimeout,
                             token
                         );
 
