@@ -18,7 +18,7 @@ import { NetezzaDocumentLinkProvider } from './providers/documentLinkProvider';
 import { NetezzaFoldingRangeProvider } from './providers/foldingProvider';
 import { QueryHistoryView } from './views/queryHistoryView';
 import { EditDataProvider, EditDataItem } from './views/editDataProvider';
-import { MetadataCache } from './metadataCache';
+import { MetadataCache, DatabaseMetadata } from './metadataCache';
 import { activateSqlLinter } from './providers/sqlLinterProvider';
 import { NetezzaLinterCodeActionProvider } from './providers/linterCodeActions';
 import { EtlDesignerView } from './views/etlDesignerView';
@@ -141,8 +141,17 @@ async function checkForConflictingExtensions(_context: vscode.ExtensionContext):
 async function getDatabaseList(
     context: vscode.ExtensionContext,
     connectionManager: ConnectionManager,
-    connectionName: string
+    connectionName: string,
+    metadataCache?: MetadataCache
 ): Promise<string[]> {
+    // Try to get from cache first
+    if (metadataCache) {
+        const cached = metadataCache.getDatabases(connectionName);
+        if (cached && cached.length > 0) {
+            return cached.map(db => db.DATABASE);
+        }
+    }
+
     const query = `SELECT DATABASE FROM _V_DATABASE ORDER BY DATABASE`;
     
     const result = await runQueryRaw(
@@ -157,7 +166,21 @@ async function getDatabaseList(
     );
 
     if (result.data && result.data.length > 0) {
-        return result.data.map(row => String(row[0]));
+        const databases = result.data.map(row => String(row[0]));
+
+        // Update cache if available
+        if (metadataCache) {
+            const dbMetadata = databases.map(db => ({
+                DATABASE: db,
+                label: db,
+                kind: 9, // Module
+                detail: 'Database'
+            }));
+            // Type assertion to match internal cache types
+            metadataCache.setDatabases(connectionName, dbMetadata as DatabaseMetadata[]);
+        }
+
+        return databases;
     }
     return [];
 }
@@ -211,7 +234,16 @@ export async function activate(context: vscode.ExtensionContext) {
             );
         }
     });
-    connectionManager.onDidChangeConnections(updateActiveConnectionStatusBar);
+    connectionManager.onDidChangeConnections(() => {
+        updateActiveConnectionStatusBar();
+        // Trigger prefetch if there is an active connection (e.g. after initial load)
+        const activeConnection = connectionManager.getActiveConnectionName();
+        if (activeConnection && !metadataCache.hasConnectionPrefetchTriggered(activeConnection)) {
+            metadataCache.triggerConnectionPrefetch(activeConnection, q =>
+                runQueryRaw(context, q, true, connectionManager, activeConnection)
+            );
+        }
+    });
     connectionManager.onDidChangeDocumentConnection((documentUri: string) => {
         updateActiveConnectionStatusBar();
         updateActiveDatabaseStatusBar();
@@ -317,7 +349,7 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(...queryDisposables);
 
     // ========== Copilot Commands ==========
-    const copilotService = new CopilotService(connectionManager, context);
+    const copilotService = new CopilotService(connectionManager, context, metadataCache);
 
     const copilotDisposables = [
         vscode.commands.registerCommand('netezza.copilotFixSql', async () => {
@@ -690,7 +722,7 @@ END_PROC;`;
 
             // Get list of databases from the server
             try {
-                const databases = await getDatabaseList(context, connectionManager, connectionName);
+                const databases = await getDatabaseList(context, connectionManager, connectionName, metadataCache);
                 
                 if (databases.length === 0) {
                     vscode.window.showWarningMessage('No databases found on server.');

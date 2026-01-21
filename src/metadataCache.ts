@@ -17,7 +17,7 @@ import { searchCache } from './metadata/search';
 import { PerKeyEntry, CacheType, SearchResult, CachedObjectInfo, ObjectWithSchema, DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from './metadata/types';
 
 // Re-export types for external use
-export { PerKeyEntry, CacheType } from './metadata/types';
+export { PerKeyEntry, CacheType, DatabaseMetadata } from './metadata/types';
 
 /**
  * Main metadata cache class providing unified API

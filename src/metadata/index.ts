@@ -10,3 +10,6 @@ export { CachePersistence } from './persistence';
 export { CachePrefetcher, QueryRunnerFn } from './prefetch';
 export { searchCache } from './search';
 
+// Netezza system queries centralization
+export * from './systemQueries';
+

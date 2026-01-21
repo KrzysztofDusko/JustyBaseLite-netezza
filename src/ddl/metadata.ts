@@ -6,6 +6,7 @@
 import { ColumnInfo, KeyInfo } from './types';
 import { executeQueryHelper } from './helpers';
 import { NzConnection } from '../types';
+import { NZ_QUERIES } from '../metadata/systemQueries';
 
 /**
  * Get table column information from Netezza system views
@@ -16,26 +17,8 @@ export async function getColumns(
     schema: string,
     tableName: string
 ): Promise<ColumnInfo[]> {
-    const sql = `
-        SELECT 
-            X.OBJID::INT AS OBJID
-            , X.ATTNAME
-            , X.DESCRIPTION
-            , X.FORMAT_TYPE AS FULL_TYPE
-            , X.ATTNOTNULL::BOOL AS ATTNOTNULL
-            , X.COLDEFAULT
-        FROM
-            ${database.toUpperCase()}.._V_RELATION_COLUMN X
-        INNER JOIN
-            ${database.toUpperCase()}.._V_OBJECT_DATA D ON X.OBJID = D.OBJID
-        WHERE
-            X.TYPE IN ('TABLE','VIEW','EXTERNAL TABLE', 'SEQUENCE','SYSTEM VIEW','SYSTEM TABLE')
-            AND X.OBJID NOT IN (4,5)
-            AND D.SCHEMA = '${schema.toUpperCase()}'
-            AND D.OBJNAME = '${tableName.toUpperCase()}'
-        ORDER BY 
-            X.OBJID, X.ATTNUM
-    `;
+    // Use centralized query builder for table columns
+    const sql = NZ_QUERIES.getTableColumns(database, schema, tableName);
 
     interface ColumnRow {
         OBJID: number;
@@ -84,14 +67,8 @@ export async function getDistributionInfo(
     tableName: string
 ): Promise<string[]> {
     try {
-        const sql = `
-            SELECT ATTNAME
-            FROM ${database.toUpperCase()}.._V_TABLE_DIST_MAP
-            WHERE SCHEMA = '${schema.toUpperCase()}'
-                AND TABLENAME = '${tableName.toUpperCase()}'
-            ORDER BY DISTSEQNO
-        `;
-
+        // Use centralized query builder for distribution keys
+        const sql = NZ_QUERIES.getDistributionKeys(database, schema, tableName);
         const result = await executeQueryHelper<{ ATTNAME: string }>(connection, sql);
         return result.map(row => row.ATTNAME);
     } catch {
@@ -110,14 +87,8 @@ export async function getOrganizeInfo(
     tableName: string
 ): Promise<string[]> {
     try {
-        const sql = `
-            SELECT ATTNAME
-            FROM ${database.toUpperCase()}.._V_TABLE_ORGANIZE_COLUMN
-            WHERE SCHEMA = '${schema.toUpperCase()}'
-                AND TABLENAME = '${tableName.toUpperCase()}'
-            ORDER BY ORGSEQNO
-        `;
-
+        // Use centralized query builder for organize columns
+        const sql = NZ_QUERIES.getOrganizeColumns(database, schema, tableName);
         const result = await executeQueryHelper<{ ATTNAME: string }>(connection, sql);
         return result.map(row => row.ATTNAME);
     } catch {
@@ -135,28 +106,8 @@ export async function getKeysInfo(
     schema: string,
     tableName: string
 ): Promise<Map<string, KeyInfo>> {
-    const sql = `
-        SELECT 
-            X.SCHEMA
-            , X.RELATION
-            , X.CONSTRAINTNAME
-            , X.CONTYPE
-            , X.ATTNAME
-            , X.PKDATABASE
-            , X.PKSCHEMA
-            , X.PKRELATION
-            , X.PKATTNAME
-            , X.UPDT_TYPE
-            , X.DEL_TYPE
-        FROM 
-            ${database.toUpperCase()}.._V_RELATION_KEYDATA X
-        WHERE 
-            X.OBJID NOT IN (4,5)
-            AND X.SCHEMA = '${schema.toUpperCase()}'
-            AND X.RELATION = '${tableName.toUpperCase()}'
-        ORDER BY
-            X.SCHEMA, X.RELATION, X.CONSEQ
-    `;
+    // Use centralized query builder for table keys
+    const sql = NZ_QUERIES.getTableKeys(database, schema, tableName);
 
     const keysInfo = new Map<string, KeyInfo>();
 
@@ -220,14 +171,8 @@ export async function getTableComment(
     tableName: string
 ): Promise<string | null> {
     try {
-        const sql = `
-            SELECT DESCRIPTION
-            FROM ${database.toUpperCase()}.._V_OBJECT_DATA
-            WHERE SCHEMA = '${schema.toUpperCase()}'
-                AND OBJNAME = '${tableName.toUpperCase()}'
-                AND OBJTYPE = 'TABLE'
-        `;
-
+        // Use centralized query builder for object comment
+        const sql = NZ_QUERIES.getObjectComment(database, schema, tableName, 'TABLE');
         const result = await executeQueryHelper<{ DESCRIPTION: string }>(connection, sql);
         if (result.length > 0 && result[0].DESCRIPTION) {
             return result[0].DESCRIPTION;
@@ -235,13 +180,7 @@ export async function getTableComment(
     } catch {
         // Try without OBJTYPE filter
         try {
-            const sql = `
-                SELECT DESCRIPTION
-                FROM ${database.toUpperCase()}.._V_OBJECT_DATA
-                WHERE SCHEMA = '${schema.toUpperCase()}'
-                    AND OBJNAME = '${tableName.toUpperCase()}'
-            `;
-
+            const sql = NZ_QUERIES.getObjectComment(database, schema, tableName);
             const result = await executeQueryHelper<{ DESCRIPTION: string }>(connection, sql);
             if (result.length > 0 && result[0].DESCRIPTION) {
                 return result[0].DESCRIPTION;
@@ -264,13 +203,8 @@ export async function getTableOwner(
     tableName: string
 ): Promise<string | null> {
     try {
-        const sql = `
-            SELECT OWNER
-            FROM ${database.toUpperCase()}.._V_TABLE
-            WHERE SCHEMA = '${schema.toUpperCase()}'
-                AND TABLENAME = '${tableName.toUpperCase()}'
-        `;
-
+        // Use centralized query builder for table owner
+        const sql = NZ_QUERIES.getTableOwner(database, schema, tableName);
         const result = await executeQueryHelper<{ OWNER: string }>(connection, sql);
         if (result.length > 0 && result[0].OWNER) {
             return result[0].OWNER;

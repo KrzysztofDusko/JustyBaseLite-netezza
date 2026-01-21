@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
-import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows, runQueryWithCatalog } from '../core/queryRunner';
 import { MetadataCache } from '../metadataCache';
 import { ConnectionManager } from '../core/connectionManager';
 import { searchInCodeWithMode, SourceSearchMode } from '../sql/sqlTextUtils';
+import { NZ_QUERIES } from '../metadata/systemQueries';
 
 interface SearchResultItem {
     NAME: string;
@@ -271,74 +272,122 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             const safeTerm = term.toUpperCase();
             const results: SearchResultItem[] = [];
 
-            // 1. Search in VIEW definitions
-            const viewQuery = `
-                SELECT VIEWNAME AS NAME, SCHEMA, DATABASE, DEFINITION AS SOURCE
-                FROM _V_VIEW
-            `;
-
+            // First, get list of all databases to search across (for procedures)
+            let databases: string[] = [];
             try {
-                const viewResult = await runQueryRaw(
+                const dbResult = await runQueryRaw(
                     this.context,
-                    viewQuery,
+                    NZ_QUERIES.LIST_DATABASES,
                     true,
                     this.connectionManager,
                     connectionName
                 );
-                if (viewResult && viewResult.data && searchId === this.currentSearchId) {
-                    const views = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(viewResult);
-                    for (const view of views) {
-                        if (view.SOURCE && searchInCodeWithMode(view.SOURCE, safeTerm, mode)) {
-                            results.push({
-                                NAME: view.NAME,
-                                SCHEMA: view.SCHEMA,
-                                DATABASE: view.DATABASE,
-                                TYPE: 'VIEW',
-                                PARENT: '',
-                                DESCRIPTION: `Found in view ${modeDesc}`,
-                                MATCH_TYPE: 'SOURCE_CODE',
-                                connectionName
-                            });
-                        }
-                    }
+                if (dbResult && dbResult.data) {
+                    const dbRows = queryResultToRows<{ DATABASE: string }>(dbResult);
+                    databases = dbRows.map(d => d.DATABASE).filter(db => db !== 'SYSTEM');
                 }
             } catch (e) {
-                console.error('Error searching views:', e);
+                console.error('Error fetching databases:', e);
             }
 
-            // 2. Search in PROCEDURE sources
-            const procQuery = `
-                SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE
-                FROM _V_PROCEDURE
+            // If no databases found, fallback to current database only
+            if (databases.length === 0) {
+                databases = ['']; // Empty string means current database
+            }
+
+            // 1. Search in VIEW definitions across all databases
+            // NOTE: _V_VIEW.DEFINITION requires active connection to each database,
+            // so we use SET CATALOG to switch databases temporarily
+            const viewQuery = `
+                SELECT VIEWNAME AS NAME, SCHEMA, DATABASE, DEFINITION AS SOURCE 
+                FROM _V_VIEW 
+                WHERE DATABASE != 'SYSTEM'
             `;
 
-            try {
-                const procResult = await runQueryRaw(
-                    this.context,
-                    procQuery,
-                    true,
-                    this.connectionManager,
-                    connectionName
-                );
-                if (procResult && procResult.data && searchId === this.currentSearchId) {
-                    const procs = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(procResult);
-                    for (const proc of procs) {
-                        if (proc.SOURCE && searchInCodeWithMode(proc.SOURCE, safeTerm, mode)) {
-                            results.push({
-                                NAME: proc.NAME,
-                                SCHEMA: proc.SCHEMA,
-                                DATABASE: proc.DATABASE,
-                                TYPE: 'PROCEDURE',
-                                PARENT: '',
-                                DESCRIPTION: `Found in procedure ${modeDesc}`,
-                                MATCH_TYPE: 'SOURCE_CODE',
-                                connectionName
-                            });
+            for (const db of databases) {
+                if (searchId !== this.currentSearchId) break; // Check for cancellation
+
+                try {
+                    let viewResult;
+                    if (db) {
+                        // Use runQueryWithCatalog to switch to target database
+                        viewResult = await runQueryWithCatalog(
+                            db,
+                            viewQuery,
+                            this.connectionManager,
+                            connectionName
+                        );
+                    } else {
+                        // Current database - use regular query
+                        viewResult = await runQueryRaw(
+                            this.context,
+                            viewQuery,
+                            true,
+                            this.connectionManager,
+                            connectionName
+                        );
+                    }
+                    
+                    if (viewResult && viewResult.data && searchId === this.currentSearchId) {
+                        const views = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(viewResult);
+                        for (const view of views) {
+                            if (view.SOURCE && searchInCodeWithMode(view.SOURCE, safeTerm, mode)) {
+                                results.push({
+                                    NAME: view.NAME,
+                                    SCHEMA: view.SCHEMA,
+                                    DATABASE: view.DATABASE,
+                                    TYPE: 'VIEW',
+                                    PARENT: '',
+                                    DESCRIPTION: `Found in view ${modeDesc}`,
+                                    MATCH_TYPE: 'SOURCE_CODE',
+                                    connectionName
+                                });
+                            }
                         }
                     }
+                } catch (e) {
+                    console.debug(`Error searching views in database ${db}:`, e);
                 }
-            } catch (e) {
-                console.error('Error searching procedures:', e);
+            }
+
+            // 2. Search in PROCEDURE sources across all databases
+            // NOTE: _V_PROCEDURE.PROCEDURESOURCE can be accessed via DATABASE.._V_PROCEDURE
+            // without changing connection context
+            for (const db of databases) {
+                if (searchId !== this.currentSearchId) break; // Check for cancellation
+
+                const procQuery = db
+                    ? `SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE FROM ${db}.._V_PROCEDURE WHERE DATABASE != 'SYSTEM'`
+                    : `SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE FROM _V_PROCEDURE WHERE DATABASE != 'SYSTEM'`;
+
+                try {
+                    const procResult = await runQueryRaw(
+                        this.context,
+                        procQuery,
+                        true,
+                        this.connectionManager,
+                        connectionName
+                    );
+                    if (procResult && procResult.data && searchId === this.currentSearchId) {
+                        const procs = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(procResult);
+                        for (const proc of procs) {
+                            if (proc.SOURCE && searchInCodeWithMode(proc.SOURCE, safeTerm, mode)) {
+                                results.push({
+                                    NAME: proc.NAME,
+                                    SCHEMA: proc.SCHEMA,
+                                    DATABASE: proc.DATABASE,
+                                    TYPE: 'PROCEDURE',
+                                    PARENT: '',
+                                    DESCRIPTION: `Found in procedure ${modeDesc}`,
+                                    MATCH_TYPE: 'SOURCE_CODE',
+                                    connectionName
+                                });
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.debug(`Error searching procedures in database ${db}:`, e);
+                }
             }
 
             // Send results

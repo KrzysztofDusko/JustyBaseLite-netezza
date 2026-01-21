@@ -9,10 +9,12 @@
 
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../core/connectionManager';
+import { MetadataCache } from '../metadataCache';
 import { extractVariables } from '../core/variableUtils';
 import { generateTableDDL } from '../ddl';
 import { createConnectionFromDetails, executeQueryHelper } from '../ddl/helpers';
-import { NzConnection } from '../types';
+import { NzConnection, ConnectionDetails } from '../types';
+import { NZ_QUERIES, NZ_OBJECT_TYPES } from '../metadata/systemQueries';
 
 export interface CopilotContext {
     selectedSql: string;
@@ -186,7 +188,8 @@ IMPORTANT NOTES:
 
     constructor(
         private connectionManager: ConnectionManager,
-        context: vscode.ExtensionContext
+        context: vscode.ExtensionContext,
+        private metadataCache?: MetadataCache
     ) {
         this.context = context;
         this.statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -537,14 +540,8 @@ IMPORTANT NOTES:
         tableName: string
     ): Promise<string | undefined> {
         try {
-            const sql = `
-                SELECT SCHEMA 
-                FROM ${database.toUpperCase()}.._V_OBJECT_DATA 
-                WHERE UPPER(OBJNAME) = UPPER('${tableName.replace(/'/g, "''")}') 
-                AND DBNAME = '${database.toUpperCase()}'
-                AND OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
-                LIMIT 1
-            `;
+            // Use centralized query builder for finding table schema
+            const sql = NZ_QUERIES.findTableSchema(database, tableName.replace(/'/g, "''"));
             
             interface SchemaRow { SCHEMA: string }
             const result = await executeQueryHelper<SchemaRow>(connection, sql);
@@ -1158,39 +1155,18 @@ ${context.selectedSql}
                 return null;
             }
 
-            // Query to get all tables with their columns in a compact format
-            // Groups columns by table and includes PK/FK information
-            const sql = `
-                SELECT 
-                    O.SCHEMA,
-                    O.OBJNAME AS TABLE_NAME,
-                    COALESCE(O.DESCRIPTION, '') AS TABLE_DESCRIPTION,
-                    C.ATTNAME AS COLUMN_NAME,
-                    C.FORMAT_TYPE,
-                    COALESCE(C.DESCRIPTION, '') AS COLUMN_DESCRIPTION,
-                    C.ATTNUM,
-                    MAX(CASE WHEN K.CONTYPE = 'p' THEN 1 ELSE 0 END) AS IS_PK,
-                    MAX(CASE WHEN K.CONTYPE = 'f' THEN 1 ELSE 0 END) AS IS_FK
-                FROM ${database.toUpperCase()}.._V_RELATION_COLUMN C
-                JOIN ${database.toUpperCase()}.._V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                LEFT JOIN ${database.toUpperCase()}.._V_RELATION_KEYDATA K 
-                    ON UPPER(K.RELATION) = UPPER(O.OBJNAME) 
-                    AND UPPER(K.SCHEMA) = UPPER(O.SCHEMA)
-                    AND UPPER(K.ATTNAME) = UPPER(C.ATTNAME)
-                    AND K.CONTYPE IN ('p', 'f')
-                WHERE UPPER(O.DBNAME) = UPPER('${database}')
-                AND O.OBJTYPE IN ('TABLE', 'VIEW')
-                GROUP BY O.SCHEMA, O.OBJNAME, O.DESCRIPTION, C.ATTNAME, C.FORMAT_TYPE, C.DESCRIPTION, C.ATTNUM
-                ORDER BY O.SCHEMA, O.OBJNAME, C.ATTNUM
-            `;
+            // Use centralized query builder for columns with PK/FK info
+            // Note: Uses specialized schema overview query with TABLE_DESCRIPTION and COLUMN_DESCRIPTION aliases
+            const sql = NZ_QUERIES.listColumnsWithKeys(database, { 
+                objTypes: [NZ_OBJECT_TYPES.TABLE, NZ_OBJECT_TYPES.VIEW] 
+            });
 
             interface SchemaRow {
                 SCHEMA: string;
-                TABLE_NAME: string;
-                TABLE_DESCRIPTION: string;
-                COLUMN_NAME: string;
+                TABLENAME: string;
+                DESCRIPTION: string;
+                ATTNAME: string;
                 FORMAT_TYPE: string;
-                COLUMN_DESCRIPTION: string;
                 ATTNUM: number;
                 IS_PK: number;
                 IS_FK: number;
@@ -1211,19 +1187,20 @@ ${context.selectedSql}
             }>();
 
             for (const row of result) {
-                const key = `${row.SCHEMA}.${row.TABLE_NAME}`;
+                // Use column names from centralized query (TABLENAME instead of TABLE_NAME)
+                const key = `${row.SCHEMA}.${row.TABLENAME}`;
                 if (!tableMap.has(key)) {
                     tableMap.set(key, {
                         schema: row.SCHEMA,
-                        tableName: row.TABLE_NAME,
-                        tableDescription: row.TABLE_DESCRIPTION,
+                        tableName: row.TABLENAME,
+                        tableDescription: row.DESCRIPTION || '',
                         columns: []
                     });
                 }
                 tableMap.get(key)!.columns.push({
-                    name: row.COLUMN_NAME,
+                    name: row.ATTNAME,
                     type: row.FORMAT_TYPE,
-                    description: row.COLUMN_DESCRIPTION,
+                    description: row.DESCRIPTION || '',
                     isPk: Number(row.IS_PK) === 1,
                     isFk: Number(row.IS_FK) === 1
                 });
@@ -2074,6 +2051,52 @@ Please:
         }
 
         try {
+            // Try cache first if database is specified
+            if (this.metadataCache && database) {
+                // If schema provided, use exact lookup
+                if (schema) {
+                    const cacheKey = `${database}.${schema}`;
+                    const cachedTables = this.metadataCache.getTables(connectionName, cacheKey);
+                    if (cachedTables && cachedTables.length > 0) {
+                        const lines: string[] = [`## Tables in ${database}.${schema}\n`];
+                        lines.push('| Schema | Table | Type | Owner |');
+                        lines.push('|--------|-------|------|-------|');
+                        for (const t of cachedTables) {
+                             const type = t.objType === 'VIEW' ? 'VIEW' : 'TABLE';
+                             lines.push(`| ${schema} | ${t.label} | ${type} | ${t.OWNER || ''} |`);
+                        }
+                        lines.push(`\n**Total:** ${cachedTables.length} table(s)`);
+                        return lines.join('\n');
+                    }
+                } else {
+                    // Start prefetch for all objects if not already done, to ensure cache is warm for next time
+                    if (!this.metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
+                         // Don't wait for prefetch here to avoid blocking, but trigger it
+                         // However, for this call, we may need to fall back to DB if cache is empty
+                    }
+                    
+                    // Note: querying all tables in a DB from cache requires iterating all schemas in cache
+                    // getTablesAllSchemas does exactly this
+                    const cachedTables = this.metadataCache.getTablesAllSchemas(connectionName, database);
+                    if (cachedTables && cachedTables.length > 0) {
+                        const lines: string[] = [`## Tables in ${database} (All Schemas)\n`];
+                        lines.push('| Schema | Table | Type | Owner |');
+                        lines.push('|--------|-------|------|-------|');
+                        for (const t of cachedTables) {
+                            const type = t.objType === 'VIEW' ? 'VIEW' : 'TABLE';
+                            // We need schema name here, but TableMetadata doesn't always have it if it comes from a list
+                            // But getTablesAllSchemas returns TableMetadata which should have OBJNAME.
+                            // The cache structure is per schema.
+                            // Let's check TableMetadata definition. It has SCHEMA properly.
+                           lines.push(`| ${t.SCHEMA || ''} | ${t.label} | ${type} | ${t.OWNER || ''} |`);
+                        }
+                         lines.push(`\n**Total:** ${cachedTables.length} table(s)`);
+                        return lines.join('\n');
+                    }
+                }
+            }
+
+            // Fallback to live query
             // Get connection details
             const connectionDetails = await this.connectionManager.getConnection(connectionName);
             if (!connectionDetails) {
@@ -2215,6 +2238,19 @@ Please:
             return 'No active database connection. Please connect to a Netezza database first.';
         }
 
+        // Try cache first
+        if (this.metadataCache) {
+            const cached = this.metadataCache.getDatabases(connectionName);
+            if (cached && cached.length > 0) {
+                 const lines: string[] = ['## Available Databases (from Cache)\n'];
+                 for (const db of cached) {
+                     lines.push(`- ${db.DATABASE}`);
+                 }
+                 lines.push(`\n**Total:** ${cached.length} database(s)`);
+                 return lines.join('\n');
+            }
+        }
+
         try {
             const connectionDetails = await this.connectionManager.getConnection(connectionName);
             if (!connectionDetails) {
@@ -2272,6 +2308,26 @@ Please:
         }
 
         try {
+            // Determine database
+            let targetDb = database;
+            if (!targetDb) {
+                targetDb = await this.connectionManager.getCurrentDatabase(connectionName) || undefined;
+            }
+
+            if (targetDb && this.metadataCache) {
+                 const cached = this.metadataCache.getSchemas(connectionName, targetDb);
+                 // Check if cache actually has schemas (might return empty array if no schemas, which is valid, but we need to know if it was fetched)
+                 // getSchemas returns undefined if not cached
+                 if (cached) {
+                    const lines: string[] = [`## Schemas in ${targetDb} (from Cache)\n`];
+                    for (const s of cached) {
+                        lines.push(`- ${s.SCHEMA}`);
+                    }
+                    lines.push(`\n**Total:** ${cached.length} schema(s)`);
+                    return lines.join('\n');
+                 }
+            }
+
             const connectionDetails = await this.connectionManager.getConnection(connectionName);
             if (!connectionDetails) {
                 return `Connection "${connectionName}" not found.`;
@@ -2598,6 +2654,12 @@ Please:
     /**
      * Gets the source code/definition of a view or procedure.
      * Used by GetObjectDefinitionTool.
+     * 
+     * NOTE: For VIEWS - the DEFINITION column requires connection to the same database.
+     * When searching across databases for views, we connect to each database in parallel.
+     * 
+     * For PROCEDURES - PROCEDURESOURCE is accessible cross-database, so we can use
+     * a single connection to search all databases.
      */
     public async getObjectDefinition(objectName: string, objectType: 'view' | 'procedure', database?: string): Promise<string> {
         const connectionName = this.connectionManager.getActiveConnectionName();
@@ -2611,140 +2673,235 @@ Please:
                 return `Connection "${connectionName}" not found.`;
             }
 
-            const connection = await createConnectionFromDetails(connectionDetails);
-            if (!connection) {
+            // Parse object name first to determine target database
+            const parts = objectName.split('.');
+            let db: string | undefined;
+            let schema: string | undefined;
+            let objName: string;
+
+            if (parts.length === 3) {
+                [db, schema, objName] = parts;
+            } else if (parts.length === 2) {
+                // Could be DB..NAME or SCHEMA.NAME
+                if (parts[0] === '') {
+                    // ..NAME format - invalid
+                    objName = parts[1];
+                } else if (parts[1] === '') {
+                    // DB.. format - use db, no schema
+                    db = parts[0];
+                    objName = '';
+                } else {
+                    [schema, objName] = parts;
+                }
+            } else {
+                objName = parts[0];
+            }
+
+            // Use provided database if not in name
+            if (!db && database) {
+                db = database;
+            }
+
+            objName = objName.toUpperCase();
+
+            // For PROCEDURES: PROCEDURESOURCE is accessible cross-database
+            // We can use a single connection to search all databases
+            if (objectType === 'procedure') {
+                return await this.getProcedureDefinitionCrossDatabase(
+                    connectionDetails, objName, db, schema
+                );
+            }
+
+            // For VIEWS: DEFINITION requires connection to the same database
+            // If specific database is known, connect directly to it
+            if (db) {
+                return await this.getViewDefinitionFromDatabase(
+                    connectionDetails, db, objName, schema
+                );
+            }
+
+            // No database specified for VIEW - search across ALL databases in parallel
+            // First, get list of databases
+            const defaultConnection = await createConnectionFromDetails(connectionDetails);
+            if (!defaultConnection) {
                 return 'Could not establish database connection.';
             }
 
+            let databases: string[];
             try {
-                // Parse object name
-                const parts = objectName.split('.');
-                let db: string | undefined;
-                let schema: string | undefined;
-                let objName: string;
-
-                if (parts.length === 3) {
-                    [db, schema, objName] = parts;
-                } else if (parts.length === 2) {
-                    // Could be DB..NAME or SCHEMA.NAME
-                    if (parts[0] === '') {
-                        // ..NAME format - invalid
-                        objName = parts[1];
-                    } else if (parts[1] === '') {
-                        // DB.. format - use db, no schema
-                        db = parts[0];
-                        objName = '';
-                    } else {
-                        [schema, objName] = parts;
-                    }
-                } else {
-                    objName = parts[0];
-                }
-
-                // Use provided database if not in name
-                if (!db && database) {
-                    db = database;
-                }
-
-                objName = objName.toUpperCase();
-
-                let query: string;
-                let definitionField: string;
-
-                if (objectType === 'view') {
-                    if (db) {
-                        query = `
-                            SELECT SCHEMA, VIEWNAME, OWNER, DEFINITION
-                            FROM ${db}.._V_VIEW
-                            WHERE UPPER(VIEWNAME) = '${objName}'
-                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
-                            LIMIT 1
-                        `;
-                    } else {
-                        // Search across all databases
-                        query = `
-                            SELECT DATABASE, SCHEMA, VIEWNAME, OWNER, DEFINITION
-                            FROM _V_VIEW
-                            WHERE UPPER(VIEWNAME) = '${objName}'
-                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
-                            LIMIT 5
-                        `;
-                    }
-                    definitionField = 'DEFINITION';
-                } else {
-                    // Procedure
-                    if (db) {
-                        query = `
-                            SELECT SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, ARGUMENTS, 
-                                   EXECUTEDASOWNER, OWNER, DESCRIPTION, PROCEDURESOURCE
-                            FROM ${db}.._V_PROCEDURE
-                            WHERE UPPER(PROCEDURE) = '${objName}'
-                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
-                            LIMIT 10
-                        `;
-                    } else {
-                        // Search across all databases
-                        query = `
-                            SELECT DATABASE, SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, 
-                                   OWNER, PROCEDURESOURCE
-                            FROM _V_PROCEDURE
-                            WHERE UPPER(PROCEDURE) = '${objName}'
-                            ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
-                            LIMIT 10
-                        `;
-                    }
-                    definitionField = 'PROCEDURESOURCE';
-                }
-
-                const result = await executeQueryHelper(connection, query);
-
-                if (!result || result.length === 0) {
-                    return `${objectType === 'view' ? 'View' : 'Procedure'} "${objectName}" not found.`;
-                }
-
-                const lines: string[] = [];
-
-                for (const row of result) {
-                    const r = row as Record<string, unknown>;
-                    const dbName = r.DATABASE || db || '';
-                    const schemaName = r.SCHEMA || '';
-                    const name = r.VIEWNAME || r.PROCEDURE || '';
-
-                    if (objectType === 'view') {
-                        lines.push(`## View: ${dbName}.${schemaName}.${name}\n`);
-                        lines.push(`**Owner:** ${r.OWNER}\n`);
-                        lines.push('### Definition\n');
-                        lines.push('```sql');
-                        lines.push(String(r[definitionField] || ''));
-                        lines.push('```\n');
-                    } else {
-                        lines.push(`## Procedure: ${dbName}.${schemaName}.${name}\n`);
-                        lines.push(`**Signature:** ${r.PROCEDURESIGNATURE || ''}`);
-                        lines.push(`**Returns:** ${r.RETURNS || 'void'}`);
-                        if (r.ARGUMENTS) {
-                            lines.push(`**Arguments:** ${r.ARGUMENTS}`);
-                        }
-                        lines.push(`**Owner:** ${r.OWNER}`);
-                        if (r.EXECUTEDASOWNER !== undefined) {
-                            lines.push(`**Execute as Owner:** ${r.EXECUTEDASOWNER ? 'Yes' : 'No'}`);
-                        }
-                        if (r.DESCRIPTION) {
-                            lines.push(`**Description:** ${r.DESCRIPTION}`);
-                        }
-                        lines.push('\n### Source Code\n');
-                        lines.push('```sql');
-                        lines.push(String(r[definitionField] || ''));
-                        lines.push('```\n');
-                    }
-                }
-
-                return lines.join('\n');
+                const dbResult = await executeQueryHelper<{ DATABASE: string }>(
+                    defaultConnection, 
+                    NZ_QUERIES.LIST_DATABASES
+                );
+                databases = dbResult
+                    .map(r => r.DATABASE)
+                    .filter(d => d && d !== 'SYSTEM'); // Skip SYSTEM database
             } finally {
-                connection.close();
+                defaultConnection.close();
             }
+
+            if (databases.length === 0) {
+                return 'No databases found to search for view.';
+            }
+
+            // Search each database in parallel (required for VIEW DEFINITION)
+            const searchPromises = databases.map(async (dbName) => {
+                try {
+                    return await this.getViewDefinitionFromDatabase(
+                        connectionDetails, dbName, objName, schema, true
+                    );
+                } catch {
+                    // Ignore errors from individual databases (permission issues, etc.)
+                    return null;
+                }
+            });
+
+            const results = await Promise.all(searchPromises);
+            const validResults = results.filter(r => r !== null && r !== '');
+
+            if (validResults.length === 0) {
+                return `View "${objectName}" not found in any database.`;
+            }
+
+            return validResults.join('\n---\n\n');
+
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             return `Failed to get ${objectType} definition: ${msg}`;
+        }
+    }
+
+    /**
+     * Helper: Get procedure definition - PROCEDURESOURCE is accessible cross-database.
+     * Uses a single connection to query all databases.
+     */
+    private async getProcedureDefinitionCrossDatabase(
+        connectionDetails: ConnectionDetails,
+        objName: string,
+        database?: string,
+        schema?: string
+    ): Promise<string> {
+        const connection = await createConnectionFromDetails(connectionDetails);
+        if (!connection) {
+            throw new Error('Could not establish database connection');
+        }
+
+        try {
+            let query: string;
+            
+            if (database) {
+                query = `
+                    SELECT DATABASE, SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, ARGUMENTS, 
+                           EXECUTEDASOWNER, OWNER, DESCRIPTION, PROCEDURESOURCE
+                    FROM ${database.toUpperCase()}.._V_PROCEDURE
+                    WHERE UPPER(PROCEDURE) = '${objName}'
+                    ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                    LIMIT 10
+                `;
+            } else {
+                // Search across all databases - works for procedures!
+                query = `
+                    SELECT DATABASE, SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, 
+                           OWNER, PROCEDURESOURCE
+                    FROM _V_PROCEDURE
+                    WHERE UPPER(PROCEDURE) = '${objName}'
+                    ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                    LIMIT 10
+                `;
+            }
+
+            const result = await executeQueryHelper(connection, query);
+
+            if (!result || result.length === 0) {
+                return `Procedure "${objName}" not found${database ? ` in ${database}` : ''}.`;
+            }
+
+            const lines: string[] = [];
+
+            for (const row of result) {
+                const r = row as Record<string, unknown>;
+                const dbName = r.DATABASE || database || '';
+                const schemaName = r.SCHEMA || '';
+                const name = r.PROCEDURE || '';
+
+                lines.push(`## Procedure: ${dbName}.${schemaName}.${name}\n`);
+                lines.push(`**Signature:** ${r.PROCEDURESIGNATURE || ''}`);
+                lines.push(`**Returns:** ${r.RETURNS || 'void'}`);
+                if (r.ARGUMENTS) {
+                    lines.push(`**Arguments:** ${r.ARGUMENTS}`);
+                }
+                lines.push(`**Owner:** ${r.OWNER}`);
+                if (r.EXECUTEDASOWNER !== undefined) {
+                    lines.push(`**Execute as Owner:** ${r.EXECUTEDASOWNER ? 'Yes' : 'No'}`);
+                }
+                if (r.DESCRIPTION) {
+                    lines.push(`**Description:** ${r.DESCRIPTION}`);
+                }
+                lines.push('\n### Source Code\n');
+                lines.push('```sql');
+                lines.push(String(r.PROCEDURESOURCE || ''));
+                lines.push('```\n');
+            }
+
+            return lines.join('\n');
+        } finally {
+            connection.close();
+        }
+    }
+
+    /**
+     * Helper: Get view definition from a specific database.
+     * CRITICAL: Must connect to the target database to read DEFINITION column.
+     */
+    private async getViewDefinitionFromDatabase(
+        connectionDetails: ConnectionDetails,
+        database: string,
+        objName: string,
+        schema?: string,
+        returnEmptyOnNotFound: boolean = false
+    ): Promise<string> {
+        // CRITICAL: Connect to the target database to access DEFINITION
+        const connection = await createConnectionFromDetails(connectionDetails, database);
+        if (!connection) {
+            throw new Error(`Could not connect to database ${database}`);
+        }
+
+        try {
+            const query = `
+                SELECT SCHEMA, VIEWNAME, OWNER, DEFINITION
+                FROM ${database}.._V_VIEW
+                WHERE UPPER(VIEWNAME) = '${objName}'
+                ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
+                LIMIT 1
+            `;
+
+            const result = await executeQueryHelper(connection, query);
+
+            if (!result || result.length === 0) {
+                if (returnEmptyOnNotFound) {
+                    return '';
+                }
+                return `View "${objName}" not found in ${database}.`;
+            }
+
+            const lines: string[] = [];
+
+            for (const row of result) {
+                const r = row as Record<string, unknown>;
+                const schemaName = r.SCHEMA || '';
+                const name = r.VIEWNAME || '';
+
+                lines.push(`## View: ${database}.${schemaName}.${name}\n`);
+                lines.push(`**Owner:** ${r.OWNER}\n`);
+                lines.push('### Definition\n');
+                lines.push('```sql');
+                lines.push(String(r.DEFINITION || ''));
+                lines.push('```\n');
+            }
+
+            return lines.join('\n');
+        } finally {
+            connection.close();
         }
     }
 
@@ -3022,29 +3179,8 @@ Please:
             try {
                 // Search tables
                 if (searchType === 'tables' || searchType === 'all') {
-                    let tableQuery: string;
-                    if (searchAllDatabases) {
-                        // Use global _V_OBJECT_DATA view to search across all databases
-                        tableQuery = `
-                            SELECT DBNAME AS DATABASE, SCHEMA, OBJNAME AS TABLENAME, 
-                                CASE OBJTYPE WHEN 'TABLE' THEN 'TABLE' WHEN 'VIEW' THEN 'VIEW' 
-                                     WHEN 'MATERIALIZED VIEW' THEN 'MVIEW' WHEN 'EXTERNAL TABLE' THEN 'EXTERNAL' ELSE OBJTYPE END AS TYPE
-                            FROM _V_OBJECT_DATA 
-                            WHERE UPPER(OBJNAME) LIKE '${searchPattern}'
-                            AND OBJTYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
-                            ORDER BY DBNAME, SCHEMA, OBJNAME
-                            LIMIT 100
-                        `;
-                    } else {
-                        tableQuery = `
-                            SELECT '${database}' AS DATABASE, SCHEMA, TABLENAME, 
-                                CASE RELKIND WHEN 'r' THEN 'TABLE' WHEN 'v' THEN 'VIEW' ELSE RELKIND END AS TYPE
-                            FROM ${database}.._V_TABLE
-                            WHERE UPPER(TABLENAME) LIKE '${searchPattern}'
-                            ORDER BY SCHEMA, TABLENAME
-                            LIMIT 100
-                        `;
-                    }
+                    // Use centralized search query
+                    const tableQuery = NZ_QUERIES.searchTables(searchPattern, database);
                     const tableResults = await executeQueryHelper(connection, tableQuery);
 
                     if (tableResults && tableResults.length > 0) {
@@ -3063,29 +3199,44 @@ Please:
 
                 // Search columns
                 if (searchType === 'columns' || searchType === 'all') {
-                    let columnQuery: string;
+                    let columnResults: Record<string, unknown>[] = [];
+
                     if (searchAllDatabases) {
-                        // Use global _V_RELATION_COLUMN joined with _V_OBJECT_DATA to search across all databases
-                        columnQuery = `
-                            SELECT O.DBNAME AS DATABASE, O.SCHEMA, O.OBJNAME AS TABLENAME, 
-                                   C.ATTNAME AS COLUMN_NAME, C.FORMAT_TYPE AS DATA_TYPE
-                            FROM _V_RELATION_COLUMN C
-                            JOIN _V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                            WHERE UPPER(C.ATTNAME) LIKE '${searchPattern}'
-                            ORDER BY O.DBNAME, O.SCHEMA, O.OBJNAME, C.ATTNAME
-                            LIMIT 100
-                        `;
+                        // For all databases, we need to query each database separately as _V_RELATION_COLUMN is local
+                        try {
+                            const dbQuery = NZ_QUERIES.LIST_DATABASES;
+                            const dbs = await executeQueryHelper<{ DATABASE: string }>(connection, dbQuery);
+                            
+                            if (dbs && dbs.length > 0) {
+                                const dbNames = dbs.map(d => d.DATABASE);
+                                const resultsLimit = 100;
+
+                                // Query each database individually (more reliable than UNION ALL)
+                                for (const db of dbNames) {
+                                    if (columnResults.length >= resultsLimit) break;
+                                    
+                                    // Use centralized search query for columns
+                                    const dbColQuery = NZ_QUERIES.searchColumns(db, searchPattern);
+                                    
+                                    try {
+                                        const dbResults = await executeQueryHelper(connection, dbColQuery);
+                                        if (dbResults && dbResults.length > 0) {
+                                            columnResults.push(...dbResults.slice(0, resultsLimit - columnResults.length));
+                                        }
+                                    } catch (e) {
+                                        // Silently skip databases that fail (may not be accessible)
+                                        console.debug(`[searchSchema] Could not search columns in database ${db}:`, e);
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                             console.error('[searchSchema] Error fetching databases for column search:', e);
+                        }
                     } else {
-                        columnQuery = `
-                            SELECT '${database}' AS DATABASE, t.SCHEMA, t.TABLENAME, c.NAME AS COLUMN_NAME, c.TYPE AS DATA_TYPE
-                            FROM ${database}.._V_TABLE t
-                            JOIN ${database}.._V_RELATION_COLUMN c ON t.OBJID = c.OBJID
-                            WHERE UPPER(c.NAME) LIKE '${searchPattern}'
-                            ORDER BY t.SCHEMA, t.TABLENAME, c.NAME
-                            LIMIT 100
-                        `;
+                        // Use centralized search query for columns
+                        const columnQuery = NZ_QUERIES.searchColumns(database!, searchPattern);
+                        columnResults = await executeQueryHelper(connection, columnQuery);
                     }
-                    const columnResults = await executeQueryHelper(connection, columnQuery);
 
                     if (columnResults && columnResults.length > 0) {
                         lines.push('### Columns Found\n');
@@ -3181,15 +3332,8 @@ Please:
                     lines.push('**Row Count:** Unable to retrieve');
                 }
 
-                // Get table info from system catalog
-                const infoQuery = `
-                    SELECT 
-                        d.ATTNAME AS DIST_KEY,
-                        t.OWNER
-                    FROM ${db}.._V_TABLE t
-                    LEFT JOIN ${db}.._V_TABLE_DIST_MAP d ON t.OBJID = d.OBJID
-                    WHERE t.SCHEMA = '${schema}' AND t.TABLENAME = '${table}'
-                `;
+                // Get table info from system catalog using centralized query
+                const infoQuery = NZ_QUERIES.getTableStats(db, schema, table);
                 const infoResult = await executeQueryHelper(connection, infoQuery);
                 if (infoResult && infoResult.length > 0) {
                     const info = infoResult[0] as Record<string, unknown>;
@@ -3243,6 +3387,11 @@ Please:
     /**
      * Gets object dependencies (what uses this table, what this view depends on).
      * Used by DependenciesTool.
+     * 
+     * NOTE: This function connects to the specified database to properly access
+     * _V_VIEW.DEFINITION and _V_PROCEDURE.PROCEDURESOURCE columns which require
+     * the connection to be to the same database where the objects exist.
+     * 
      * @param objectName The object name (table, view, procedure)
      * @param database Optional database name
      */
@@ -3266,7 +3415,9 @@ Please:
                 return 'Could not determine database. Please specify database name.';
             }
 
-            const connection = await createConnectionFromDetails(connectionDetails);
+            // CRITICAL: Connect to the target database to access DEFINITION and PROCEDURESOURCE
+            // These columns are only populated when connected to the database containing the objects
+            const connection = await createConnectionFromDetails(connectionDetails, db);
             if (!connection) {
                 return 'Could not establish database connection.';
             }
@@ -3278,15 +3429,8 @@ Please:
             const lines: string[] = [`## Dependencies for ${objectName}\n`];
 
             try {
-                // Find views that depend on this object
-                const dependentViewsQuery = `
-                    SELECT v.SCHEMA, v.VIEWNAME, v.OWNER
-                    FROM ${db}.._V_VIEW v
-                    WHERE UPPER(v.DEFINITION) LIKE '%${objName}%'
-                    AND v.VIEWNAME != '${objName}'
-                    ORDER BY v.SCHEMA, v.VIEWNAME
-                    LIMIT 50
-                `;
+                // Find views that depend on this object using centralized query
+                const dependentViewsQuery = NZ_QUERIES.findDependentViews(db, objName);
                 const dependentViews = await executeQueryHelper(connection, dependentViewsQuery);
 
                 if (dependentViews && dependentViews.length > 0) {
@@ -3303,13 +3447,8 @@ Please:
                     lines.push('No views found that reference this object.\n');
                 }
 
-                // If it's a view, show what it depends on
-                const viewDefQuery = `
-                    SELECT DEFINITION
-                    FROM ${db}.._V_VIEW
-                    WHERE UPPER(VIEWNAME) = '${objName}'
-                    LIMIT 1
-                `;
+                // If it's a view, show what it depends on using centralized query
+                const viewDefQuery = NZ_QUERIES.getViewDefinition(db, objName);
                 const viewDef = await executeQueryHelper(connection, viewDefQuery);
 
                 if (viewDef && viewDef.length > 0) {
@@ -3319,14 +3458,8 @@ Please:
                     lines.push('```\n');
                 }
 
-                // Find procedures that reference this object
-                const procQuery = `
-                    SELECT SCHEMA, PROCEDURE AS PROC_NAME, OWNER
-                    FROM ${db}.._V_PROCEDURE
-                    WHERE UPPER(PROCEDURESOURCE) LIKE '%${objName}%'
-                    ORDER BY SCHEMA, PROCEDURE
-                    LIMIT 25
-                `;
+                // Find procedures that reference this object using centralized query
+                const procQuery = NZ_QUERIES.findDependentProcedures(db, objName);
                 const procs = await executeQueryHelper(connection, procQuery);
 
                 if (procs && procs.length > 0) {

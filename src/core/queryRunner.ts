@@ -756,6 +756,118 @@ export function queryResultToRows<T extends Record<string, unknown>>(result: Que
 }
 
 /**
+ * Run a query with a temporary catalog (database) change.
+ * This is needed for queries like _V_VIEW.DEFINITION which require
+ * an active connection to the specific database.
+ * 
+ * The function:
+ * 1. Executes SET CATALOG to the target database
+ * 2. Runs the query
+ * 3. Restores the original catalog (if known)
+ * 
+ * @param targetDatabase - Database to switch to before running the query
+ * @param query - The query to execute
+ * @param connectionManager - Connection manager
+ * @param connectionName - Connection name to use
+ * @returns QueryResult
+ */
+export async function runQueryWithCatalog(
+    targetDatabase: string,
+    query: string,
+    connectionManager: ConnectionManager,
+    connectionName: string
+): Promise<QueryResult> {
+    const connManager = connectionManager;
+    
+    // Get or create a connection
+    const { connection, shouldCloseConnection } = await getConnectionForDocument(
+        connManager,
+        connectionName,
+        true, // keep connection open
+        undefined // no document URI
+    );
+
+    try {
+        // Get current catalog to restore later
+        let originalCatalog: string | undefined;
+        try {
+            const catalogCmd = connection.createCommand('SELECT CURRENT_CATALOG');
+            const catalogReader = await catalogCmd.executeReader();
+            if (await catalogReader.read()) {
+                originalCatalog = String(catalogReader.getValue(0));
+            }
+            await catalogReader.close();
+        } catch {
+            // Ignore if we can't get current catalog
+        }
+
+        // Set target catalog
+        // Note: This may fail for read-only databases or permission issues
+        try {
+            const setCatalogCmd = connection.createCommand(`SET CATALOG ${targetDatabase}`);
+            const setCatalogReader = await setCatalogCmd.executeReader();
+            try {
+                await setCatalogReader.close();
+            } catch {
+                // Ignore close errors
+            }
+        } catch (catalogError) {
+            // SET CATALOG failed (e.g., read-only database, permission denied)
+            // Return empty result set - caller should handle gracefully
+            console.debug(`[runQueryWithCatalog] Failed to SET CATALOG ${targetDatabase}:`, catalogError);
+            return {
+                columns: [],
+                data: [],
+                rowsAffected: undefined,
+                limitReached: false,
+                sql: query
+            };
+        }
+
+        try {
+            // Execute the actual query
+            const config = vscode.workspace.getConfiguration('netezza');
+            const queryTimeout = config.get<number>('queryTimeout', 1800);
+
+            const { columns, data, limitReached } = await executeQueryAndFetch(
+                connection,
+                query,
+                queryTimeout,
+                undefined, // no document URI
+                undefined  // no session ID
+            );
+
+            return {
+                columns,
+                data,
+                rowsAffected: undefined,
+                limitReached,
+                sql: query
+            };
+        } finally {
+            // Restore original catalog if we had one
+            if (originalCatalog && originalCatalog !== targetDatabase) {
+                try {
+                    const restoreCmd = connection.createCommand(`SET CATALOG ${originalCatalog}`);
+                    const restoreReader = await restoreCmd.executeReader();
+                    try {
+                        await restoreReader.close();
+                    } catch {
+                        // Ignore close errors
+                    }
+                } catch {
+                    // Ignore restore errors
+                }
+            }
+        }
+    } finally {
+        if (shouldCloseConnection && connection) {
+            await connection.close();
+        }
+    }
+}
+
+/**
  * Parse JSON result from runQuery() safely.
  * Handles empty results and "Query executed successfully" messages.
  * This is a transitional helper for legacy code using runQuery + JSON.parse.

@@ -90,12 +90,20 @@ export function fixProcReturnType(procReturns: string): string {
 
 /**
  * Create NzConnection from ConnectionDetails (recommended)
+ * @param details - Connection details
+ * @param databaseOverride - Optional: override the database to connect to
+ *                           Use this when you need to connect to a specific database
+ *                           that differs from the default in connection details.
+ *                           CRITICAL for reading _V_VIEW.DEFINITION and _V_PROCEDURE.PROCEDURESOURCE
  */
-export async function createConnectionFromDetails(details: ConnectionDetails): Promise<NzConnection> {
+export async function createConnectionFromDetails(
+    details: ConnectionDetails, 
+    databaseOverride?: string
+): Promise<NzConnection> {
     const config = {
         host: details.host,
         port: details.port || 5480,
-        database: details.database,
+        database: databaseOverride || details.database,
         user: details.user,
         password: details.password
     };

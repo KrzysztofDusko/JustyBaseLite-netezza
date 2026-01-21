@@ -7,6 +7,7 @@ import { CacheStorage } from './cacheStorage';
 import { extractLabel } from './helpers';
 import { TableMetadata, ColumnMetadata } from './types';
 import { QueryResult } from '../types';
+import { NZ_QUERIES } from './systemQueries';
 
 /**
  * Type for query execution function (legacy - returns JSON string)
@@ -123,32 +124,8 @@ export class CachePrefetcher {
                 return;
             }
 
-            const dbPrefix = `${dbName}..`;
-            const schemaClause = schemaName ? `AND UPPER(O.SCHEMA) = UPPER('${schemaName}')` : '';
-
-            // Enhanced query with PK/FK information and description
-            const query = `
-                SELECT 
-                    O.OBJNAME AS TABLENAME,
-                    C.ATTNAME,
-                    C.FORMAT_TYPE,
-                    C.ATTNUM,
-                    COALESCE(C.DESCRIPTION, '') AS DESCRIPTION,
-                    MAX(CASE WHEN K.CONTYPE = 'p' THEN 1 ELSE 0 END) AS IS_PK,
-                    MAX(CASE WHEN K.CONTYPE = 'f' THEN 1 ELSE 0 END) AS IS_FK
-                FROM ${dbPrefix}_V_RELATION_COLUMN C
-                JOIN ${dbPrefix}_V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                LEFT JOIN ${dbPrefix}_V_RELATION_KEYDATA K 
-                    ON UPPER(K.RELATION) = UPPER(O.OBJNAME) 
-                    AND UPPER(K.SCHEMA) = UPPER(O.SCHEMA)
-                    AND UPPER(K.ATTNAME) = UPPER(C.ATTNAME)
-                    AND K.CONTYPE IN ('p', 'f')
-                WHERE UPPER(O.DBNAME) = UPPER('${dbName}')
-                ${schemaClause}
-                AND O.OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
-                GROUP BY O.OBJNAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM, C.DESCRIPTION
-                ORDER BY O.OBJNAME, C.ATTNUM
-            `;
+            // Use centralized query builder for columns with PK/FK info
+            const query = NZ_QUERIES.listColumnsWithKeys(dbName, { schema: schemaName });
 
             try {
                 const result = await runQueryFn(query);
@@ -197,12 +174,8 @@ export class CachePrefetcher {
         console.log(`[CachePrefetcher] Starting background prefetch of all objects (Connection: ${connectionName})`);
 
         try {
-            const tablesQuery = `
-                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, COALESCE(DESCRIPTION, '') AS DESCRIPTION
-                FROM _V_OBJECT_DATA 
-                WHERE OBJTYPE IN ('TABLE', 'VIEW') 
-                ORDER BY DBNAME, SCHEMA, OBJNAME
-            `;
+            // Use centralized query for listing tables and views (global search)
+            const tablesQuery = NZ_QUERIES.listTablesAndViews();
 
             const result = await runQueryFn(tablesQuery);
             if (!result) return;
@@ -300,7 +273,7 @@ export class CachePrefetcher {
         }
 
         try {
-            const query = 'SELECT DATABASE FROM system.._v_database ORDER BY DATABASE';
+            const query = NZ_QUERIES.LIST_DATABASES;
             const result = await runQueryFn(query);
             if (!result) return [];
 
@@ -330,7 +303,7 @@ export class CachePrefetcher {
         }
 
         try {
-            const query = `SELECT SCHEMA FROM ${dbName}.._V_SCHEMA ORDER BY SCHEMA`;
+            const query = NZ_QUERIES.listSchemas(dbName);
             const result = await runQueryFn(query);
             if (!result) return;
 
@@ -355,12 +328,8 @@ export class CachePrefetcher {
 
     private async prefetchAllTablesAndViews(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
         try {
-            const query = `
-                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, COALESCE(DESCRIPTION, '') AS DESCRIPTION
-                FROM _V_OBJECT_DATA 
-                WHERE OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
-                ORDER BY DBNAME, SCHEMA, OBJNAME
-            `;
+            // Use centralized query for listing tables and views (global search)
+            const query = NZ_QUERIES.listTablesAndViews();
 
             const result = await runQueryFn(query);
             if (!result) return;
@@ -447,30 +416,8 @@ export class CachePrefetcher {
 
             // Process all databases in parallel
             const dbPromises = Array.from(tablesByDb.entries()).map(async ([dbName, dbBatch]) => {
-                // Enhanced query with PK/FK information and description
-                const query = `
-                    SELECT 
-                        O.OBJNAME AS TABLENAME, 
-                        O.SCHEMA, 
-                        O.DBNAME, 
-                        C.ATTNAME, 
-                        C.FORMAT_TYPE, 
-                        C.ATTNUM,
-                        COALESCE(C.DESCRIPTION, '') AS DESCRIPTION,
-                        MAX(CASE WHEN K.CONTYPE = 'p' THEN 1 ELSE 0 END) AS IS_PK,
-                        MAX(CASE WHEN K.CONTYPE = 'f' THEN 1 ELSE 0 END) AS IS_FK
-                    FROM ${dbName}.._V_RELATION_COLUMN C
-                    JOIN ${dbName}.._V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                    LEFT JOIN ${dbName}.._V_RELATION_KEYDATA K 
-                        ON UPPER(K.RELATION) = UPPER(O.OBJNAME) 
-                        AND UPPER(K.SCHEMA) = UPPER(O.SCHEMA)
-                        AND UPPER(K.ATTNAME) = UPPER(C.ATTNAME)
-                        AND K.CONTYPE IN ('p', 'f')
-                    WHERE O.DBNAME = '${dbName}' 
-                    AND O.OBJTYPE IN ('TABLE', 'VIEW', 'EXTERNAL TABLE')
-                    GROUP BY O.OBJNAME, O.SCHEMA, O.DBNAME, C.ATTNAME, C.FORMAT_TYPE, C.ATTNUM, C.DESCRIPTION
-                    ORDER BY O.SCHEMA, O.OBJNAME, C.ATTNUM
-                `;
+                // Use centralized query builder for columns with PK/FK info
+                const query = NZ_QUERIES.listColumnsWithKeys(dbName);
 
                 try {
                     const queryStartTime = Date.now();

@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import { runQueryRaw, queryResultToRows } from '../core/queryRunner';
 import { ConnectionManager } from '../core/connectionManager';
+import { NZ_QUERIES } from '../metadata/systemQueries';
 
 /**
  * Represents a table node in the ERD
@@ -62,27 +63,8 @@ export async function getForeignKeysForSchema(
     database: string,
     schema: string
 ): Promise<RelationshipEdge[]> {
-    const sql = `
-        SELECT 
-            X.SCHEMA,
-            X.RELATION AS FROM_TABLE,
-            X.CONSTRAINTNAME,
-            X.ATTNAME AS FROM_COLUMN,
-            X.PKDATABASE,
-            X.PKSCHEMA,
-            X.PKRELATION AS TO_TABLE,
-            X.PKATTNAME AS TO_COLUMN,
-            X.UPDT_TYPE,
-            X.DEL_TYPE,
-            X.CONSEQ
-        FROM 
-            ${database.toUpperCase()}.._V_RELATION_KEYDATA X
-        WHERE 
-            X.CONTYPE = 'f'
-            AND X.SCHEMA = '${schema.toUpperCase()}'
-        ORDER BY
-            X.CONSTRAINTNAME, X.CONSEQ
-    `;
+    // Use centralized query builder for FK relationships
+    const sql = NZ_QUERIES.getForeignKeyRelationships(database, schema);
 
     const relationships = new Map<string, RelationshipEdge>();
 
