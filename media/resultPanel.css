@@ -334,6 +334,15 @@ thead {
     background-color: var(--header-bg);
 }
 
+/* Ensure header text within flex container can shrink and show ellipsis
+   so action icons (filter, aggregation) are not clipped for long names */
+thead th > div > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 th {
     padding: 8px;
     text-align: left;

@@ -1908,6 +1908,12 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
     headerText.innerHTML = header.column.columnDef.header;
     headerText.style.cursor = 'pointer';
     headerText.style.flex = '1';
+    // Allow the header text to shrink and be truncated so action icons (filter/agg)
+    // don't get pushed out of the header when column names are very long.
+    headerText.style.minWidth = '0';
+    headerText.style.overflow = 'hidden';
+    headerText.style.textOverflow = 'ellipsis';
+    headerText.style.whiteSpace = 'nowrap';
 
     // Add sorting indicator
     const isSorted = header.column.getIsSorted();
@@ -1928,6 +1934,8 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
     filterBtn.style.marginLeft = '4px';
     filterBtn.style.opacity = '0.6';
     filterBtn.style.userSelect = 'none';
+    // Prevent the filter button from shrinking so it remains visible
+    filterBtn.style.flexShrink = '0';
 
     // Check if column has active filter (array or condition-based)
     const currentFilter = table.getColumn(header.column.id).getFilterValue();
@@ -1959,6 +1967,7 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
     aggBtn.style.marginLeft = '6px';
     aggBtn.style.opacity = '0.6';
     aggBtn.style.userSelect = 'none';
+    aggBtn.style.flexShrink = '0';
 
     // Highlight if aggregation is active for this column
     const currentAgg = (aggregationStates[rsIndex] || {})[header.column.id];

@@ -361,38 +361,54 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
     /**
      * Helper: Run up to N promises with max concurrency limit
      * Useful for limiting database connections to prevent overload
+     * 
+     * Uses a worker pool pattern to avoid race conditions
      */
     private async runWithConcurrencyLimit<T>(
         tasks: Array<() => Promise<T>>,
         maxConcurrency: number
     ): Promise<T[]> {
-        const results: T[] = [];
-        let nextIndex = 0;
-        const promises: Promise<void>[] = [];
+        if (tasks.length === 0) {
+            return [];
+        }
 
-        const runTask = async (index: number, task: () => Promise<T>) => {
-            try {
-                const result = await task();
-                results[index] = result;
-            } finally {
-                // Start next task if available
-                if (nextIndex < tasks.length) {
-                    const taskIndex = nextIndex++;
-                    promises.push(runTask(taskIndex, tasks[taskIndex]));
+        const results: T[] = new Array(tasks.length);
+        let nextIndex = 0;
+
+        // Worker function that processes tasks from the queue
+        const worker = async (): Promise<void> => {
+            while (true) {
+                // Atomically get next task index
+                const currentIndex = nextIndex;
+                if (currentIndex >= tasks.length) {
+                    break; // No more tasks
+                }
+                nextIndex = currentIndex + 1;
+
+                try {
+                    const result = await tasks[currentIndex]();
+                    results[currentIndex] = result;
+                } catch (e) {
+                    // Log error but continue processing other tasks
+                    console.debug(`Task ${currentIndex} failed:`, e);
+                    // Store empty array for failed tasks to avoid undefined
+                    results[currentIndex] = [] as unknown as T;
                 }
             }
         };
 
-        // Start initial batch
-        const initialBatchSize = Math.min(maxConcurrency, tasks.length);
-        for (let i = 0; i < initialBatchSize; i++) {
-            promises.push(runTask(i, tasks[i]));
-            nextIndex++;
+        // Start worker pool - each worker processes tasks sequentially
+        const workerCount = Math.min(maxConcurrency, tasks.length);
+        const workers: Promise<void>[] = [];
+        for (let i = 0; i < workerCount; i++) {
+            workers.push(worker());
         }
 
-        // Wait for all promises
-        await Promise.all(promises);
-        return results;
+        // Wait for all workers to complete
+        await Promise.all(workers);
+
+        // Filter out any undefined values (shouldn't happen now, but safety check)
+        return results.filter((r): r is T => r !== undefined);
     }
 
     /**
