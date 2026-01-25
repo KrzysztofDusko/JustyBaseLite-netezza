@@ -30,17 +30,15 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                 `$(loading~spin) Revealing ${data.name} in schema...`
             );
             try {
-                let targetConnectionName: string | undefined;
-
-                const activeEditor = vscode.window.activeTextEditor;
-                if (activeEditor && activeEditor.document.languageId === 'sql') {
-                    targetConnectionName = connectionManager.getConnectionForExecution(
-                        activeEditor.document.uri.toString()
-                    );
-                }
+                let targetConnectionName: string | undefined = data.connectionName;
 
                 if (!targetConnectionName) {
-                    targetConnectionName = data.connectionName;
+                    const activeEditor = vscode.window.activeTextEditor;
+                    if (activeEditor && activeEditor.document.languageId === 'sql') {
+                        targetConnectionName = connectionManager.getConnectionForExecution(
+                            activeEditor.document.uri.toString()
+                        );
+                    }
                 }
 
                 if (!targetConnectionName) {
@@ -53,8 +51,8 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                     return;
                 }
 
+                const searchType = data.objType?.trim().toUpperCase();
                 let searchName = data.name;
-                const searchType = data.objType;
 
                 if (searchType === 'COLUMN') {
                     if (!data.parent) {
@@ -111,16 +109,20 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                 const targetDb = data.database || (await connectionManager.getCurrentDatabase(targetConnectionName));
 
                 if (targetDb) {
+                    let effectiveSearchType = searchType;
+                    if (effectiveSearchType === 'EXTERNAL TABLE') {
+                        effectiveSearchType = 'TABLE';
+                    }
                     const typeFilter =
-                        searchType && searchType !== 'COLUMN' ? `AND UPPER(OBJTYPE) = UPPER('${searchType}')` : '';
+                        effectiveSearchType && effectiveSearchType !== 'COLUMN' ? `AND UPPER(OBJTYPE) = UPPER('${effectiveSearchType}')` : '';
                     const schemaFilter = data.schema
-                        ? `AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''")}')`
+                        ? `AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''").trim()}')`
                         : '';
 
                     const query = `
                         SELECT OBJNAME, OBJTYPE, SCHEMA, OBJID 
                         FROM ${targetDb}.._V_OBJECT_DATA 
-                        WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''")}') 
+                        WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''").trim()}') 
                         AND DBNAME = '${targetDb}'
                         ${typeFilter}
                         ${schemaFilter}
@@ -202,15 +204,22 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                         for (const db of databases) {
                             const dbName = db.DATABASE;
                             try {
+                                let effectiveSearchType = searchType;
+                                if (effectiveSearchType === 'EXTERNAL TABLE') {
+                                    effectiveSearchType = 'TABLE';
+                                }
+                                const typeFilter =
+                                    effectiveSearchType && effectiveSearchType !== 'COLUMN' ? `AND UPPER(OBJTYPE) = UPPER('${effectiveSearchType}')` : '';
                                 const schemaFilter = data.schema
-                                    ? `AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''")}')`
+                                    ? `AND UPPER(SCHEMA) = UPPER('${data.schema.replace(/'/g, "''").trim()}')`
                                     : '';
 
                                 const query = `
                                     SELECT OBJNAME, OBJTYPE, SCHEMA, OBJID 
                                     FROM ${dbName}.._V_OBJECT_DATA 
-                                    WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''")}') 
+                                    WHERE UPPER(OBJNAME) = UPPER('${searchName.replace(/'/g, "''").trim()}') 
                                     AND DBNAME = '${dbName}'
+                                    ${typeFilter}
                                     ${schemaFilter}
                                     LIMIT 1
                                 `;
