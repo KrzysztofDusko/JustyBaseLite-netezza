@@ -23,10 +23,10 @@ import { activateSqlLinter } from './providers/sqlLinterProvider';
 import { NetezzaLinterCodeActionProvider } from './providers/linterCodeActions';
 import { EtlDesignerView } from './views/etlDesignerView';
 import { EtlProjectManager } from './etl/etlProjectManager';
-import { 
-    CopilotService, 
-    SchemaTool, 
-    ColumnsTool, 
+import {
+    CopilotService,
+    SchemaTool,
+    ColumnsTool,
     TablesTool,
     ExecuteQueryTool,
     SampleDataTool,
@@ -40,7 +40,8 @@ import {
     ProceduresTool,
     ViewsTool,
     ExternalTablesTool,
-    GetObjectDefinitionTool
+    GetObjectDefinitionTool,
+    NetezzaReferenceTool
 } from './services/copilotService';
 
 // Import modular command registrations
@@ -64,6 +65,7 @@ import {
 } from './editors/decorationManager';
 import { registerSqlShortcuts } from './editors/sqlShortcuts';
 import { buildExecCommand } from './utils/shellUtils';
+import { NZ_SYSTEM_VIEWS } from './metadata';
 
 // Known SQL extensions that may conflict with Netezza
 const KNOWN_SQL_EXTENSIONS = [
@@ -152,8 +154,8 @@ async function getDatabaseList(
         }
     }
 
-    const query = `SELECT DATABASE FROM _V_DATABASE ORDER BY DATABASE`;
-    
+    const query = `SELECT DATABASE FROM ${NZ_SYSTEM_VIEWS.DATABASE} ORDER BY DATABASE`;
+
     const result = await runQueryRaw(
         context,
         query,
@@ -361,27 +363,9 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }),
 
-        vscode.commands.registerCommand('netezza.copilotFixSqlInteractive', async () => {
-            try {
-                await copilotService.fixSqlInteractive();
-            } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
-            }
-        }),
-
         vscode.commands.registerCommand('netezza.copilotOptimizeSql', async () => {
             try {
                 await copilotService.optimizeSql();
-            } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
-            }
-        }),
-
-        vscode.commands.registerCommand('netezza.copilotOptimizeSqlInteractive', async () => {
-            try {
-                await copilotService.optimizeSqlInteractive();
             } catch (e: unknown) {
                 const msg = e instanceof Error ? e.message : String(e);
                 vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
@@ -397,27 +381,9 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }),
 
-        vscode.commands.registerCommand('netezza.copilotExplainSqlInteractive', async () => {
-            try {
-                await copilotService.explainSqlInteractive();
-            } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
-            }
-        }),
-
         vscode.commands.registerCommand('netezza.copilotCustomQuestion', async () => {
             try {
                 await copilotService.askCustomQuestion();
-            } catch (e: unknown) {
-                const msg = e instanceof Error ? e.message : String(e);
-                vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
-            }
-        }),
-
-        vscode.commands.registerCommand('netezza.copilotCustomQuestionInteractive', async () => {
-            try {
-                await copilotService.askCustomQuestionInteractive();
             } catch (e: unknown) {
                 const msg = e instanceof Error ? e.message : String(e);
                 vscode.window.showErrorMessage(`Copilot Error: ${msg}`);
@@ -576,6 +542,12 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.lm.registerTool('netezza_get_object_definition', getObjectDefinitionTool)
     );
 
+    // Register the #netezzaReference tool for getting Netezza optimization hints and NZPLSQL docs
+    const netezzaReferenceTool = new NetezzaReferenceTool(copilotService);
+    context.subscriptions.push(
+        vscode.lm.registerTool('netezza_reference', netezzaReferenceTool)
+    );
+
     // ========== Core Commands (kept in extension.ts) ==========
     context.subscriptions.push(
         vscode.commands.registerCommand('netezza.viewEditData', (item: EditDataItem) => {
@@ -637,7 +609,7 @@ END_PROC;`;
                 vscode.window.showWarningMessage('Please open a SQL file first.');
                 return;
             }
-            
+
             const documentUri = editor.document.uri.toString();
             const newState = connectionManager.toggleDocumentKeepConnectionOpen(documentUri);
             updateKeepConnectionStatusBar(keepConnectionStatusBar, connectionManager);
@@ -714,7 +686,7 @@ END_PROC;`;
 
             const documentUri = editor.document.uri.toString();
             const connectionName = connectionManager.getConnectionForExecution(documentUri);
-            
+
             if (!connectionName) {
                 vscode.window.showWarningMessage('No connection selected. Please select a connection first.');
                 return;
@@ -723,14 +695,14 @@ END_PROC;`;
             // Get list of databases from the server
             try {
                 const databases = await getDatabaseList(context, connectionManager, connectionName, metadataCache);
-                
+
                 if (databases.length === 0) {
                     vscode.window.showWarningMessage('No databases found on server.');
                     return;
                 }
 
                 const currentDatabase = await connectionManager.getEffectiveDatabase(documentUri);
-                
+
                 const items = databases.map(db => ({
                     label: db,
                     description: db === currentDatabase ? '$(check) Currently selected' : '',

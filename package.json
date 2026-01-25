@@ -2,7 +2,7 @@
   "name": "justybaselite-netezza",
   "displayName": "JustyBaseLite - Netezza",
   "description": "Execute Netezza / IBM PureData System for Analytics SQL queries",
-  "version": "1.0.8",
+  "version": "1.0.11",
   "publisher": "krzysztof-d",
   "author": {
     "name": "krzysztof-d",
@@ -324,43 +324,23 @@
       },
       {
         "command": "netezza.copilotFixSql",
-        "title": "Copilot: Fix SQL (Auto)",
+        "title": "Copilot: Fix SQL",
         "icon": "$(lightbulb)"
       },
       {
-        "command": "netezza.copilotFixSqlInteractive",
-        "title": "Copilot: Fix SQL (Interactive Chat)",
-        "icon": "$(comment-discussion)"
-      },
-      {
         "command": "netezza.copilotOptimizeSql",
-        "title": "Copilot: Optimize SQL (Auto)",
+        "title": "Copilot: Optimize SQL",
         "icon": "$(rocket)"
       },
       {
-        "command": "netezza.copilotOptimizeSqlInteractive",
-        "title": "Copilot: Optimize SQL (Interactive Chat)",
-        "icon": "$(comment-discussion)"
-      },
-      {
         "command": "netezza.copilotExplainSql",
-        "title": "Copilot: Explain SQL (Auto)",
+        "title": "Copilot: Explain SQL",
         "icon": "$(book)"
       },
       {
-        "command": "netezza.copilotExplainSqlInteractive",
-        "title": "Copilot: Explain SQL (Interactive Chat)",
-        "icon": "$(comment-discussion)"
-      },
-      {
         "command": "netezza.copilotCustomQuestion",
-        "title": "Copilot: Ask Custom Question (Auto)",
+        "title": "Copilot: Ask Question",
         "icon": "$(comment)"
-      },
-      {
-        "command": "netezza.copilotCustomQuestionInteractive",
-        "title": "Copilot: Ask Custom Question (Interactive Chat)",
-        "icon": "$(comment-discussion)"
       },
       {
         "command": "netezza.copilotGenerateSql",
@@ -404,7 +384,13 @@
         "userDescription": "Gets table schema (DDL) for tables referenced in the current SQL file",
         "modelDescription": "This tool retrieves the database schema (DDL - Data Definition Language) for all tables referenced in the currently open SQL file. It analyzes the SQL code to find FROM, JOIN, INSERT INTO, UPDATE, DELETE FROM clauses, extracts table names, and fetches their column definitions, data types, and key constraints (PK/FK) from the connected IBM Netezza database. Use this tool when you need to understand the structure of tables used in a SQL query, or when optimizing/fixing SQL that involves specific tables. The tool requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "schema", "netezza", "ddl"],
+        "tags": [
+          "sql",
+          "database",
+          "schema",
+          "netezza",
+          "ddl"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -423,13 +409,21 @@
         "userDescription": "Gets column definitions for specified tables from the connected Netezza database",
         "modelDescription": "This tool retrieves column metadata (column names, data types, nullability, PK/FK constraints) for specified tables from the connected IBM Netezza database. Provide a list of table names and the database name. Tables can be specified as simple names, SCHEMA.TABLE, or DB.SCHEMA.TABLE format. Use this when you need detailed column information for specific tables without analyzing SQL code. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "columns", "netezza", "metadata"],
+        "tags": [
+          "sql",
+          "database",
+          "columns",
+          "netezza",
+          "metadata"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
             "tables": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "description": "List of table names to get columns for. Can be TABLE, SCHEMA.TABLE, or DB.SCHEMA.TABLE format."
             },
             "database": {
@@ -437,7 +431,9 @@
               "description": "Database name. Required when table names don't include database prefix."
             }
           },
-          "required": ["tables"]
+          "required": [
+            "tables"
+          ]
         }
       },
       {
@@ -448,7 +444,13 @@
         "userDescription": "Gets list of tables from a database or all databases in connected Netezza server",
         "modelDescription": "This tool retrieves a list of all tables and views from the connected IBM Netezza server. IMPORTANT: A Netezza connection provides access to multiple databases. When 'database' parameter is NOT specified, this tool searches across ALL accessible databases in the connection. When 'database' IS specified, it searches only in that specific database. Returns table names along with their database, schema, type (TABLE/VIEW), and owner information. Use this when you need to explore what tables exist. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "tables", "netezza", "metadata"],
+        "tags": [
+          "sql",
+          "database",
+          "tables",
+          "netezza",
+          "metadata"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -472,7 +474,13 @@
         "userDescription": "Execute a SELECT query and return results (read-only, max 100 rows)",
         "modelDescription": "This tool executes a SELECT query on the connected IBM Netezza database and returns the results. ONLY SELECT queries are allowed for safety - INSERT, UPDATE, DELETE, DROP and other DDL/DML operations are blocked. Use this tool to retrieve data, verify query results, or analyze data patterns. Results are limited to prevent large data transfers. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "query", "netezza", "execute"],
+        "tags": [
+          "sql",
+          "database",
+          "query",
+          "netezza",
+          "execute"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -485,7 +493,9 @@
               "description": "Maximum number of rows to return. Default is 100, max is 1000."
             }
           },
-          "required": ["sql"]
+          "required": [
+            "sql"
+          ]
         }
       },
       {
@@ -496,7 +506,13 @@
         "userDescription": "Get sample rows from a table to understand its data structure",
         "modelDescription": "This tool retrieves sample data rows from a specified table in the connected IBM Netezza database. Use this to understand what data looks like, identify data patterns, or verify table contents. Returns a formatted table with actual data values. Helpful for understanding data types, NULL patterns, and value distributions. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "sample", "netezza", "data"],
+        "tags": [
+          "sql",
+          "database",
+          "sample",
+          "netezza",
+          "data"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -513,7 +529,9 @@
               "description": "Number of sample rows to return. Default is 10, max is 100."
             }
           },
-          "required": ["table"]
+          "required": [
+            "table"
+          ]
         }
       },
       {
@@ -524,7 +542,14 @@
         "userDescription": "Get the execution plan for a SQL query to analyze performance",
         "modelDescription": "This tool runs EXPLAIN on a SQL query to retrieve its execution plan from the Netezza optimizer. Use this to analyze query performance, identify bottlenecks like data redistribution or broadcasts, check if zone maps are being used, and optimize query structure. The plan shows how Netezza will execute the query across SPUs. Use verbose=true for more detail. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "explain", "netezza", "performance", "optimization"],
+        "tags": [
+          "sql",
+          "database",
+          "explain",
+          "netezza",
+          "performance",
+          "optimization"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -537,7 +562,9 @@
               "description": "If true, uses EXPLAIN VERBOSE for more detailed plan. Default is false."
             }
           },
-          "required": ["sql"]
+          "required": [
+            "sql"
+          ]
         }
       },
       {
@@ -548,7 +575,14 @@
         "userDescription": "Search for tables or columns by name pattern across all databases",
         "modelDescription": "This tool searches the database schema for tables and/or columns matching a name pattern. IMPORTANT: A Netezza connection provides access to multiple databases. When 'database' parameter is NOT specified, this tool searches across ALL accessible databases in the connection. When 'database' IS specified, it searches only in that specific database. Use SQL wildcards (% for any characters, _ for single character) in the pattern. Returns matching objects with their database, schema, type, and metadata. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "search", "netezza", "schema", "metadata"],
+        "tags": [
+          "sql",
+          "database",
+          "search",
+          "netezza",
+          "schema",
+          "metadata"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -558,7 +592,11 @@
             },
             "searchType": {
               "type": "string",
-              "enum": ["tables", "columns", "all"],
+              "enum": [
+                "tables",
+                "columns",
+                "all"
+              ],
               "description": "What to search: 'tables' (tables/views only), 'columns' (columns only), or 'all' (both). Default is 'all'."
             },
             "database": {
@@ -566,7 +604,9 @@
               "description": "Database to search in. Optional - if not specified, searches ALL databases accessible via the connection."
             }
           },
-          "required": ["pattern"]
+          "required": [
+            "pattern"
+          ]
         }
       },
       {
@@ -577,7 +617,14 @@
         "userDescription": "Get table statistics including row count, size, and data skew",
         "modelDescription": "This tool retrieves comprehensive statistics for a table including: row count (actual and estimated), page count, column count, distribution key, owner, and data skew analysis across SPUs. Use this to understand table size, check for data distribution problems, and make optimization decisions. High skew (>20%) indicates uneven data distribution that may cause performance issues. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "statistics", "netezza", "skew", "performance"],
+        "tags": [
+          "sql",
+          "database",
+          "statistics",
+          "netezza",
+          "skew",
+          "performance"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -590,7 +637,9 @@
               "description": "Database name. Required if table name doesn't include database prefix."
             }
           },
-          "required": ["table"]
+          "required": [
+            "table"
+          ]
         }
       },
       {
@@ -601,7 +650,14 @@
         "userDescription": "Find views and procedures that depend on a table or view",
         "modelDescription": "This tool analyzes object dependencies in the database. For a given table or view, it finds: views that reference it, procedures that use it, and (for views) what objects the view depends on. Use this before modifying or dropping objects to understand impact, or to understand the data lineage and relationships. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "dependencies", "netezza", "impact", "lineage"],
+        "tags": [
+          "sql",
+          "database",
+          "dependencies",
+          "netezza",
+          "impact",
+          "lineage"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -614,7 +670,9 @@
               "description": "Database name. Uses current database if not specified."
             }
           },
-          "required": ["object"]
+          "required": [
+            "object"
+          ]
         }
       },
       {
@@ -625,7 +683,14 @@
         "userDescription": "Validate SQL syntax without executing the query",
         "modelDescription": "This tool validates SQL syntax and object references without actually executing the query. It uses EXPLAIN to parse and plan the query, which catches syntax errors, missing tables/columns, and permission issues. Use this to verify SQL correctness before suggesting it to users, or to check if referenced objects exist. Returns detailed error messages with suggestions for common problems. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "validate", "netezza", "syntax", "check"],
+        "tags": [
+          "sql",
+          "database",
+          "validate",
+          "netezza",
+          "syntax",
+          "check"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -634,7 +699,9 @@
               "description": "The SQL statement to validate."
             }
           },
-          "required": ["sql"]
+          "required": [
+            "sql"
+          ]
         }
       },
       {
@@ -645,7 +712,13 @@
         "userDescription": "Get list of all databases accessible via the connection",
         "modelDescription": "This tool retrieves a list of all databases accessible via the current Netezza connection. IMPORTANT: A Netezza connection provides access to multiple databases. Use this tool to discover what databases are available before exploring their contents with other tools. Returns database names with their owner and creation date. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "netezza", "metadata", "list"],
+        "tags": [
+          "sql",
+          "database",
+          "netezza",
+          "metadata",
+          "list"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {},
@@ -660,7 +733,13 @@
         "userDescription": "Get list of schemas in a database or across all databases",
         "modelDescription": "This tool retrieves a list of schemas from the connected IBM Netezza server. When 'database' parameter is specified, returns schemas from that specific database. When 'database' is NOT specified, returns schemas from ALL accessible databases. Use this to explore the schema structure of the database. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "schema", "netezza", "metadata"],
+        "tags": [
+          "sql",
+          "database",
+          "schema",
+          "netezza",
+          "metadata"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -680,7 +759,13 @@
         "userDescription": "Get list of stored procedures",
         "modelDescription": "This tool retrieves a list of stored procedures from the connected IBM Netezza server. When 'database' is specified, searches only in that database. When not specified, searches ALL accessible databases. Optionally filter by schema. Returns procedure names with their signature, return type, and owner. Use getObjectDefinition tool to retrieve the actual source code of a procedure. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "procedure", "netezza", "metadata"],
+        "tags": [
+          "sql",
+          "database",
+          "procedure",
+          "netezza",
+          "metadata"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -704,7 +789,13 @@
         "userDescription": "Get list of views",
         "modelDescription": "This tool retrieves a list of views from the connected IBM Netezza server. When 'database' is specified, searches only in that database. When not specified, searches ALL accessible databases. Optionally filter by schema. Returns view names with their schema and owner. Use getObjectDefinition tool to retrieve the actual SQL definition of a view. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "view", "netezza", "metadata"],
+        "tags": [
+          "sql",
+          "database",
+          "view",
+          "netezza",
+          "metadata"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -728,7 +819,14 @@
         "userDescription": "Get list of external tables with data object information",
         "modelDescription": "This tool retrieves a list of external tables from the connected IBM Netezza server, including their associated data objects (DATAOBJECT/EXTOBJNAME). External tables in Netezza reference external data sources. When 'database' is specified, searches only in that database. When not specified, searches ALL accessible databases. Use 'dataObjectPattern' to search for tables by their data object name (supports % wildcard). Returns table names with their data object name, location, and owner. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "external", "netezza", "metadata", "dataobject"],
+        "tags": [
+          "sql",
+          "database",
+          "external",
+          "netezza",
+          "metadata",
+          "dataobject"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -756,7 +854,15 @@
         "userDescription": "Get source code of a view or stored procedure",
         "modelDescription": "This tool retrieves the full source code/definition of a view or stored procedure from the connected IBM Netezza database. For views, it returns the SELECT statement that defines the view. For procedures, it returns the full procedure source code including arguments, return type, and body. Use this when you need to understand the logic of a view or procedure, analyze dependencies, or help modify existing code. Object name can be specified as NAME, SCHEMA.NAME, or DATABASE.SCHEMA.NAME format. Requires an active database connection.",
         "canBeReferencedInPrompt": true,
-        "tags": ["sql", "database", "view", "procedure", "netezza", "source", "definition"],
+        "tags": [
+          "sql",
+          "database",
+          "view",
+          "procedure",
+          "netezza",
+          "source",
+          "definition"
+        ],
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -766,7 +872,10 @@
             },
             "objectType": {
               "type": "string",
-              "enum": ["view", "procedure"],
+              "enum": [
+                "view",
+                "procedure"
+              ],
               "description": "Type of object: 'view' or 'procedure'."
             },
             "database": {
@@ -774,7 +883,43 @@
               "description": "Database name. Optional if included in objectName or to search all databases."
             }
           },
-          "required": ["objectName", "objectType"]
+          "required": [
+            "objectName",
+            "objectType"
+          ]
+        }
+      },
+      {
+        "name": "netezza_reference",
+        "displayName": "Netezza Reference",
+        "toolReferenceName": "netezzaReference",
+        "icon": "$(book)",
+        "userDescription": "Get Netezza optimization rules and NZPLSQL stored procedure syntax reference",
+        "modelDescription": "IMPORTANT: This tool provides essential IBM Netezza-specific documentation. You SHOULD use this tool whenever working with SQL code in this workspace - all SQL files here are Netezza SQL (IBM PureData System for Analytics). Netezza has unique syntax, optimization patterns, and stored procedure language (NZPLSQL) that differ from standard SQL. Use this tool BEFORE writing, optimizing, or fixing any SQL to ensure you apply correct Netezza-specific patterns. Topics: 'optimization' returns SQL performance rules (zone maps, distribution keys, avoiding broadcasts, SPU parallelism), 'nzplsql' returns stored procedure syntax (BEGIN_PROC/END_PROC, EXECUTE IMMEDIATE, REFTABLE), 'all' returns both. Without this reference, you may suggest generic SQL patterns that don't work or perform poorly on Netezza.",
+        "canBeReferencedInPrompt": true,
+        "tags": [
+          "sql",
+          "netezza",
+          "optimization",
+          "nzplsql",
+          "procedures",
+          "best-practices",
+          "documentation"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string",
+              "enum": [
+                "optimization",
+                "nzplsql",
+                "all"
+              ],
+              "description": "Topic to retrieve: 'optimization' for SQL optimization rules, 'nzplsql' for stored procedure syntax, 'all' for both (default)."
+            }
+          },
+          "required": []
         }
       }
     ],
@@ -903,44 +1048,24 @@
           "group": "netezza_copilot@1"
         },
         {
-          "command": "netezza.copilotFixSqlInteractive",
+          "command": "netezza.copilotOptimizeSql",
           "when": "resourceLangId == sql && editorHasSelection",
           "group": "netezza_copilot@2"
         },
         {
-          "command": "netezza.copilotOptimizeSql",
+          "command": "netezza.copilotExplainSql",
           "when": "resourceLangId == sql && editorHasSelection",
           "group": "netezza_copilot@3"
         },
         {
-          "command": "netezza.copilotOptimizeSqlInteractive",
+          "command": "netezza.copilotCustomQuestion",
           "when": "resourceLangId == sql && editorHasSelection",
           "group": "netezza_copilot@4"
         },
         {
-          "command": "netezza.copilotExplainSql",
-          "when": "resourceLangId == sql && editorHasSelection",
-          "group": "netezza_copilot@5"
-        },
-        {
-          "command": "netezza.copilotExplainSqlInteractive",
-          "when": "resourceLangId == sql && editorHasSelection",
-          "group": "netezza_copilot@6"
-        },
-        {
-          "command": "netezza.copilotCustomQuestion",
-          "when": "resourceLangId == sql && editorHasSelection",
-          "group": "netezza_copilot@7"
-        },
-        {
-          "command": "netezza.copilotCustomQuestionInteractive",
-          "when": "resourceLangId == sql && editorHasSelection",
-          "group": "netezza_copilot@8"
-        },
-        {
           "command": "netezza.copilotGenerateSql",
           "when": "resourceLangId == sql",
-          "group": "netezza_copilot@9"
+          "group": "netezza_copilot@5"
         }
       ],
       "view/title": [
@@ -1195,7 +1320,10 @@
         },
         "justyBaseLite.copilot.preferredLanguage": {
           "type": "string",
-          "enum": ["english", "system"],
+          "enum": [
+            "english",
+            "system"
+          ],
           "default": "english",
           "enumDescriptions": [
             "Always respond in English",

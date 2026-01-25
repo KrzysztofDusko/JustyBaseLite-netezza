@@ -4,7 +4,7 @@
  */
 
 import { ColumnInfo, KeyInfo, BatchDDLOptions, BatchDDLResult } from './types';
-import { executeQueryHelper } from './helpers';
+import { executeQueryHelper, createConnectionFromDetails } from './helpers';
 import { NzConnection } from '../types';
 import { buildTableDDLFromCache } from './tableDDL';
 import { generateViewDDL } from './viewDDL';
@@ -27,17 +27,8 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
     const supportedTypes = ['TABLE', 'VIEW', 'PROCEDURE', 'EXTERNAL TABLE', 'SYNONYM'];
 
     try {
-        const config = {
-            host: options.connectionDetails.host,
-            port: options.connectionDetails.port || 5480,
-            database: options.connectionDetails.database,
-            user: options.connectionDetails.user,
-            password: options.connectionDetails.password
-        };
-
-        const NzConnection = require('../../libs/driver/src/NzConnection');
-        connection = new NzConnection(config);
-        await connection!.connect();
+        // Connect to the target database to ensure we can read all definition/source columns correctly
+        connection = await createConnectionFromDetails(options.connectionDetails, options.database);
 
         const database = options.database.toUpperCase();
         const schemaFilter = options.schema ? options.schema.toUpperCase() : null;

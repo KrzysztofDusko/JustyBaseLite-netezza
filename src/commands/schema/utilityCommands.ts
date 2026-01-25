@@ -297,7 +297,7 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
         // Clear Query History
         vscode.commands.registerCommand('netezza.clearQueryHistory', async () => {
             const { QueryHistoryManager } = await import('../../core/queryHistoryManager');
-            const historyManager = new QueryHistoryManager(context);
+            const historyManager = QueryHistoryManager.getInstance(context);
 
             const confirm = await vscode.window.showWarningMessage(
                 'Are you sure you want to clear all query history?',

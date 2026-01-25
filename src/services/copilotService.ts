@@ -14,7 +14,7 @@ import { extractVariables } from '../core/variableUtils';
 import { generateTableDDL } from '../ddl';
 import { createConnectionFromDetails, executeQueryHelper } from '../ddl/helpers';
 import { NzConnection, ConnectionDetails } from '../types';
-import { NZ_QUERIES, NZ_OBJECT_TYPES } from '../metadata/systemQueries';
+import { NZ_QUERIES, NZ_OBJECT_TYPES, NZ_SYSTEM_VIEWS } from '../metadata/systemQueries';
 
 export interface CopilotContext {
     selectedSql: string;
@@ -209,7 +209,7 @@ IMPORTANT NOTES:
         try {
             // Get available Copilot models
             const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-            
+
             if (models.length === 0) {
                 this.statusBarItem.text = '$(copilot) No Models';
                 this.statusBarItem.tooltip = 'No Copilot models available';
@@ -230,11 +230,11 @@ IMPORTANT NOTES:
             // If no valid model selected, pick a default
             if (!this.selectedModelId) {
                 // Prefer gpt-4 or similar high capability models
-                const preferred = models.find(m => 
-                    m.family.toLowerCase().includes('gpt-4o') || 
+                const preferred = models.find(m =>
+                    m.family.toLowerCase().includes('gpt-4o') ||
                     m.family.toLowerCase().includes('claude-3-5-sonnet')
                 ) || models[0];
-                
+
                 this.selectedModelId = preferred.id;
                 await this.context.workspaceState.update('copilot.selectedModelId', this.selectedModelId);
                 console.log(`[CopilotService] Auto-selected model: ${preferred.name || preferred.family}`);
@@ -259,7 +259,7 @@ IMPORTANT NOTES:
         try {
             // Only get models from copilot vendor to avoid unsupported model errors
             const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-            
+
             const modelItems = models.map(m => {
                 type ModelMeta = { detail?: string; tooltip?: string };
                 const meta = m as unknown as ModelMeta;
@@ -267,8 +267,8 @@ IMPORTANT NOTES:
                 const explicit = meta.detail ?? meta.tooltip;
                 const cost = explicit?.match(/(0x|\d+(?:\.\d+)?x)/i)?.[1];
 
-                return { 
-                    label: `$(sparkle) ${m.name || m.family}`, 
+                return {
+                    label: `$(sparkle) ${m.name || m.family}`,
                     description: cost ? `${cost} cost` : undefined,
                     detail: `${m.vendor} • ${m.family} • Max tokens: ${m.maxInputTokens}${explicit ? ' • ' + explicit : ''}`,
                     modelId: m.id,
@@ -277,8 +277,8 @@ IMPORTANT NOTES:
             });
 
             if (modelItems.length === 0) {
-                 vscode.window.showWarningMessage('No AI models detected. Ensure GitHub Copilot is installed and you are signed in.');
-                 return;
+                vscode.window.showWarningMessage('No AI models detected. Ensure GitHub Copilot is installed and you are signed in.');
+                return;
             }
 
             const selected = await vscode.window.showQuickPick(modelItems, {
@@ -305,10 +305,10 @@ IMPORTANT NOTES:
 
     private updateStatusBar() {
         if (this.selectedModelId) {
-             vscode.lm.selectChatModels().then(models => {
+            vscode.lm.selectChatModels().then(models => {
                 const model = models.find(m => m.id === this.selectedModelId);
                 const name = model ? (model.name || model.family) : 'Copilot';
-                
+
                 // Try to extract cost from model metadata
                 let costLabel = '';
                 if (model) {
@@ -320,11 +320,11 @@ IMPORTANT NOTES:
                         costLabel = ` [${cost}]`;
                     }
                 }
-                
+
                 this.statusBarItem.text = `$(copilot) ${name}${costLabel}`;
                 this.statusBarItem.tooltip = `Using model: ${name}${costLabel}. Click to change.`;
                 this.statusBarItem.show();
-             });
+            });
         }
     }
 
@@ -361,12 +361,42 @@ IMPORTANT NOTES:
     }
 
     /**
+     * Helper to select Copilot response mode (Auto apply vs Chat)
+     */
+    private async selectCopilotMode(action: string): Promise<'auto' | 'chat' | undefined> {
+        const result = await vscode.window.showQuickPick(
+            [
+                { label: '$(zap) Auto', description: 'Apply changes directly via diff', value: 'auto' as const },
+                { label: '$(comment-discussion) Chat', description: 'Discuss in Copilot Chat', value: 'chat' as const }
+            ],
+            { placeHolder: `${action} - Select mode` }
+        );
+        return result?.value;
+    }
+
+    /**
      * Detects if SQL contains a stored procedure definition
      * Matches: CREATE PROCEDURE, CREATE OR REPLACE PROCEDURE
      */
     private isProcedureCode(sql: string): boolean {
         const procedurePattern = /CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\s+/i;
         return procedurePattern.test(sql);
+    }
+
+    /**
+     * Gets Netezza-specific reference documentation for LM tools.
+     * Used by NetezzaReferenceTool to provide optimization hints and NZPLSQL documentation.
+     * 
+     * @param topic Optional topic filter: 'optimization', 'nzplsql', or 'all' (default)
+     */
+    public getNetezzaReference(topic: 'optimization' | 'nzplsql' | 'all' = 'all'): string {
+        if (topic === 'optimization') {
+            return this.NETEZZA_OPTIMIZATION_RULES;
+        } else if (topic === 'nzplsql') {
+            return this.NZPLSQL_PROCEDURE_REFERENCE;
+        } else {
+            return `${this.NETEZZA_OPTIMIZATION_RULES}\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
+        }
     }
 
     /**
@@ -390,7 +420,7 @@ IMPORTANT NOTES:
 
         // Extract variables from SQL
         const variables = extractVariables(selectedSql);
-        const variablesStr = variables.size > 0 
+        const variablesStr = variables.size > 0
             ? `Variables: ${Array.from(variables).join(', ')}`
             : 'No variables detected';
 
@@ -398,14 +428,14 @@ IMPORTANT NOTES:
         const connectionName = this.connectionManager.getDocumentConnection(document.uri.toString())
             || this.connectionManager.getActiveConnectionName()
             || undefined;
-        
+
         const connectionInfo = connectionName
             ? `Connected to: ${connectionName}`
             : 'No connection selected';
 
         // Extract table references from SQL
         const tableRefs = this.extractTableReferences(selectedSql);
-        
+
         // Gather DDL for referenced tables
         const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
 
@@ -509,13 +539,13 @@ IMPORTANT NOTES:
     ): Promise<string> {
         const cached = this.ddlCache.get(key);
         const now = Date.now();
-        
+
         // Return cached if still valid
         if (cached && (now - cached.timestamp) < this.DDL_CACHE_TTL) {
             console.log(`[CopilotService] Using cached DDL for ${key}`);
             return cached.ddl;
         }
-        
+
         // Fetch fresh DDL
         const ddl = await fetcher();
         this.ddlCache.set(key, { ddl, timestamp: now });
@@ -542,7 +572,7 @@ IMPORTANT NOTES:
         try {
             // Use centralized query builder for finding table schema
             const sql = NZ_QUERIES.findTableSchema(database, tableName.replace(/'/g, "''"));
-            
+
             interface SchemaRow { SCHEMA: string }
             const result = await executeQueryHelper<SchemaRow>(connection, sql);
             if (result && result.length > 0) {
@@ -620,7 +650,7 @@ IMPORTANT NOTES:
                     if (!schema) {
                         schema = await this.findTableSchema(nzConnection, database, tableRef.name);
                     }
-                    
+
                     if (!schema) {
                         ddlLines.push(`-- Table: ${database}..${tableRef.name} (table not found in database)`);
                         ddlLines.push('');
@@ -632,11 +662,11 @@ IMPORTANT NOTES:
 
                     // Use cache to avoid redundant queries
                     const cacheKey = `${connectionName}|${database}|${schema}|${tableName}`;
-                    
+
                     const ddl = await this.getCachedDDL(cacheKey, async () => {
                         return await generateTableDDL(nzConnection, database!, schema!, tableName);
                     });
-                    
+
                     if (ddl && !ddl.toLowerCase().includes('not found')) {
                         ddlLines.push(`-- Table: ${displayName}`);
                         ddlLines.push(ddl);
@@ -677,9 +707,9 @@ IMPORTANT NOTES:
     private formatDdlForPrompt(ddlContext: string): string {
         // Check if DDL contains actual table definitions (CREATE TABLE, columns, etc.)
         // vs just error messages or "not found" notices
-        const hasValidDdl = ddlContext.includes('CREATE TABLE') || 
-                           (ddlContext.includes('-- Table:') && !ddlContext.includes('error retrieving') && !ddlContext.includes('not found'));
-        
+        const hasValidDdl = ddlContext.includes('CREATE TABLE') ||
+            (ddlContext.includes('-- Table:') && !ddlContext.includes('error retrieving') && !ddlContext.includes('not found'));
+
         if (hasValidDdl) {
             return '```sql\n' + ddlContext + '\n```';
         } else {
@@ -726,7 +756,7 @@ IMPORTANT NOTES:
         // Get language preference
         const config = vscode.workspace.getConfiguration('justyBaseLite.copilot');
         const preferredLanguage = config.get<string>('preferredLanguage') || 'english';
-        
+
         let languageInstruction = '';
         if (preferredLanguage === 'system') {
             // Use VS Code's display language as proxy for system language
@@ -791,16 +821,16 @@ ${context.selectedSql}
                 throw new Error('No AI model selected.');
             }
         }
-        
+
         // Find the model object - only from copilot vendor to avoid unsupported models
         const allModels = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-        
+
         if (allModels.length === 0) {
             throw new Error('No Copilot models available. Ensure GitHub Copilot extension is installed and you are signed in.');
         }
-        
+
         let model = allModels.find(m => m.id === this.selectedModelId);
-        
+
         // If selected model is not available, clear it and pick first available
         if (!model) {
             console.warn(`[CopilotService] Model ${this.selectedModelId} not found, selecting first available model...`);
@@ -808,16 +838,16 @@ ${context.selectedSql}
             this.selectedModelId = model.id;
             await this.context.workspaceState.update('copilot.selectedModelId', this.selectedModelId);
             this.updateStatusBar();
-            
+
             vscode.window.showWarningMessage(
                 `Previously selected model is unavailable. Switched to: ${model.name || model.family}`
             );
         }
-        
+
         console.log(`[CopilotService] Using model: ${model.id} (${model.name || model.family})`);
-        
+
         if (!model) {
-             throw new Error('No valid Copilot model available.');
+            throw new Error('No valid Copilot model available.');
         }
 
         const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
@@ -825,13 +855,13 @@ ${context.selectedSql}
 
         let response = '';
         try {
-             console.log(`[CopilotService] Sending request to ${model.id}`);
-             const modelResponse = await model.sendRequest(messages, {}, cancellationToken);
-             for await (const chunk of modelResponse.text) {
-                 response += chunk;
-             }
+            console.log(`[CopilotService] Sending request to ${model.id}`);
+            const modelResponse = await model.sendRequest(messages, {}, cancellationToken);
+            for await (const chunk of modelResponse.text) {
+                response += chunk;
+            }
         } catch (err) {
-             throw new Error(`Model request failed: ${err instanceof Error ? err.message : String(err)}`);
+            throw new Error(`Model request failed: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         if (!response.trim()) {
@@ -840,10 +870,10 @@ ${context.selectedSql}
 
         // Cleanup response
         const cleanResponse = response.trim()
-                .replace(/^```sql\n?/i, '')
-                .replace(/^```\n?/i, '')
-                .replace(/\n?```$/i, '')
-                .trim();
+            .replace(/^```sql\n?/i, '')
+            .replace(/^```\n?/i, '')
+            .replace(/\n?```$/i, '')
+            .trim();
 
         // Apply Diff View if editing is requested
         if (shouldEdit) {
@@ -878,19 +908,27 @@ ${context.selectedSql}
     }
 
     /**
-     * Quick action: Fix SQL with context (Auto mode - applies changes via diff)
+     * Quick action: Fix SQL with context
+     * User selects between Auto (applies via diff) or Chat (interactive discussion)
      */
     async fixSql(): Promise<void> {
         try {
+            const mode = await this.selectCopilotMode('Fix SQL');
+            if (!mode) return;
+
             const context = await this.gatherContext();
             let prompt = this.getPrompt('fix');
-            
+
             // Add NZPLSQL reference if code contains stored procedure
             if (this.isProcedureCode(context.selectedSql)) {
                 prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
             }
-            
-            await this.sendToLanguageModel(context, prompt, true);
+
+            if (mode === 'auto') {
+                await this.sendToLanguageModel(context, prompt, true);
+            } else {
+                await this.sendToChatInteractive(context, prompt, 'Fix SQL');
+            }
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             vscode.window.showErrorMessage(`Error fixing SQL: ${msg}`);
@@ -898,61 +936,28 @@ ${context.selectedSql}
     }
 
     /**
-     * Quick action: Fix SQL with context (Interactive mode - opens chat)
-     */
-    async fixSqlInteractive(): Promise<void> {
-        try {
-            const context = await this.gatherContext();
-            let prompt = this.getPrompt('fix');
-            
-            // Add NZPLSQL reference if code contains stored procedure
-            if (this.isProcedureCode(context.selectedSql)) {
-                prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
-            }
-            
-            await this.sendToChatInteractive(context, prompt, 'Fix SQL with Context');
-        } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            vscode.window.showErrorMessage(`Error fixing SQL: ${msg}`);
-        }
-    }
-
-    /**
-     * Quick action: Optimize SQL with context (Auto mode - applies changes via diff)
+     * Quick action: Optimize SQL with context
+     * User selects between Auto (applies via diff) or Chat (interactive discussion)
      */
     async optimizeSql(): Promise<void> {
         try {
-            const context = await this.gatherContext();
-            const basePrompt = this.getPrompt('optimize');
-            let prompt = `${basePrompt}\n\n${this.NETEZZA_OPTIMIZATION_RULES}`;
-            
-            // Add NZPLSQL reference if code contains stored procedure
-            if (this.isProcedureCode(context.selectedSql)) {
-                prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
-            }
-            
-            await this.sendToLanguageModel(context, prompt, true);
-        } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            vscode.window.showErrorMessage(`Error optimizing SQL: ${msg}`);
-        }
-    }
+            const mode = await this.selectCopilotMode('Optimize SQL');
+            if (!mode) return;
 
-    /**
-     * Quick action: Optimize SQL with context (Interactive mode - opens chat)
-     */
-    async optimizeSqlInteractive(): Promise<void> {
-        try {
             const context = await this.gatherContext();
             const basePrompt = this.getPrompt('optimize');
             let prompt = `${basePrompt}\n\n${this.NETEZZA_OPTIMIZATION_RULES}`;
-            
+
             // Add NZPLSQL reference if code contains stored procedure
             if (this.isProcedureCode(context.selectedSql)) {
                 prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
             }
-            
-            await this.sendToChatInteractive(context, prompt, 'Optimize SQL');
+
+            if (mode === 'auto') {
+                await this.sendToLanguageModel(context, prompt, true);
+            } else {
+                await this.sendToChatInteractive(context, prompt, 'Optimize SQL');
+            }
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             vscode.window.showErrorMessage(`Error optimizing SQL: ${msg}`);
@@ -961,25 +966,34 @@ ${context.selectedSql}
 
     /**
      * Quick action: Explain SQL with context
-     * IMPROVED: Shows explanation in a new document instead of just console
+     * User selects between Document (new markdown) or Chat (interactive discussion)
      */
     async explainSql(): Promise<void> {
         try {
+            const mode = await vscode.window.showQuickPick(
+                [
+                    { label: '$(file-text) Document', description: 'Show explanation in new document', value: 'document' as const },
+                    { label: '$(comment-discussion) Chat', description: 'Discuss in Copilot Chat', value: 'chat' as const }
+                ],
+                { placeHolder: 'How would you like the explanation?' }
+            );
+            if (!mode) return;
+
             const context = await this.gatherContext();
             const prompt = this.getPrompt('explain');
 
-            // For explain, we don't edit - just show response
-            const response = await this.sendToLanguageModel(context, prompt, false);
-            
-            // Show explanation in a new markdown document
-            const doc = await vscode.workspace.openTextDocument({
-                content: `# SQL Query Explanation\n\n${response}`,
-                language: 'markdown'
-            });
-            
-            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-            
-            vscode.window.showInformationMessage('✅ SQL explanation opened in new editor');
+            if (mode.value === 'document') {
+                // Show explanation in a new markdown document
+                const response = await this.sendToLanguageModel(context, prompt, false);
+                const doc = await vscode.workspace.openTextDocument({
+                    content: `# SQL Query Explanation\n\n${response}`,
+                    language: 'markdown'
+                });
+                await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+                vscode.window.showInformationMessage('✅ SQL explanation opened in new editor');
+            } else {
+                await this.sendToChatInteractive(context, prompt, 'Explain SQL');
+            }
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             vscode.window.showErrorMessage(`Error explaining SQL: ${msg}`);
@@ -987,21 +1001,8 @@ ${context.selectedSql}
     }
 
     /**
-     * Quick action: Explain SQL with context (Interactive mode - opens chat)
-     */
-    async explainSqlInteractive(): Promise<void> {
-        try {
-            const context = await this.gatherContext();
-            const prompt = this.getPrompt('explain');
-            await this.sendToChatInteractive(context, prompt, 'Explain SQL');
-        } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            vscode.window.showErrorMessage(`Error explaining SQL: ${msg}`);
-        }
-    }
-
-    /**
-     * Custom question with full context (Auto mode)
+     * Custom question with full context
+     * User enters question and selects response mode
      */
     async askCustomQuestion(): Promise<void> {
         try {
@@ -1015,20 +1016,13 @@ ${context.selectedSql}
             }
 
             const context = await this.gatherContext();
-            
-            // Ask if user wants to apply changes or just get advice
+
+            // Ask how user wants to receive the response
             const action = await vscode.window.showQuickPick(
                 [
-                    { 
-                        label: '✏️ Apply SQL Changes', 
-                        description: 'Copilot will modify the SQL in editor', 
-                        value: 'edit' 
-                    },
-                    { 
-                        label: '💡 Just Ask for Advice', 
-                        description: 'Get response in new document without modifying code', 
-                        value: 'advice' 
-                    }
+                    { label: '$(edit) Apply Changes', description: 'Copilot modifies the SQL in editor', value: 'edit' as const },
+                    { label: '$(file-text) Document', description: 'Get response in new document', value: 'document' as const },
+                    { label: '$(comment-discussion) Chat', description: 'Discuss in Copilot Chat', value: 'chat' as const }
                 ],
                 { placeHolder: 'How would you like Copilot to respond?' }
             );
@@ -1037,41 +1031,18 @@ ${context.selectedSql}
                 return;
             }
 
-            const shouldEdit = action.value === 'edit';
-            
-            if (shouldEdit) {
+            if (action.value === 'edit') {
                 await this.sendToLanguageModel(context, userQuestion, true);
-            } else {
-                // Show advice in new document
+            } else if (action.value === 'document') {
                 const response = await this.sendToLanguageModel(context, userQuestion, false);
                 const doc = await vscode.workspace.openTextDocument({
                     content: `# Copilot Advice\n\n**Question:** ${userQuestion}\n\n${response}`,
                     language: 'markdown'
                 });
                 await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+            } else {
+                await this.sendToChatInteractive(context, userQuestion, 'Custom Question');
             }
-        } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            vscode.window.showErrorMessage(`Error: ${msg}`);
-        }
-    }
-
-    /**
-     * Custom question with full context (Interactive mode - opens chat)
-     */
-    async askCustomQuestionInteractive(): Promise<void> {
-        try {
-            const userQuestion = await vscode.window.showInputBox({
-                prompt: 'Ask Copilot about this SQL (opens in chat for interactive discussion)',
-                placeHolder: 'e.g., "How can I improve this query?" or "Add an index hint"'
-            });
-
-            if (!userQuestion) {
-                return;
-            }
-
-            const context = await this.gatherContext();
-            await this.sendToChatInteractive(context, userQuestion, 'Custom Question');
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
             vscode.window.showErrorMessage(`Error: ${msg}`);
@@ -1103,7 +1074,7 @@ ${context.selectedSql}
                 cancellable: false
             }, async () => {
                 const schemaOverview = await this.gatherSchemaOverview();
-                
+
                 if (!schemaOverview) {
                     vscode.window.showErrorMessage('Could not gather schema information. Please ensure you are connected to a database.');
                     return;
@@ -1111,7 +1082,7 @@ ${context.selectedSql}
 
                 // Build the prompt for SQL generation
                 const generateSqlPrompt = this.buildGenerateSqlPrompt(userDescription, schemaOverview);
-                
+
                 // Create a minimal context (no SQL selected, just connection info)
                 const connectionName = await this.connectionManager.getActiveConnectionName();
                 const context: CopilotContext = {
@@ -1150,15 +1121,15 @@ ${context.selectedSql}
         try {
             nzConnection = await createConnectionFromDetails(connectionDetails);
             const database = await this.connectionManager.getCurrentDatabase(connectionName);
-            
+
             if (!database) {
                 return null;
             }
 
             // Use centralized query builder for columns with PK/FK info
             // Note: Uses specialized schema overview query with TABLE_DESCRIPTION and COLUMN_DESCRIPTION aliases
-            const sql = NZ_QUERIES.listColumnsWithKeys(database, { 
-                objTypes: [NZ_OBJECT_TYPES.TABLE, NZ_OBJECT_TYPES.VIEW] 
+            const sql = NZ_QUERIES.listColumnsWithKeys(database, {
+                objTypes: [NZ_OBJECT_TYPES.TABLE, NZ_OBJECT_TYPES.VIEW]
             });
 
             interface SchemaRow {
@@ -1173,7 +1144,7 @@ ${context.selectedSql}
             }
 
             const result = await executeQueryHelper<SchemaRow>(nzConnection, sql);
-            
+
             if (!result || result.length === 0) {
                 return 'No tables found in database';
             }
@@ -1226,11 +1197,11 @@ ${context.selectedSql}
 
             for (const [schema, tables] of schemaGroups) {
                 lines.push(`[SCHEMA: ${schema}]`);
-                
+
                 for (const [, table] of tables) {
                     const tableDesc = table.tableDescription ? ` -- ${table.tableDescription}` : '';
                     lines.push(`  TABLE: ${table.tableName}${tableDesc}`);
-                    
+
                     // List columns with types and key indicators
                     const columnList = table.columns.map(c => {
                         const keyIndicators: string[] = [];
@@ -1301,8 +1272,8 @@ Please generate the SQL query:`;
      * Sends message to Copilot Chat with custom prompt (for SQL generation)
      */
     private async sendToChatInteractiveWithCustomPrompt(
-        _context: CopilotContext, 
-        customPrompt: string, 
+        _context: CopilotContext,
+        customPrompt: string,
         title: string
     ): Promise<void> {
         try {
@@ -1329,18 +1300,18 @@ Please generate the SQL query:`;
     async showAvailableModels(): Promise<void> {
         try {
             const allModels = await vscode.lm.selectChatModels();
-            
+
             if (allModels.length === 0) {
                 vscode.window.showWarningMessage('No Language Models available');
                 return;
             }
 
-            const modelInfo = allModels.map(m => 
+            const modelInfo = allModels.map(m =>
                 `• ${m.id}\n  Vendor: ${m.vendor}\n  Family: ${m.family}\n`
             ).join('\n');
 
             const copilotModels = allModels.filter(m => m.vendor === 'copilot');
-            
+
             const doc = await vscode.workspace.openTextDocument({
                 content: `# Available Language Models\n\n` +
                     `Total models: ${allModels.length}\n` +
@@ -1348,7 +1319,7 @@ Please generate the SQL query:`;
                     `## All Models\n\n${modelInfo}`,
                 language: 'markdown'
             });
-            
+
             await vscode.window.showTextDocument(doc);
         } catch (e: unknown) {
             const msg = e instanceof Error ? e.message : String(e);
@@ -1380,9 +1351,9 @@ Please generate the SQL query:`;
 
     private async showDiff(document: vscode.TextDocument, newContent: string): Promise<void> {
         const editor = vscode.window.activeTextEditor;
-        
+
         let rangeToReplace: vscode.Range;
-        
+
         // Determine if we are replacing selection or full document
         if (editor && !editor.selection.isEmpty) {
             rangeToReplace = editor.selection;
@@ -1396,7 +1367,7 @@ Please generate the SQL query:`;
         try {
             // Create a temporary document with suggested changes
             const originalText = document.getText(rangeToReplace);
-            
+
             // Check if there are any changes
             if (originalText.trim() === newContent.trim()) {
                 vscode.window.showInformationMessage('No changes detected - content is identical.');
@@ -1437,10 +1408,10 @@ Please generate the SQL query:`;
                 const edit = new vscode.WorkspaceEdit();
                 edit.replace(document.uri, rangeToReplace, newContent);
                 const success = await vscode.workspace.applyEdit(edit);
-                
+
                 if (success) {
                     vscode.window.showInformationMessage('✅ Changes applied successfully.');
-                    
+
                     if (choice === 'Apply & Close Diff') {
                         // Close the diff editor tabs
                         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
@@ -1474,7 +1445,7 @@ Please generate the SQL query:`;
             const rowCount = data.length;
             const columnCount = Object.keys(data[0] || {}).length;
             const dataSize = rowCount > 50 ? '50 (limited for context)' : rowCount;
-            
+
             const confirmed = await vscode.window.showWarningMessage(
                 `⚠️ Privacy Notice: You are about to send ${dataSize} rows with ${columnCount} columns to GitHub Copilot AI.\n\n` +
                 `This data will be transmitted to external servers for analysis. ` +
@@ -1492,14 +1463,14 @@ Please generate the SQL query:`;
 
             // Convert data to markdown table
             const markdown = this.convertDataToMarkdown(data);
-            
+
             // Build prompt
             let prompt = `Describe and analyze the following data from IBM Netezza Performance Server:\n\n`;
-            
+
             if (sql) {
                 prompt += `**Source Query:**\n\`\`\`sql\n${sql}\n\`\`\`\n\n`;
             }
-            
+
             prompt += `**Data (${data.length} rows):**\n\n${markdown}\n\n`;
             prompt += `Please provide:\n`;
             prompt += `1. A summary of the data patterns and key observations\n`;
@@ -1541,7 +1512,7 @@ Please generate the SQL query:`;
                 // Get language preference for response
                 const config = vscode.workspace.getConfiguration('justyBaseLite.copilot');
                 const preferredLanguage = config.get<string>('preferredLanguage') || 'english';
-                
+
                 let languageInstruction = '';
                 if (preferredLanguage === 'system') {
                     const displayLanguage = vscode.env.language;
@@ -1552,7 +1523,7 @@ Please generate the SQL query:`;
 
                 // Extract table references and gather DDL (same as other Copilot functions)
                 const tableRefs = this.extractTableReferences(sql);
-                
+
                 // Get active connection for DDL gathering
                 const connectionName = this.connectionManager.getActiveConnectionName() || undefined;
                 const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
@@ -1631,11 +1602,11 @@ Please:
 
         // Get column names from first row
         const columns = Object.keys(displayData[0]);
-        
+
         // Build header
         let markdown = '| ' + columns.join(' | ') + ' |\n';
         markdown += '| ' + columns.map(() => '---').join(' | ') + ' |\n';
-        
+
         // Build rows
         for (const row of displayData) {
             const values = columns.map(col => {
@@ -1700,7 +1671,7 @@ Please:
             // Create the chat participant
             const participant = vscode.chat.createChatParticipant('netezza.sqlcopilot', handler);
             participant.iconPath = vscode.Uri.joinPath(extensionContext.extensionUri, 'Icon.png');
-            
+
             // Add follow-up suggestions
             participant.followupProvider = {
                 provideFollowups: (result, _context, _token) => {
@@ -1752,7 +1723,7 @@ Please:
 
         // Extract table references
         const tableRefs = this.extractTableReferences(sql);
-        
+
         if (tableRefs.length === 0) {
             stream.markdown('ℹ️ No table references found in the current SQL.\n\nMake sure your SQL contains `FROM`, `JOIN`, `INSERT INTO`, `UPDATE`, or `DELETE FROM` clauses.');
             return { metadata: { command: 'schema', success: false } };
@@ -1772,7 +1743,7 @@ Please:
         stream.markdown(`## 📊 Schema Context for Current SQL\n\n`);
         stream.markdown(`**Connection:** ${connectionName || 'Not connected'}\n\n`);
         stream.markdown(`**Tables found:** ${tableRefs.map(t => `\`${t.database ? t.database + '.' : ''}${t.schema ? t.schema + '.' : ''}${t.name}\``).join(', ')}\n\n`);
-        
+
         if (ddlContext.includes('CREATE TABLE') || ddlContext.includes('-- Table:')) {
             stream.markdown(`### Table Definitions (DDL)\n\n\`\`\`sql\n${ddlContext}\n\`\`\`\n`);
         } else {
@@ -1807,7 +1778,7 @@ Please:
         const context = await this.gatherContext();
         const basePrompt = this.getPrompt('optimize');
         let prompt = `${basePrompt}\n\n${this.NETEZZA_OPTIMIZATION_RULES}`;
-        
+
         if (this.isProcedureCode(context.selectedSql)) {
             prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
         }
@@ -1821,10 +1792,10 @@ Please:
         const fullPrompt = `${systemPrompt}\n\n${prompt}`;
 
         const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
-        
+
         // Use the request's model to generate response
         const response = await request.model.sendRequest(messages, {}, token);
-        
+
         for await (const chunk of response.text) {
             stream.markdown(chunk);
         }
@@ -1845,7 +1816,7 @@ Please:
 
         const context = await this.gatherContext();
         let prompt = this.getPrompt('fix');
-        
+
         if (this.isProcedureCode(context.selectedSql)) {
             prompt += `\n\n${this.NZPLSQL_PROCEDURE_REFERENCE}`;
         }
@@ -1859,7 +1830,7 @@ Please:
 
         const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
         const response = await request.model.sendRequest(messages, {}, token);
-        
+
         for await (const chunk of response.text) {
             stream.markdown(chunk);
         }
@@ -1880,7 +1851,7 @@ Please:
 
         const context = await this.gatherContext();
         let prompt = this.getPrompt('explain');
-        
+
         if (request.prompt.trim()) {
             prompt += `\n\nFocus on: ${request.prompt}`;
         }
@@ -1890,7 +1861,7 @@ Please:
 
         const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
         const response = await request.model.sendRequest(messages, {}, token);
-        
+
         for await (const chunk of response.text) {
             stream.markdown(chunk);
         }
@@ -1930,7 +1901,7 @@ Please:
 
         const messages = [vscode.LanguageModelChatMessage.User(fullPrompt)];
         const response = await request.model.sendRequest(messages, {}, token);
-        
+
         for await (const chunk of response.text) {
             stream.markdown(chunk);
         }
@@ -1948,7 +1919,7 @@ Please:
         }
 
         const tableRefs = this.extractTableReferences(sql);
-        
+
         if (tableRefs.length === 0) {
             return 'No table references found in the provided SQL.';
         }
@@ -1978,7 +1949,7 @@ Please:
         }
 
         const tableRefs = this.extractTableReferences(sql);
-        
+
         if (tableRefs.length === 0) {
             return 'No table references found in the current SQL.';
         }
@@ -2004,7 +1975,7 @@ Please:
 
         // Convert table strings to TableReference objects
         const tableRefs: TableReference[] = [];
-        
+
         for (const tableSpec of tables) {
             // Parse table specification: can be TABLE, SCHEMA.TABLE, or DB.SCHEMA.TABLE
             const parts = tableSpec.split('.');
@@ -2035,7 +2006,7 @@ Please:
 
         // Use existing gatherTablesDDL method which handles connection and caching
         const ddlContext = await this.gatherTablesDDL(tableRefs, connectionName);
-        
+
         return ddlContext;
     }
 
@@ -2062,8 +2033,8 @@ Please:
                         lines.push('| Schema | Table | Type | Owner |');
                         lines.push('|--------|-------|------|-------|');
                         for (const t of cachedTables) {
-                             const type = t.objType === 'VIEW' ? 'VIEW' : 'TABLE';
-                             lines.push(`| ${schema} | ${t.label} | ${type} | ${t.OWNER || ''} |`);
+                            const type = t.objType === 'VIEW' ? 'VIEW' : 'TABLE';
+                            lines.push(`| ${schema} | ${t.label} | ${type} | ${t.OWNER || ''} |`);
                         }
                         lines.push(`\n**Total:** ${cachedTables.length} table(s)`);
                         return lines.join('\n');
@@ -2071,10 +2042,10 @@ Please:
                 } else {
                     // Start prefetch for all objects if not already done, to ensure cache is warm for next time
                     if (!this.metadataCache.hasConnectionPrefetchTriggered(connectionName)) {
-                         // Don't wait for prefetch here to avoid blocking, but trigger it
-                         // However, for this call, we may need to fall back to DB if cache is empty
+                        // Don't wait for prefetch here to avoid blocking, but trigger it
+                        // However, for this call, we may need to fall back to DB if cache is empty
                     }
-                    
+
                     // Note: querying all tables in a DB from cache requires iterating all schemas in cache
                     // getTablesAllSchemas does exactly this
                     const cachedTables = this.metadataCache.getTablesAllSchemas(connectionName, database);
@@ -2088,9 +2059,9 @@ Please:
                             // But getTablesAllSchemas returns TableMetadata which should have OBJNAME.
                             // The cache structure is per schema.
                             // Let's check TableMetadata definition. It has SCHEMA properly.
-                           lines.push(`| ${t.SCHEMA || ''} | ${t.label} | ${type} | ${t.OWNER || ''} |`);
+                            lines.push(`| ${t.SCHEMA || ''} | ${t.label} | ${type} | ${t.OWNER || ''} |`);
                         }
-                         lines.push(`\n**Total:** ${cachedTables.length} table(s)`);
+                        lines.push(`\n**Total:** ${cachedTables.length} table(s)`);
                         return lines.join('\n');
                     }
                 }
@@ -2126,7 +2097,7 @@ Please:
                                 OBJNAME AS table_name,
                                 OBJTYPE AS object_type,
                                 OWNER AS owner
-                            FROM _V_OBJECT_DATA
+                            FROM ${NZ_SYSTEM_VIEWS.OBJECT_DATA}
                             WHERE OBJTYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
                             AND SCHEMA = '${schema.toUpperCase()}'
                             ORDER BY DBNAME, SCHEMA, OBJNAME
@@ -2141,7 +2112,7 @@ Please:
                                 OBJNAME AS table_name,
                                 OBJTYPE AS object_type,
                                 OWNER AS owner
-                            FROM _V_OBJECT_DATA
+                            FROM ${NZ_SYSTEM_VIEWS.OBJECT_DATA}
                             WHERE OBJTYPE IN ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'EXTERNAL TABLE')
                             ORDER BY DBNAME, SCHEMA, OBJNAME
                             LIMIT 500
@@ -2164,7 +2135,7 @@ Please:
                                     ELSE RELKIND
                                 END AS object_type,
                                 OWNER AS owner
-                            FROM ${database}.._V_TABLE
+                            FROM ${database}..${NZ_SYSTEM_VIEWS.TABLE}
                             WHERE SCHEMA = '${schema.toUpperCase()}'
                             ORDER BY SCHEMA, TABLENAME
                         `;
@@ -2182,7 +2153,7 @@ Please:
                                     ELSE RELKIND
                                 END AS object_type,
                                 OWNER AS owner
-                            FROM ${database}.._V_TABLE
+                            FROM ${database}..${NZ_SYSTEM_VIEWS.TABLE}
                             ORDER BY SCHEMA, TABLENAME
                         `;
                     }
@@ -2190,7 +2161,7 @@ Please:
                 }
 
                 const result = await executeQueryHelper(connection, query);
-                
+
                 if (!result || result.length === 0) {
                     const schemaInfo = schema ? ` in schema ${schema}` : '';
                     const dbInfo = database ? ` in database ${database}` : ' across all databases';
@@ -2242,12 +2213,12 @@ Please:
         if (this.metadataCache) {
             const cached = this.metadataCache.getDatabases(connectionName);
             if (cached && cached.length > 0) {
-                 const lines: string[] = ['## Available Databases (from Cache)\n'];
-                 for (const db of cached) {
-                     lines.push(`- ${db.DATABASE}`);
-                 }
-                 lines.push(`\n**Total:** ${cached.length} database(s)`);
-                 return lines.join('\n');
+                const lines: string[] = ['## Available Databases (from Cache)\n'];
+                for (const db of cached) {
+                    lines.push(`- ${db.DATABASE}`);
+                }
+                lines.push(`\n**Total:** ${cached.length} database(s)`);
+                return lines.join('\n');
             }
         }
 
@@ -2265,7 +2236,7 @@ Please:
             try {
                 const query = `
                     SELECT DATABASE, OWNER, CREATEDATE
-                    FROM system.._v_database
+                    FROM ${NZ_SYSTEM_VIEWS.DATABASE}
                     ORDER BY DATABASE
                 `;
                 const result = await executeQueryHelper(connection, query);
@@ -2315,17 +2286,17 @@ Please:
             }
 
             if (targetDb && this.metadataCache) {
-                 const cached = this.metadataCache.getSchemas(connectionName, targetDb);
-                 // Check if cache actually has schemas (might return empty array if no schemas, which is valid, but we need to know if it was fetched)
-                 // getSchemas returns undefined if not cached
-                 if (cached) {
+                const cached = this.metadataCache.getSchemas(connectionName, targetDb);
+                // Check if cache actually has schemas (might return empty array if no schemas, which is valid, but we need to know if it was fetched)
+                // getSchemas returns undefined if not cached
+                if (cached) {
                     const lines: string[] = [`## Schemas in ${targetDb} (from Cache)\n`];
                     for (const s of cached) {
                         lines.push(`- ${s.SCHEMA}`);
                     }
                     lines.push(`\n**Total:** ${cached.length} schema(s)`);
                     return lines.join('\n');
-                 }
+                }
             }
 
             const connectionDetails = await this.connectionManager.getConnection(connectionName);
@@ -2345,7 +2316,7 @@ Please:
                 if (database) {
                     query = `
                         SELECT SCHEMA, OWNER, CREATEDATE
-                        FROM ${database}.._V_SCHEMA
+                        FROM ${database}..${NZ_SYSTEM_VIEWS.SCHEMA}
                         ORDER BY SCHEMA
                     `;
                     headerText = `## Schemas in ${database}\n`;
@@ -2353,7 +2324,7 @@ Please:
                     // Get schemas from all databases using global view
                     query = `
                         SELECT DISTINCT DBNAME AS DATABASE, SCHEMA, OWNER
-                        FROM _V_OBJECT_DATA
+                        FROM ${NZ_SYSTEM_VIEWS.OBJECT_DATA}
                         WHERE OBJTYPE IN ('TABLE', 'VIEW', 'PROCEDURE')
                         ORDER BY DBNAME, SCHEMA
                         LIMIT 200
@@ -2427,7 +2398,7 @@ Please:
                     // Search across all databases
                     query = `
                         SELECT DBNAME AS DATABASE, SCHEMA, OBJNAME AS PROCEDURE_NAME, OWNER
-                        FROM _V_OBJECT_DATA
+                        FROM ${NZ_SYSTEM_VIEWS.OBJECT_DATA}
                         WHERE OBJTYPE = 'PROCEDURE'
                         ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
                         ORDER BY DBNAME, SCHEMA, OBJNAME
@@ -2438,7 +2409,7 @@ Please:
                     query = `
                         SELECT '${database}' AS DATABASE, SCHEMA, PROCEDURE AS PROCEDURE_NAME, 
                                PROCEDURESIGNATURE, RETURNS, OWNER, DESCRIPTION
-                        FROM ${database}.._V_PROCEDURE
+                        FROM ${database}..${NZ_SYSTEM_VIEWS.PROCEDURE}
                         ${schema ? `WHERE SCHEMA = '${schema.toUpperCase()}'` : ''}
                         ORDER BY SCHEMA, PROCEDURE
                         LIMIT 200
@@ -2512,7 +2483,7 @@ Please:
                     // Search across all databases
                     query = `
                         SELECT DBNAME AS DATABASE, SCHEMA, OBJNAME AS VIEW_NAME, OWNER
-                        FROM _V_OBJECT_DATA
+                        FROM ${NZ_SYSTEM_VIEWS.OBJECT_DATA}
                         WHERE OBJTYPE = 'VIEW'
                         ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
                         ORDER BY DBNAME, SCHEMA, OBJNAME
@@ -2522,7 +2493,7 @@ Please:
                 } else {
                     query = `
                         SELECT '${database}' AS DATABASE, SCHEMA, VIEWNAME AS VIEW_NAME, OWNER
-                        FROM ${database}.._V_VIEW
+                        FROM ${database}..${NZ_SYSTEM_VIEWS.VIEW}
                         ${schema ? `WHERE SCHEMA = '${schema.toUpperCase()}'` : ''}
                         ORDER BY SCHEMA, VIEWNAME
                         LIMIT 200
@@ -2587,8 +2558,8 @@ Please:
                     query = `
                         SELECT E1.DATABASE, E1.SCHEMA, E1.TABLENAME AS TABLE_NAME, 
                                E2.EXTOBJNAME AS DATA_OBJECT, E2.OWNER
-                        FROM _V_EXTERNAL E1
-                        LEFT JOIN _V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE 
+                        FROM ${NZ_SYSTEM_VIEWS.EXTERNAL} E1
+                        LEFT JOIN ${NZ_SYSTEM_VIEWS.EXTOBJECT} E2 ON E1.DATABASE = E2.DATABASE 
                             AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
                         WHERE 1=1
                         ${schema ? `AND E1.SCHEMA = '${schema.toUpperCase()}'` : ''}
@@ -2601,8 +2572,8 @@ Please:
                     query = `
                         SELECT E1.DATABASE, E1.SCHEMA, E1.TABLENAME AS TABLE_NAME, 
                                E2.EXTOBJNAME AS DATA_OBJECT, E2.OWNER, E1.REMOTESOURCE AS LOCATION
-                        FROM ${database}.._V_EXTERNAL E1
-                        LEFT JOIN ${database}.._V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE 
+                        FROM ${database}..${NZ_SYSTEM_VIEWS.EXTERNAL} E1
+                        LEFT JOIN ${database}..${NZ_SYSTEM_VIEWS.EXTOBJECT} E2 ON E1.DATABASE = E2.DATABASE 
                             AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
                         WHERE 1=1
                         ${schema ? `AND E1.SCHEMA = '${schema.toUpperCase()}'` : ''}
@@ -2616,13 +2587,13 @@ Please:
                 const result = await executeQueryHelper(connection, query);
 
                 if (!result || result.length === 0) {
-                    return dataObjFilter 
+                    return dataObjFilter
                         ? `No external tables found matching data object pattern "${dataObjectPattern}".`
                         : 'No external tables found.';
                 }
 
                 const lines: string[] = [headerText];
-                
+
                 if (searchAllDatabases) {
                     lines.push('| Database | Schema | Table | Data Object | Owner |');
                     lines.push('|----------|--------|-------|-------------|-------|');
@@ -2730,7 +2701,7 @@ Please:
             let databases: string[];
             try {
                 const dbResult = await executeQueryHelper<{ DATABASE: string }>(
-                    defaultConnection, 
+                    defaultConnection,
                     NZ_QUERIES.LIST_DATABASES
                 );
                 databases = dbResult
@@ -2788,12 +2759,12 @@ Please:
 
         try {
             let query: string;
-            
+
             if (database) {
                 query = `
                     SELECT DATABASE, SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, ARGUMENTS, 
                            EXECUTEDASOWNER, OWNER, DESCRIPTION, PROCEDURESOURCE
-                    FROM ${database.toUpperCase()}.._V_PROCEDURE
+                    FROM ${database.toUpperCase()}..${NZ_SYSTEM_VIEWS.PROCEDURE}
                     WHERE UPPER(PROCEDURE) = '${objName}'
                     ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
                     LIMIT 10
@@ -2803,7 +2774,7 @@ Please:
                 query = `
                     SELECT DATABASE, SCHEMA, PROCEDURE, PROCEDURESIGNATURE, RETURNS, 
                            OWNER, PROCEDURESOURCE
-                    FROM _V_PROCEDURE
+                    FROM ${NZ_SYSTEM_VIEWS.PROCEDURE}
                     WHERE UPPER(PROCEDURE) = '${objName}'
                     ${schema ? `AND SCHEMA = '${schema.toUpperCase()}'` : ''}
                     LIMIT 10
@@ -3206,7 +3177,7 @@ Please:
                         try {
                             const dbQuery = NZ_QUERIES.LIST_DATABASES;
                             const dbs = await executeQueryHelper<{ DATABASE: string }>(connection, dbQuery);
-                            
+
                             if (dbs && dbs.length > 0) {
                                 const dbNames = dbs.map(d => d.DATABASE);
                                 const resultsLimit = 100;
@@ -3214,10 +3185,10 @@ Please:
                                 // Query each database individually (more reliable than UNION ALL)
                                 for (const db of dbNames) {
                                     if (columnResults.length >= resultsLimit) break;
-                                    
+
                                     // Use centralized search query for columns
                                     const dbColQuery = NZ_QUERIES.searchColumns(db, searchPattern);
-                                    
+
                                     try {
                                         const dbResults = await executeQueryHelper(connection, dbColQuery);
                                         if (dbResults && dbResults.length > 0) {
@@ -3230,7 +3201,7 @@ Please:
                                 }
                             }
                         } catch (e) {
-                             console.error('[searchSchema] Error fetching databases for column search:', e);
+                            console.error('[searchSchema] Error fetching databases for column search:', e);
                         }
                     } else {
                         // Use centralized search query for columns
@@ -3515,7 +3486,7 @@ Please:
                 return `✅ **SQL is valid**\n\nThe SQL syntax is correct and all referenced objects exist.`;
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
-                
+
                 // Parse error message for helpful feedback
                 const lines: string[] = [
                     '❌ **SQL Validation Failed**\n',
@@ -3563,8 +3534,8 @@ export interface ISchemaToolParameters {
  * The tool extracts table references from SQL and fetches their DDL from the connected database.
  */
 export class SchemaTool implements vscode.LanguageModelTool<ISchemaToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     /**
      * Prepares the tool invocation with confirmation message
@@ -3574,8 +3545,8 @@ export class SchemaTool implements vscode.LanguageModelTool<ISchemaToolParameter
         _token: vscode.CancellationToken
     ): Promise<vscode.PreparedToolInvocation> {
         // Determine what SQL we'll analyze
-        const sqlSource = options.input.sql 
-            ? 'provided SQL' 
+        const sqlSource = options.input.sql
+            ? 'provided SQL'
             : 'current editor';
 
         return {
@@ -3631,8 +3602,8 @@ export interface IColumnsToolParameters {
  * Users can reference it with #getColumns in chat.
  */
 export class ColumnsTool implements vscode.LanguageModelTool<IColumnsToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IColumnsToolParameters>,
@@ -3659,7 +3630,7 @@ export class ColumnsTool implements vscode.LanguageModelTool<IColumnsToolParamet
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { tables, database } = options.input;
-            
+
             if (!tables || tables.length === 0) {
                 throw new Error('No tables specified. Please provide at least one table name.');
             }
@@ -3690,8 +3661,8 @@ export interface ITablesToolParameters {
  * Users can reference it with #getTables in chat.
  */
 export class TablesTool implements vscode.LanguageModelTool<ITablesToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<ITablesToolParameters>,
@@ -3717,7 +3688,7 @@ export class TablesTool implements vscode.LanguageModelTool<ITablesToolParameter
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { database, schema } = options.input;
-            
+
             // Database is now optional - when not specified, searches all databases
             const tablesInfo = await this.copilotService.getTablesFromDatabase(database, schema);
 
@@ -3747,8 +3718,8 @@ export interface IExecuteQueryToolParameters {
  * Users can reference it with #executeQuery in chat.
  */
 export class ExecuteQueryTool implements vscode.LanguageModelTool<IExecuteQueryToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IExecuteQueryToolParameters>,
@@ -3774,7 +3745,7 @@ export class ExecuteQueryTool implements vscode.LanguageModelTool<IExecuteQueryT
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { sql, maxRows } = options.input;
-            
+
             if (!sql) {
                 throw new Error('SQL query is required.');
             }
@@ -3805,8 +3776,8 @@ export interface ISampleDataToolParameters {
  * Users can reference it with #sampleData in chat.
  */
 export class SampleDataTool implements vscode.LanguageModelTool<ISampleDataToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<ISampleDataToolParameters>,
@@ -3832,7 +3803,7 @@ export class SampleDataTool implements vscode.LanguageModelTool<ISampleDataToolP
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { table, database, sampleSize } = options.input;
-            
+
             if (!table) {
                 throw new Error('Table name is required.');
             }
@@ -3862,8 +3833,8 @@ export interface IExplainPlanToolParameters {
  * Users can reference it with #explainPlan in chat.
  */
 export class ExplainPlanTool implements vscode.LanguageModelTool<IExplainPlanToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IExplainPlanToolParameters>,
@@ -3889,7 +3860,7 @@ export class ExplainPlanTool implements vscode.LanguageModelTool<IExplainPlanToo
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { sql, verbose } = options.input;
-            
+
             if (!sql) {
                 throw new Error('SQL query is required.');
             }
@@ -3920,8 +3891,8 @@ export interface ISearchSchemaToolParameters {
  * Users can reference it with #searchSchema in chat.
  */
 export class SearchSchemaTool implements vscode.LanguageModelTool<ISearchSchemaToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<ISearchSchemaToolParameters>,
@@ -3947,7 +3918,7 @@ export class SearchSchemaTool implements vscode.LanguageModelTool<ISearchSchemaT
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { pattern, searchType, database } = options.input;
-            
+
             if (!pattern) {
                 throw new Error('Search pattern is required.');
             }
@@ -3977,8 +3948,8 @@ export interface ITableStatsToolParameters {
  * Users can reference it with #tableStats in chat.
  */
 export class TableStatsTool implements vscode.LanguageModelTool<ITableStatsToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<ITableStatsToolParameters>,
@@ -4003,7 +3974,7 @@ export class TableStatsTool implements vscode.LanguageModelTool<ITableStatsToolP
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { table, database } = options.input;
-            
+
             if (!table) {
                 throw new Error('Table name is required.');
             }
@@ -4033,8 +4004,8 @@ export interface IDependenciesToolParameters {
  * Users can reference it with #dependencies in chat.
  */
 export class DependenciesTool implements vscode.LanguageModelTool<IDependenciesToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IDependenciesToolParameters>,
@@ -4059,7 +4030,7 @@ export class DependenciesTool implements vscode.LanguageModelTool<IDependenciesT
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { object, database } = options.input;
-            
+
             if (!object) {
                 throw new Error('Object name is required.');
             }
@@ -4088,8 +4059,8 @@ export interface IValidateSqlToolParameters {
  * Users can reference it with #validateSql in chat.
  */
 export class ValidateSqlTool implements vscode.LanguageModelTool<IValidateSqlToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IValidateSqlToolParameters>,
@@ -4114,7 +4085,7 @@ export class ValidateSqlTool implements vscode.LanguageModelTool<IValidateSqlToo
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { sql } = options.input;
-            
+
             if (!sql) {
                 throw new Error('SQL is required.');
             }
@@ -4146,8 +4117,8 @@ export interface IDatabasesToolParameters {
  * Users can reference it with #databases in chat.
  */
 export class DatabasesTool implements vscode.LanguageModelTool<IDatabasesToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         _options: vscode.LanguageModelToolInvocationPrepareOptions<IDatabasesToolParameters>,
@@ -4191,8 +4162,8 @@ export interface ISchemasToolParameters {
  * Users can reference it with #schemas in chat.
  */
 export class SchemasTool implements vscode.LanguageModelTool<ISchemasToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<ISchemasToolParameters>,
@@ -4239,8 +4210,8 @@ export interface IProceduresToolParameters {
  * Users can reference it with #procedures in chat.
  */
 export class ProceduresTool implements vscode.LanguageModelTool<IProceduresToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IProceduresToolParameters>,
@@ -4288,8 +4259,8 @@ export interface IViewsToolParameters {
  * Users can reference it with #views in chat.
  */
 export class ViewsTool implements vscode.LanguageModelTool<IViewsToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IViewsToolParameters>,
@@ -4338,8 +4309,8 @@ export interface IExternalTablesToolParameters {
  * Users can reference it with #externalTables in chat.
  */
 export class ExternalTablesTool implements vscode.LanguageModelTool<IExternalTablesToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IExternalTablesToolParameters>,
@@ -4364,7 +4335,7 @@ export class ExternalTablesTool implements vscode.LanguageModelTool<IExternalTab
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const result = await this.copilotService.getExternalTables(
-                options.input.database, 
+                options.input.database,
                 options.input.schema,
                 options.input.dataObjectPattern
             );
@@ -4393,8 +4364,8 @@ export interface IGetObjectDefinitionToolParameters {
  * Users can reference it with #objectDefinition in chat.
  */
 export class GetObjectDefinitionTool implements vscode.LanguageModelTool<IGetObjectDefinitionToolParameters> {
-    
-    constructor(private copilotService: CopilotService) {}
+
+    constructor(private copilotService: CopilotService) { }
 
     async prepareInvocation(
         options: vscode.LanguageModelToolInvocationPrepareOptions<IGetObjectDefinitionToolParameters>,
@@ -4418,7 +4389,7 @@ export class GetObjectDefinitionTool implements vscode.LanguageModelTool<IGetObj
     ): Promise<vscode.LanguageModelToolResult> {
         try {
             const { objectName, objectType, database } = options.input;
-            
+
             if (!objectName) {
                 throw new Error('Object name is required.');
             }
@@ -4435,5 +4406,64 @@ export class GetObjectDefinitionTool implements vscode.LanguageModelTool<IGetObj
             const errorMsg = e instanceof Error ? e.message : String(e);
             throw new Error(`Failed to get object definition: ${errorMsg}`);
         }
+    }
+}
+
+// ========== NETEZZA REFERENCE TOOL ==========
+
+/**
+ * Interface for NetezzaReference Tool input parameters
+ */
+export interface INetezzaReferenceToolParameters {
+    topic?: 'optimization' | 'nzplsql' | 'all';
+}
+
+/**
+ * Language Model Tool for getting Netezza-specific reference documentation.
+ * Provides optimization rules and NZPLSQL stored procedure syntax reference.
+ * 
+ * This tool allows Copilot agents to access Netezza best practices and syntax
+ * documentation during regular chat interactions without requiring the user
+ * to use specific commands.
+ * 
+ * Topics:
+ * - 'optimization': SQL optimization rules for Netezza (zone maps, distribution keys, etc.)
+ * - 'nzplsql': NZPLSQL stored procedure syntax reference
+ * - 'all': Both optimization and NZPLSQL documentation (default)
+ */
+export class NetezzaReferenceTool implements vscode.LanguageModelTool<INetezzaReferenceToolParameters> {
+
+    constructor(private copilotService: CopilotService) { }
+
+    async prepareInvocation(
+        options: vscode.LanguageModelToolInvocationPrepareOptions<INetezzaReferenceToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.PreparedToolInvocation> {
+        const topic = options.input.topic || 'all';
+        const topicDescriptions: Record<string, string> = {
+            'optimization': 'SQL optimization best practices',
+            'nzplsql': 'NZPLSQL stored procedure syntax',
+            'all': 'all Netezza documentation'
+        };
+
+        return {
+            invocationMessage: `Getting Netezza reference: ${topicDescriptions[topic]}...`,
+            confirmationMessages: {
+                title: 'Get Netezza Reference',
+                message: new vscode.MarkdownString(`Retrieve **${topicDescriptions[topic]}** for IBM Netezza?`)
+            }
+        };
+    }
+
+    async invoke(
+        options: vscode.LanguageModelToolInvocationOptions<INetezzaReferenceToolParameters>,
+        _token: vscode.CancellationToken
+    ): Promise<vscode.LanguageModelToolResult> {
+        const topic = options.input.topic || 'all';
+        const result = this.copilotService.getNetezzaReference(topic);
+
+        return new vscode.LanguageModelToolResult([
+            new vscode.LanguageModelTextPart(result)
+        ]);
     }
 }

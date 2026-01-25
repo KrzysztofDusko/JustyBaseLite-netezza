@@ -679,15 +679,15 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         try {
             let query = '';
             if (schemaName) {
-                query = `SELECT OBJNAME, OBJID, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND UPPER(SCHEMA) = UPPER('${schemaName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
+                query = `SELECT OBJNAME, OBJID, OBJTYPE, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND UPPER(SCHEMA) = UPPER('${schemaName}') AND OBJTYPE IN ('TABLE', 'VIEW') ORDER BY OBJNAME`;
             } else {
-                query = `SELECT OBJNAME, OBJID, SCHEMA, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE='TABLE' ORDER BY OBJNAME`;
+                query = `SELECT OBJNAME, OBJID, OBJTYPE, SCHEMA, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${dbName}.._V_OBJECT_DATA WHERE UPPER(DBNAME) = UPPER('${dbName}') AND OBJTYPE IN ('TABLE', 'VIEW') ORDER BY OBJNAME`;
             }
 
             const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
             if (!result) return [];
 
-            const results = queryResultToRows<{ OBJNAME: string; OBJID: number; SCHEMA?: string; DESCRIPTION?: string }>(result);
+            const results = queryResultToRows<{ OBJNAME: string; OBJID: number; OBJTYPE: string; SCHEMA?: string; DESCRIPTION?: string }>(result);
             const idMapForKey = new Map<string, number>();
 
             const items: TableMetadata[] = results.map(row => {
@@ -700,14 +700,19 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
                 // Populate map while iterating
                 idMapForKey.set(fullKey, row.OBJID);
 
+                const isView = row.OBJTYPE === 'VIEW';
+                const kind = isView ? 18 : 6; // Interface for VIEW, Class for TABLE
+                const typeLabel = isView ? 'View' : 'Table';
+
                 return {
                     OBJNAME: row.OBJNAME,
                     TABLENAME: row.OBJNAME,
                     OBJID: row.OBJID,
                     SCHEMA: schema,
                     label: label,
-                    kind: 6, // Class
-                    detail: schemaName ? 'Table' : `Table (${schema})`,
+                    kind: kind,
+                    objType: row.OBJTYPE,
+                    detail: schemaName ? typeLabel : `${typeLabel} (${schema})`,
                     sortText: row.OBJNAME,
                     DESCRIPTION: row.DESCRIPTION
                 };

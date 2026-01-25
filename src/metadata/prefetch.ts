@@ -164,7 +164,7 @@ export class CachePrefetcher {
 
     // ========== All Objects Prefetch ==========
 
-    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
+    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerRawFn, skipIfCached = false, databases?: string[]): Promise<void> {
         const key = `ALL_OBJECTS|${connectionName}`;
         if (this.allObjectsPrefetchTriggeredSet.has(key)) {
             return;
@@ -174,8 +174,19 @@ export class CachePrefetcher {
         console.log(`[CachePrefetcher] Starting background prefetch of all objects (Connection: ${connectionName})`);
 
         try {
-            // Use centralized query for listing tables and views (global search)
-            const tablesQuery = NZ_QUERIES.listTablesAndViews();
+            // Ensure we have a list of databases (required for listTablesAndViews to populate descriptions)
+            let targetDatabases = databases;
+            if (!targetDatabases || targetDatabases.length === 0) {
+                targetDatabases = await this.prefetchDatabases(connectionName, runQueryFn);
+            }
+
+            if (!targetDatabases || targetDatabases.length === 0) {
+                console.warn(`[CachePrefetcher] prefetchAllObjects aborted - no databases found for ${connectionName}`);
+                return;
+            }
+
+            // Use centralized query for listing tables and views (global or per-database when provided)
+            const tablesQuery = NZ_QUERIES.listTablesAndViews(targetDatabases);
 
             const result = await runQueryFn(tablesQuery);
             if (!result) return;
@@ -208,6 +219,10 @@ export class CachePrefetcher {
             }
 
             for (const [key, entry] of tablesByKey) {
+                // Only skip if explicitly requested AND data already exists
+                if (skipIfCached && this.storage.getTables(connectionName, key)) {
+                    continue;
+                }
                 this.storage.setTables(connectionName, key, entry.tables, entry.idMap);
             }
 
@@ -259,8 +274,8 @@ export class CachePrefetcher {
             databases.map(dbName => this.prefetchSchemasForDb(connectionName, dbName, runQueryFn))
         );
 
-        // 3. Fetch all tables and views
-        await this.prefetchAllTablesAndViews(connectionName, runQueryFn);
+        // 3. Fetch all tables and views (reuse prefetchAllObjects with skipIfCached)
+        await this.prefetchAllObjects(connectionName, runQueryFn, true, databases);
 
         // 4. Fetch columns in batches
         await this.prefetchAllColumnsForConnection(connectionName, runQueryFn);
@@ -326,51 +341,7 @@ export class CachePrefetcher {
         }
     }
 
-    private async prefetchAllTablesAndViews(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
-        try {
-            // Use centralized query for listing tables and views (global search)
-            const query = NZ_QUERIES.listTablesAndViews();
 
-            const result = await runQueryFn(query);
-            if (!result) return;
-
-            const results = queryResultToRows<RawObjectRow>(result);
-            const tablesByKey = new Map<string, { tables: TableMetadata[]; idMap: Map<string, number> }>();
-
-            for (const row of results) {
-                const key = row.SCHEMA ? `${row.DBNAME}.${row.SCHEMA}` : `${row.DBNAME}..`;
-                if (!tablesByKey.has(key)) {
-                    tablesByKey.set(key, { tables: [], idMap: new Map() });
-                }
-                const entry = tablesByKey.get(key)!;
-
-                entry.tables.push({
-                    OBJNAME: row.OBJNAME,
-                    label: row.OBJNAME,
-                    kind: row.OBJTYPE === 'VIEW' ? 18 : 6,
-                    detail: row.SCHEMA ? row.OBJTYPE : `${row.OBJTYPE} (${row.SCHEMA})`,
-                    objType: row.OBJTYPE,
-                    OWNER: row.OWNER,
-                    DESCRIPTION: row.DESCRIPTION
-                });
-
-                const fullKey = row.SCHEMA
-                    ? `${row.DBNAME}.${row.SCHEMA}.${row.OBJNAME}`
-                    : `${row.DBNAME}..${row.OBJNAME}`;
-                entry.idMap.set(fullKey, row.OBJID);
-            }
-
-            for (const [key, entry] of tablesByKey) {
-                if (!this.storage.getTables(connectionName, key)) {
-                    this.storage.setTables(connectionName, key, entry.tables, entry.idMap);
-                }
-            }
-
-            console.log(`[CachePrefetcher] Prefetched tables/views for ${tablesByKey.size} schema(s)`);
-        } catch (e: unknown) {
-            console.error(`[CachePrefetcher] prefetchAllTablesAndViews error:`, e);
-        }
-    }
 
     private async prefetchAllColumnsForConnection(
         connectionName: string,

@@ -476,7 +476,7 @@ async function logQueryToHistory(
     const currentSchema = 'unknown';
     const details = await connManager.getConnection(resolvedConnectionName);
     if (details) {
-        const historyManager = new QueryHistoryManager(context);
+        const historyManager = QueryHistoryManager.getInstance(context);
         historyManager
             .addEntry(details.host, details.database, currentSchema, query, resolvedConnectionName)
             .catch(err => console.error('History log error:', err));
@@ -1073,7 +1073,7 @@ export async function runQueriesSequentially(
             }
 
 
-            const historyManager = new QueryHistoryManager(context);
+            const historyManager = QueryHistoryManager.getInstance(context);
             // Use resolved connection name for history
             const activeConnectionName = resolvedConnectionName;
 
@@ -1590,7 +1590,7 @@ export async function runQueriesWithStreaming(
             }
 
 
-            const historyManager = new QueryHistoryManager(context);
+            const historyManager = QueryHistoryManager.getInstance(context);
             const currentSchema = 'unknown';
 
             // --- BATCH VARIABLE HANDLING START ---

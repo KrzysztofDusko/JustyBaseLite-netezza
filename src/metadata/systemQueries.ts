@@ -7,7 +7,7 @@
  * 
  * System views documentation:
  * - Views prefixed with _V_ are virtual system views
- * - Most views exist per-database (accessed as DATABASE.._V_VIEWNAME)
+ * - Most views exist per-database (accessed as SAMPLE_DB.._V_VIEWNAME)
  * - Some global views are in SYSTEM database (SYSTEM.._V_DATABASE)
  * 
  * ============================================================================
@@ -16,28 +16,657 @@
  * 
  * 1. _V_OBJECT_DATA - DESCRIPTION column limitation:
  *    -------------------------------------------------
- *    When querying DATABASE.._V_OBJECT_DATA:
- *    - It returns objects from ALL databases (not just DATABASE)
- *    - BUT: The DESCRIPTION column is ONLY populated for objects belonging to DATABASE!
+ *    When querying SAMPLE_DB.._V_OBJECT_DATA:
+ *    - It returns objects from ALL databases (not just SAMPLE_DB)
+ *    - BUT: The DESCRIPTION column is ONLY populated for objects belonging to SAMPLE_DB!
  *    - Objects from other databases will have NULL/empty DESCRIPTION values
  *    
- *    Solution: Always use WHERE DBNAME = 'DATABASE' filter when you need descriptions.
+ *    Solution: Always use WHERE DBNAME = 'SAMPLE_DB' dont user _V_OBJECT_DATA without "SAMPLE_DB.." prefix and filter when you need descriptions.
  * 
  * 2. _V_VIEW - DEFINITION column limitation:
  *    ----------------------------------------
  *    The DEFINITION column (view SQL source code) is ONLY accessible when:
  *    - The connection is established TO THE SAME DATABASE where the view exists!
- *    - Using DATABASE.._V_VIEW is NOT enough - you must BE CONNECTED to DATABASE
+ *    - Using SAMPLE_DB.._V_VIEW is NOT enough - you must BE CONNECTED to SAMPLE_DB
  *    
  *    Example: If connected to SYSTEM database and query MYDB.._V_VIEW,
- *    the DEFINITION column will be NULL/empty even though the view exists.
+ *    the DEFINITION column will be NULL/empty/placeholder("not a view") even though the view exists.
  *    
  *    Solution: To get view definitions, ensure the connection's current database
  *    matches the database containing the view.
- * 
- * NOTE: _V_PROCEDURE does NOT have this limitation - PROCEDURESOURCE is accessible
- * cross-database without needing to connect to the specific database.
- * 
+ 
+Sample:
+QUERY:
+SELECT OBJID, VIEWNAME, OWNER, CREATEDATE, OBJTYPE, OBJCLASS, DESCRIPTION, RELHASINDEX, RELKIND, RELCHECKS, RELTRIGGERS, RELHASRULES, RELUKEYS, RELFKEYS, RELREFS, RELHASPKEY, RELNATTS, DEFINITION, OBJDELIM, DATABASE, OBJDB, SCHEMA, SCHEMAID
+FROM SAMPLE_DB.._V_VIEW 
+WHERE DATABASE = 'SAMPLE_DB'
+
+RESULT:
+[
+  {
+    "OBJID": "200428",
+    "VIEWNAME": "VDMPREP",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "OBJTYPE": "VIEW",
+    "OBJCLASS": "4906",
+    "DESCRIPTION": null,
+    "RELHASINDEX": "f",
+    "RELKIND": "v",
+    "RELCHECKS": "0",
+    "RELTRIGGERS": "0",
+    "RELHASRULES": "t",
+    "RELUKEYS": "0",
+    "RELFKEYS": "0",
+    "RELREFS": "0",
+    "RELHASPKEY": "f",
+    "RELNATTS": "13",
+    "DEFINITION": "SELECT PC.ENGLISHPRODUCTCATEGORYNAME, CASE WHEN .... ;",
+    "OBJDELIM": "f",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  ...
+]
+
+ * 3. _V_PROCEDURE does NOT have this limitation - PROCEDURESOURCE is accessible cross-database without needing to connect to the specific database. But "DATABASE.." prefix is still needed to get the procedure metadata.
+ * dont user _V_PROCEDURE without "DATABASE.." prefix.
+ * sample:
+ * QUERY:
+ SELECT
+  OBJID,  PROCEDURE,  OWNER,  CREATEDATE,  OBJTYPE,
+  DESCRIPTION,  RESULT,  NUMARGS,  ARGUMENTS,  PROCEDURESIGNATURE,
+  BUILTIN,  VARARGS,  PROCEDURESOURCE,  SPROC,  EXECUTEDASOWNER,
+  RETURNS,  DATABASE,  DATABASEID,  SCHEMA, SCHEMAID
+  FROM SAMPLE_DB.._V_PROCEDURE
+  WHERE DATABASE = 'SAMPLE_DB';
+ 
+  RESULT:
+[
+  {
+    "OBJID": "200680",
+    "PROCEDURE": "CUSTOMER_DOTNET",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "OBJTYPE": "PROCEDURE",
+    "DESCRIPTION": null,
+    "RESULT": "INTEGER",
+    "NUMARGS": "0",
+    "ARGUMENTS": "()",
+    "PROCEDURESIGNATURE": "CUSTOMER_DOTNET()",
+    "BUILTIN": "f",
+    "VARARGS": "f",
+    "PROCEDURESOURCE": " BEGIN RAISE NOTICE 'The customer name is alpha'; RAISE NOTICE 'The customer location is beta'; END; ",
+    "SPROC": "t",
+    "EXECUTEDASOWNER": "t",
+    "RETURNS": "INTEGER",
+    "DATABASE": "SAMPLE_DB",
+    "DATABASEID": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  ...
+]
+
+* 4._V_RELATION_COLUMN always use SELECT * FROM SAMPLE_DB.._V_RELATION_COLUMN will return objects from "SAMPLE_DB" + SYSTEM databases only, IMPORTANT: DESCRIPTION column is accessible even when connected to a different database, but dont use without "DATABASE.."
+* each database has its own _V_RELATION_COLUMN, so you can use SELECT * FROM DATABASE.._V_RELATION_COLUMN or prepare query with union all to get all databases
+* sample:
+SELECT
+  OBJID,  NAME,  OWNER,  CREATEDATE,  TYPE,
+  DATABASE, ATTNUM, ATTNAME, COLID, DESCRIPTION, FORMAT_TYPE, ATTNOTNULL, ATTTYPID, ATTTYPMOD, ATTLEN, ATTDISPERSION, COLDEFAULT, ATTCOLLENG, ATTDELIM, 
+  ZMAPPED, OBJCLASS, RELRESTOREDOID, OBJDELIM, ATTVERSTATUS, ATTORIGOID, ATTRESTOREDOID, OBJDB, SCHEMA, SCHEMAID
+  FROM SAMPLE_DB.._V_RELATION_COLUMN
+  WHERE DATABASE = 'SAMPLE_DB';
+[
+{
+    "OBJID": "202941",
+    "NAME": "DIMDATE",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "TYPE": "TABLE",
+    "DATABASE": "SAMPLE_DB",
+    "ATTNUM": "1",
+    "ATTNAME": "DATEKEY",
+    "COLID": "214801",
+    "DESCRIPTION": "Primary key for this table, used in foreign key relationships with fact tables.",
+    "FORMAT_TYPE": "INTEGER",
+    "ATTNOTNULL": "f",
+    "ATTTYPID": "23",
+    "ATTTYPMOD": "-1",
+    "ATTLEN": "4",
+    "ATTDISPERSION": "0",
+    "COLDEFAULT": null,
+    "ATTCOLLENG": "4",
+    "ATTDELIM": "f",
+    "ZMAPPED": "t",
+    "OBJCLASS": "4905",
+    "RELRESTOREDOID": "0",
+    "OBJDELIM": "f",
+    "ATTVERSTATUS": "0",
+    "ATTORIGOID": "0",
+    "ATTRESTOREDOID": "0",
+    "OBJDB": "202940",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "202939"
+  },
+  ...
+  
+  5. _V_EXTERNAL // External table definitions, dont use without "SAMPLE_DB.." prefix
+  SELECT * FROM  SAMPLE_DB.._V_EXTERNAL WHERE DATABASE = 'SAMPLE_DB';
+  -> 
+[
+  {
+    "RELID": "201634",
+    "TABLENAME": "SAMPLE_NAME",
+    "MAXERRORS": "1",
+    "DELIM": "|",
+    "REJECTFILE": null,
+    "DATESTYLE": "YMD",
+    "CODESET": null,
+    "QUOTEDVALUE": "NO",
+    "NULLVALUE": "NULL",
+    "ESCAPE": null,
+    "CRINSTRING": null,
+    "TRUNCSTRING": null,
+    "DATEDELIM": "-",
+    "TIMESTYLE": "24HOUR",
+    "TIMEDELIM": ":",
+    "BOOLSTYLE": "1_0",
+    "CTRLCHARS": null,
+    "DISTSTATS": null,
+    "LOGDIR": "/tmp",
+    "MAXROWS": null,
+    "REQUIREQUOTES": null,
+    "IGNOREZERO": null,
+    "TIMEEXTRAZEROS": null,
+    "Y2BASE": null,
+    "FILLRECORD": null,
+    "FORMAT": "TEXT",
+    "COMPRESS": "FALSE",
+    "ENCODING": "INTERNAL",
+    "REMOTESOURCE": "JDBC",
+    "SOCKETBUFSIZE": "8388608",
+    "ADJUSTDISTZEROINT": null,
+    "SKIPROWS": null,
+    "INCLUDEZEROSECONDS": null,
+    "RECORDLENGTH": null,
+    "RECORDDELIM": "\n",
+    "NULLINDICATOR": null,
+    "LAYOUT": null,
+    "DECIMALDELIM": null,
+    "LOGFILE": null,
+    "BADFILE": null,
+    "DISABLENFC": null,
+    "INCLUDEHEADER": null,
+    "DATETIMEDELIM": " ",
+    "MERIDIANDELIM": " ",
+    "LFINSTRING": null,
+    "CLOUD_CONNSTRING": null,
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  }
+]
+6. _V_EXTOBJECT // External table objects, dont use without "SAMPLE_DB.." prefix
+SELECT * FROM  SAMPLE_DB.._V_EXTOBJECT WHERE DATABASE = 'SAMPLE_DB';
+-->
+[
+  {
+    "OBJID": "201634",
+    "TABLENAME": "SAMPLE_NAME",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "OBJTYPE": "EXTERNAL TABLE",
+    "OBJCLASS": "4911",
+    "OBJNO": "1",
+    "EXTOBJNAME": "D:\\TMP\\DIMDATE.dat",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  }
+]
+
+7. SELECT * FROM _V_DATABASE
+-> 
+[
+  {
+    "OBJID": "200399",
+    "DATABASE": "SAMPLE_DB",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "DB_CHARSET": "LATIN9",
+    "DB_COLLATION": "BINARY",
+    "DBCHARSET": "4960",
+    "DBCOLLATION": "4970",
+    "DBOWNERID": "1000",
+    "DBLOCKPID": "0",
+    "DBSTATUS": null,
+    "BACKUPGROUP": null,
+    "OBJDELIM": "f",
+    "DBCOLLECTHISTORY": "t",
+    "ENCODING": "0",
+    "DEFSCHEMAID": "200398",
+    "DEFSCHEMA": "ADMIN",
+    "NCHARENCODING": "0",
+    "NCHARSET": "UTF8",
+    "DBTRACKCHANGES": "1",
+    "DATAVERRETNTIME": "0",
+    "GROOMBACKUPSET": "0",
+    "DATAVERRETNLOWERBOUND": null
+  },
+  {
+    "OBJID": "202940",
+    "DATABASE": "SAMPLE_DB_1",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "DB_CHARSET": "LATIN9",
+    "DB_COLLATION": "BINARY",
+    "DBCHARSET": "4960",
+    "DBCOLLATION": "4970",
+    "DBOWNERID": "1000",
+    "DBLOCKPID": "0",
+    "DBSTATUS": null,
+    "BACKUPGROUP": null,
+    "OBJDELIM": "f",
+    "DBCOLLECTHISTORY": "t",
+    "ENCODING": "0",
+    "DEFSCHEMAID": "202939",
+    "DEFSCHEMA": "ADMIN",
+    "NCHARENCODING": "0",
+    "NCHARSET": "UTF8",
+    "DBTRACKCHANGES": "1",
+    "DATAVERRETNTIME": "0",
+    "GROOMBACKUPSET": "0",
+    "DATAVERRETNLOWERBOUND": null
+  },
+  {
+    "OBJID": "1",
+    "DATABASE": "SYSTEM",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "DB_CHARSET": "LATIN9",
+    "DB_COLLATION": "BINARY",
+    "DBCHARSET": "4960",
+    "DBCOLLATION": "4970",
+    "DBOWNERID": "1000",
+    "DBLOCKPID": "0",
+    "DBSTATUS": null,
+    "BACKUPGROUP": null,
+    "OBJDELIM": "f",
+    "DBCOLLECTHISTORY": "t",
+    "ENCODING": "0",
+    "DEFSCHEMAID": "6",
+    "DEFSCHEMA": "ADMIN",
+    "NCHARENCODING": "0",
+    "NCHARSET": "UTF8",
+    "DBTRACKCHANGES": "0",
+    "DATAVERRETNTIME": "0",
+    "GROOMBACKUPSET": "0",
+    "DATAVERRETNLOWERBOUND": null
+  }
+]
+
+*8. SELECT * FROM SAMPLE_DB.._V_SCHEMA WHERE DATABASE = 'SAMPLE_DB';
+-> 
+[
+  {
+    "SCHEMAID": "200398",
+    "DATABASEID": "200399",
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "OBJDELIM": "f",
+    "SQLPATH": null,
+    "DATAVERRETNTIME": "0",
+    "DATAVERRETNLOWERBOUND": null
+  },
+  {
+    "SCHEMAID": "4",
+    "DATABASEID": "200399",
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "DEFINITION_SCHEMA",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "OBJDELIM": "f",
+    "SQLPATH": null,
+    "DATAVERRETNTIME": "0",
+    "DATAVERRETNLOWERBOUND": null
+  },
+  {
+    "SCHEMAID": "5",
+    "DATABASEID": "200399",
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "INFORMATION_SCHEMA",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2001-01-01 12:00:00",
+    "OBJDELIM": "f",
+    "SQLPATH": null,
+    "DATAVERRETNTIME": "0",
+    "DATAVERRETNLOWERBOUND": null
+  }
+]
+
+9.SELECT * FROM SAMPLE_DB.._V_RELATION_KEYDATA WHERE DATABASE = 'SAMPLE_DB';
+->
+[
+  {
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "RELATION": "DIMDATE",
+    "CONSTRAINTNAME": "PK_DIMDATE",
+    "CONTYPE": "p",
+    "CONSEQ": "1",
+    "ATTNAME": "DATEKEY",
+    "PKDATABASEID": null,
+    "PKSCHEMAID": null,
+    "PKDATABASE": null,
+    "PKSCHEMA": null,
+    "PKOWNER": null,
+    "PKRELATION": null,
+    "PKCONSEQ": null,
+    "PKATTNAME": null,
+    "UPDT_TYPE": null,
+    "DEL_TYPE": null,
+    "MATCH_TYPE": null,
+    "DEFERRABLE": "NOT DEFERRABLE",
+    "DEFERRED": "INITIALLY IMMEDIATE",
+    "CONSTR_OID": "209034",
+    "OBJID": "209023",
+    "OBJDB": "200399",
+    "SCHEMAID": "200398",
+    "OBJDELIM": "f",
+    "RELRESTOREDOID": "0",
+    "PKRESTOREDOID": null,
+    "PKOBJID": "0",
+    "ATTDELIM": "f",
+    "PKATTDELIM": null,
+    "DEFERRABLECONSTR": "NOT DEFERRABLE",
+    "RELDELIM": "f",
+    "REFDELIM": null,
+    "REFCONSTRNAME": null
+  },
+  {
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "RELATION": "FACT_SALES",
+    "CONSTRAINTNAME": "FK_SALES_DATE",
+    "CONTYPE": "f",
+    "CONSEQ": "1",
+    "ATTNAME": "SALE_DATE_ID",
+    "PKDATABASEID": "200399",
+    "PKSCHEMAID": "200398",
+    "PKDATABASE": "SAMPLE_DB",
+    "PKSCHEMA": "ADMIN",
+    "PKOWNER": "ADMIN",
+    "PKRELATION": "DIMDATE",
+    "PKCONSEQ": "1",
+    "PKATTNAME": "DATEKEY",
+    "UPDT_TYPE": "NO ACTION",
+    "DEL_TYPE": "NO ACTION",
+    "MATCH_TYPE": "UNSPECIFIED",
+    "DEFERRABLE": "NOT DEFERRABLE",
+    "DEFERRED": "INITIALLY IMMEDIATE",
+    "CONSTR_OID": "209038",
+    "OBJID": "209036",
+    "OBJDB": "200399",
+    "SCHEMAID": "200398",
+    "OBJDELIM": "f",
+    "RELRESTOREDOID": "0",
+    "PKRESTOREDOID": "0",
+    "PKOBJID": "209023",
+    "ATTDELIM": "f",
+    "PKATTDELIM": "f",
+    "DEFERRABLECONSTR": "NOT DEFERRABLE",
+    "RELDELIM": "f",
+    "REFDELIM": "f",
+    "REFCONSTRNAME": "PK_DIMDATE"
+  },
+  {
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "RELATION": "DIMDATE_NNT",
+    "CONSTRAINTNAME": "PK_DIMDATE_NNT",
+    "CONTYPE": "p",
+    "CONSEQ": "1",
+    "ATTNAME": "DATEKEY",
+    "PKDATABASEID": null,
+    "PKSCHEMAID": null,
+    "PKDATABASE": null,
+    "PKSCHEMA": null,
+    "PKOWNER": null,
+    "PKRELATION": null,
+    "PKCONSEQ": null,
+    "PKATTNAME": null,
+    "UPDT_TYPE": null,
+    "DEL_TYPE": null,
+    "MATCH_TYPE": null,
+    "DEFERRABLE": "NOT DEFERRABLE",
+    "DEFERRED": "INITIALLY IMMEDIATE",
+    "CONSTR_OID": "207011",
+    "OBJID": "207008",
+    "OBJDB": "200399",
+    "SCHEMAID": "200398",
+    "OBJDELIM": "f",
+    "RELRESTOREDOID": "0",
+    "PKRESTOREDOID": null,
+    "PKOBJID": "0",
+    "ATTDELIM": "f",
+    "PKATTDELIM": null,
+    "DEFERRABLECONSTR": "NOT DEFERRABLE",
+    "RELDELIM": "f",
+    "REFDELIM": null,
+    "REFCONSTRNAME": null
+  },
+  {
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "RELATION": "FACTSURVEYRESPONSE",
+    "CONSTRAINTNAME": "FK_DATE",
+    "CONTYPE": "f",
+    "CONSEQ": "1",
+    "ATTNAME": "DATEKEY",
+    "PKDATABASEID": "200399",
+    "PKSCHEMAID": "200398",
+    "PKDATABASE": "SAMPLE_DB",
+    "PKSCHEMA": "ADMIN",
+    "PKOWNER": "ADMIN",
+    "PKRELATION": "DIMDATE",
+    "PKCONSEQ": "1",
+    "PKATTNAME": "DATEKEY",
+    "UPDT_TYPE": "NO ACTION",
+    "DEL_TYPE": "NO ACTION",
+    "MATCH_TYPE": "UNSPECIFIED",
+    "DEFERRABLE": "NOT DEFERRABLE",
+    "DEFERRED": "INITIALLY IMMEDIATE",
+    "CONSTR_OID": "209041",
+    "OBJID": "200425",
+    "OBJDB": "200399",
+    "SCHEMAID": "200398",
+    "OBJDELIM": "f",
+    "RELRESTOREDOID": "0",
+    "PKRESTOREDOID": "0",
+    "PKOBJID": "209023",
+    "ATTDELIM": "f",
+    "PKATTDELIM": "f",
+    "DEFERRABLECONSTR": "NOT DEFERRABLE",
+    "RELDELIM": "f",
+    "REFDELIM": "f",
+    "REFCONSTRNAME": "PK_DIMDATE"
+  },
+  {
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "RELATION": "DIMCUSTOMER",
+    "CONSTRAINTNAME": "PK_DIMCUSTOMER",
+    "CONTYPE": "p",
+    "CONSEQ": "1",
+    "ATTNAME": "CUSTOMERKEY",
+    "PKDATABASEID": null,
+    "PKSCHEMAID": null,
+    "PKDATABASE": null,
+    "PKSCHEMA": null,
+    "PKOWNER": null,
+    "PKRELATION": null,
+    "PKCONSEQ": null,
+    "PKATTNAME": null,
+    "UPDT_TYPE": null,
+    "DEL_TYPE": null,
+    "MATCH_TYPE": null,
+    "DEFERRABLE": "NOT DEFERRABLE",
+    "DEFERRED": "INITIALLY IMMEDIATE",
+    "CONSTR_OID": "209045",
+    "OBJID": "209044",
+    "OBJDB": "200399",
+    "SCHEMAID": "200398",
+    "OBJDELIM": "f",
+    "RELRESTOREDOID": "0",
+    "PKRESTOREDOID": null,
+    "PKOBJID": "0",
+    "ATTDELIM": "f",
+    "PKATTDELIM": null,
+    "DEFERRABLECONSTR": "NOT DEFERRABLE",
+    "RELDELIM": "f",
+    "REFDELIM": null,
+    "REFCONSTRNAME": null
+  },
+  {
+    "DATABASE": "SAMPLE_DB",
+    "SCHEMA": "ADMIN",
+    "OWNER": "ADMIN",
+    "RELATION": "FACTSURVEYRESPONSE",
+    "CONSTRAINTNAME": "FK_CUSTOMER",
+    "CONTYPE": "f",
+    "CONSEQ": "1",
+    "ATTNAME": "CUSTOMERKEY",
+    "PKDATABASEID": "200399",
+    "PKSCHEMAID": "200398",
+    "PKDATABASE": "SAMPLE_DB",
+    "PKSCHEMA": "ADMIN",
+    "PKOWNER": "ADMIN",
+    "PKRELATION": "DIMCUSTOMER",
+    "PKCONSEQ": "1",
+    "PKATTNAME": "CUSTOMERKEY",
+    "UPDT_TYPE": "NO ACTION",
+    "DEL_TYPE": "NO ACTION",
+    "MATCH_TYPE": "UNSPECIFIED",
+    "DEFERRABLE": "NOT DEFERRABLE",
+    "DEFERRED": "INITIALLY IMMEDIATE",
+    "CONSTR_OID": "209047",
+    "OBJID": "200425",
+    "OBJDB": "200399",
+    "SCHEMAID": "200398",
+    "OBJDELIM": "f",
+    "RELRESTOREDOID": "0",
+    "PKRESTOREDOID": "0",
+    "PKOBJID": "209044",
+    "ATTDELIM": "f",
+    "PKATTDELIM": "f",
+    "DEFERRABLECONSTR": "NOT DEFERRABLE",
+    "RELDELIM": "f",
+    "REFDELIM": "f",
+    "REFCONSTRNAME": "PK_DIMCUSTOMER"
+  }
+]
+
+10. SELECT * FROM SAMPLE_DB.._V_TABLE_DIST_MAP WHERE DATABASE = 'SAMPLE_DB';
+
+[
+  {
+    "OBJID": "209036",
+    "TABLENAME": "FACT_SALES",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2000-01-01 00:00:00",
+    "DISTSEQNO": "1",
+    "DISTATTNUM": "1",
+    "ATTNUM": "1",
+    "ATTNAME": "SALE_ID",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  {
+    "OBJID": "204880",
+    "TABLENAME": "NEW_CREATED_TABLE",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2000-01-01 00:00:00",
+    "DISTSEQNO": "1",
+    "DISTATTNUM": "1",
+    "ATTNUM": "1",
+    "ATTNAME": "CREATION_DATE_TIME",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  {
+    "OBJID": "204895",
+    "TABLENAME": "T5",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2000-01-01 00:00:00",
+    "DISTSEQNO": "1",
+    "DISTATTNUM": "1",
+    "ATTNUM": "1",
+    "ATTNAME": "C1",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  {
+    "OBJID": "205132",
+    "TABLENAME": "DIMDATE_IMPORT_TEST",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2000-01-01 00:00:00",
+    "DISTSEQNO": "1",
+    "DISTATTNUM": "1",
+    "ATTNUM": "1",
+    "ATTNAME": "DATEKEY",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  {
+    "OBJID": "205136",
+    "TABLENAME": "DIMACCOUNT_IMPORT_TEST",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2000-01-01 00:00:00",
+    "DISTSEQNO": "1",
+    "DISTATTNUM": "1",
+    "ATTNUM": "1",
+    "ATTNAME": "ACCOUNTKEY",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  },
+  {
+    "OBJID": "203919",
+    "TABLENAME": "DIMACCOUNT_TMP",
+    "OWNER": "ADMIN",
+    "CREATEDATE": "2000-01-01 00:00:00",
+    "DISTSEQNO": "1",
+    "DISTATTNUM": "1",
+    "ATTNUM": "1",
+    "ATTNAME": "ACCOUNTKEY",
+    "DATABASE": "SAMPLE_DB",
+    "OBJDB": "200399",
+    "SCHEMA": "ADMIN",
+    "SCHEMAID": "200398"
+  }
+]
+
  * ============================================================================
  */
 
@@ -45,86 +674,29 @@
 // SYSTEM VIEW NAMES
 // =============================================================================
 
-/**
- * Netezza system view names (without database prefix)
- */
 export const NZ_SYSTEM_VIEWS = {
     // Object/table related
-    OBJECT_DATA: '_V_OBJECT_DATA',           // All objects (tables, views, etc.) with metadata
-    TABLE: '_V_TABLE',                        // Tables and views basic info
-    VIEW: '_V_VIEW',                          // View definitions
-    PROCEDURE: '_V_PROCEDURE',                // Stored procedures
-    SYNONYM: '_V_SYNONYM',                    // Synonyms
-    
+    OBJECT_DATA: '_V_OBJECT_DATA',           // All objects (tables, views, etc.) with metadata, dont use without "SAMPLE_DB.." prefix and filter when you need descriptions.
+    TABLE: '_V_TABLE',                        // Tables and views basic info, SELECT * FROM SAMPLE_DB.._V_TABLE returns objects from "SAMPLE_DB" + SYSTEM databases only
+    VIEW: '_V_VIEW',                          // View definitions, SELECT * FROM SAMPLE_DB.._V_VIEW returns objects from "SAMPLE_DB" + SYSTEM databases only,IMPORTANT: DEFINITION column is only accessible when connected to the same database as the view
+    PROCEDURE: '_V_PROCEDURE',                // Stored procedures, SELECT * FROM SAMPLE_DB.._V_PROCEDURE returns objects from "SAMPLE_DB" + SYSTEM databases only,IMPORTANT: PROCEDURESOURCE is accessible even when connected to a different database, but dont use without "SAMPLE_DB.." prefix
+    SYNONYM: '_V_SYNONYM',                    // Synonyms, dont use without "SAMPLE_DB.." prefix
+
     // Column/structure related
-    RELATION_COLUMN: '_V_RELATION_COLUMN',    // Column definitions for tables/views
-    RELATION_KEYDATA: '_V_RELATION_KEYDATA',  // Primary/Foreign/Unique key definitions
-    TABLE_DIST_MAP: '_V_TABLE_DIST_MAP',      // Distribution key information
-    TABLE_ORGANIZE_COLUMN: '_V_TABLE_ORGANIZE_COLUMN', // Clustering/organize columns
-    
+    RELATION_COLUMN: '_V_RELATION_COLUMN',    // Column definitions for tables/views, dont use without "SAMPLE_DB.." prefix
+    RELATION_KEYDATA: '_V_RELATION_KEYDATA',  // Primary/Foreign/Unique key definitions, dont use without "SAMPLE_DB.." prefix
+    TABLE_DIST_MAP: '_V_TABLE_DIST_MAP',      // Distribution key information, dont use without "SAMPLE_DB.." prefix
+    TABLE_ORGANIZE_COLUMN: '_V_TABLE_ORGANIZE_COLUMN', // Clustering/organize columns, dont use without "SAMPLE_DB.." prefix
+
     // External tables
-    EXTERNAL: '_V_EXTERNAL',                  // External table definitions
-    EXTOBJECT: '_V_EXTOBJECT',                // External object metadata (data source paths)
-    
+    EXTERNAL: '_V_EXTERNAL',                  // External table definitions, dont use without "SAMPLE_DB.." prefix
+    EXTOBJECT: '_V_EXTOBJECT',                // External object metadata (data source paths), dont use without "SAMPLE_DB.." prefix
+
     // Database/schema
-    DATABASE: '_V_DATABASE',                  // All databases (in SYSTEM database)
-    SCHEMA: '_V_SCHEMA',                      // Schemas within a database
+    DATABASE: '_V_DATABASE',                  // All databases, SHOULD be used without "SAMPLE_DB.." prefix 
+    SCHEMA: '_V_SCHEMA',                      // Schemas within a database,  dont use without "SAMPLE_DB.." prefix
 } as const;
 
-/**
- * Common column names in system views
- */
-export const NZ_SYSTEM_COLUMNS = {
-    // Object identification
-    OBJID: 'OBJID',
-    OBJNAME: 'OBJNAME',
-    OBJTYPE: 'OBJTYPE',
-    DBNAME: 'DBNAME',
-    DATABASE: 'DATABASE',
-    SCHEMA: 'SCHEMA',
-    OWNER: 'OWNER',
-    DESCRIPTION: 'DESCRIPTION',
-    
-    // Column metadata
-    ATTNAME: 'ATTNAME',
-    ATTNUM: 'ATTNUM',
-    FORMAT_TYPE: 'FORMAT_TYPE',
-    ATTNOTNULL: 'ATTNOTNULL',
-    COLDEFAULT: 'COLDEFAULT',
-    
-    // Key/constraint related
-    CONSTRAINTNAME: 'CONSTRAINTNAME',
-    CONTYPE: 'CONTYPE',           // 'p' = primary, 'f' = foreign, 'u' = unique
-    RELATION: 'RELATION',
-    PKDATABASE: 'PKDATABASE',
-    PKSCHEMA: 'PKSCHEMA',
-    PKRELATION: 'PKRELATION',
-    PKATTNAME: 'PKATTNAME',
-    UPDT_TYPE: 'UPDT_TYPE',
-    DEL_TYPE: 'DEL_TYPE',
-    CONSEQ: 'CONSEQ',
-    
-    // Distribution
-    DISTSEQNO: 'DISTSEQNO',
-    DISTATTNUM: 'DISTATTNUM',
-    
-    // Organization
-    ORGSEQNO: 'ORGSEQNO',
-    
-    // View/procedure specific
-    DEFINITION: 'DEFINITION',
-    PROCEDURESIGNATURE: 'PROCEDURESIGNATURE',
-    PROCEDURESOURCE: 'PROCEDURESOURCE',
-    
-    // Table names (in _V_TABLE)
-    TABLENAME: 'TABLENAME',
-    VIEWNAME: 'VIEWNAME',
-    RELKIND: 'RELKIND',           // 'r' = table, 'v' = view
-    
-    // External table specific
-    EXTOBJNAME: 'EXTOBJNAME',
-    DATAOBJECT: 'DATAOBJECT',
-} as const;
 
 /**
  * Object types used in OBJTYPE column
@@ -155,19 +727,12 @@ export const NZ_CONSTRAINT_TYPES = {
 // =============================================================================
 
 /**
- * Build fully qualified system view name: DATABASE.._V_VIEWNAME
+ * Build fully qualified system view name: DATABASE..VIEW_NAME
  * @param database Database name
  * @param viewName System view name from NZ_SYSTEM_VIEWS
  */
 export function qualifySystemView(database: string, viewName: string): string {
     return `${database.toUpperCase()}..${viewName}`;
-}
-
-/**
- * Build a reference to SYSTEM database view (for cross-database queries)
- */
-export function systemDatabaseView(viewName: string): string {
-    return `SYSTEM..${viewName.toLowerCase()}`;
 }
 
 // =============================================================================
@@ -185,7 +750,7 @@ export const NZ_QUERIES = {
      */
     LIST_DATABASES: `
         SELECT DATABASE 
-        FROM ${systemDatabaseView(NZ_SYSTEM_VIEWS.DATABASE)} 
+        FROM ${NZ_SYSTEM_VIEWS.DATABASE}
         ORDER BY DATABASE
     `.trim(),
 
@@ -208,26 +773,33 @@ export const NZ_QUERIES = {
      * 
      * @param database - Database name (optional, if not provided uses global view - descriptions will be empty!)
      */
-    listTablesAndViews: (database?: string): string => {
+    /**
+     * Get all tables and views with metadata from a list of databases
+     * @param databases - Array of database names (REQUIRED, must be non-empty)
+     * Generates a UNION ALL of per-database `_V_OBJECT_DATA` queries
+     */
+    listTablesAndViews: (databases: string[]): string => {
         const objTypes = `'${NZ_OBJECT_TYPES.TABLE}', '${NZ_OBJECT_TYPES.VIEW}', '${NZ_OBJECT_TYPES.EXTERNAL_TABLE}'`;
-        
-        if (database) {
-            // Query specific database WITH DBNAME filter to get proper DESCRIPTION values
-            return `
-                SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, COALESCE(DESCRIPTION, '') AS DESCRIPTION
-                FROM ${qualifySystemView(database, NZ_SYSTEM_VIEWS.OBJECT_DATA)}
-                WHERE DBNAME = '${database.toUpperCase()}'
-                AND OBJTYPE IN (${objTypes})
-                ORDER BY SCHEMA, OBJNAME
-            `.trim();
+
+        if (!Array.isArray(databases) || databases.length === 0) {
+            throw new Error("NZ_QUERIES.listTablesAndViews requires a non-empty array of databases.");
         }
-        // Global query (searches all databases) - WARNING: DESCRIPTION will be empty!
-        // This is a Netezza limitation: _V_OBJECT_DATA returns objects from all DBs
-        // but DESCRIPTION is only populated for objects in the queried database
+
+        const parts = databases
+            .map(d => d && d.trim())
+            .filter(Boolean)
+            .map(d => d!.toUpperCase())
+            .map(db => `SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, COALESCE(DESCRIPTION, '') AS DESCRIPTION FROM ${qualifySystemView(db, NZ_SYSTEM_VIEWS.OBJECT_DATA)} WHERE DBNAME = '${db}' AND OBJTYPE IN (${objTypes})`);
+
+        if (parts.length === 0) {
+            throw new Error("NZ_QUERIES.listTablesAndViews requires a non-empty array of databases.");
+        }
+
+        const unionSql = parts.join('\nUNION ALL\n');
         return `
-            SELECT OBJNAME, OBJID, SCHEMA, DBNAME, OBJTYPE, OWNER, '' AS DESCRIPTION
-            FROM ${NZ_SYSTEM_VIEWS.OBJECT_DATA}
-            WHERE OBJTYPE IN (${objTypes})
+            SELECT * FROM (
+${unionSql}
+            ) TMP
             ORDER BY DBNAME, SCHEMA, OBJNAME
         `.trim();
     },
@@ -246,7 +818,7 @@ export const NZ_QUERIES = {
         const db = database.toUpperCase();
         const objTypes = options?.objTypes || [NZ_OBJECT_TYPES.TABLE, NZ_OBJECT_TYPES.VIEW, NZ_OBJECT_TYPES.EXTERNAL_TABLE];
         const objTypesStr = objTypes.map(t => `'${t}'`).join(', ');
-        
+
         // Always filter by DBNAME to ensure we get proper data from this database only
         let whereClause = `O.DBNAME = '${db}' AND O.OBJTYPE IN (${objTypesStr})`;
         if (options?.schema) {
@@ -595,7 +1167,7 @@ export const NZ_QUERIES = {
      */
     searchTables: (pattern: string, database?: string): string => {
         const objTypes = `'${NZ_OBJECT_TYPES.TABLE}', '${NZ_OBJECT_TYPES.VIEW}', '${NZ_OBJECT_TYPES.MATERIALIZED_VIEW}', '${NZ_OBJECT_TYPES.EXTERNAL_TABLE}'`;
-        
+
         if (database) {
             return `
                 SELECT '${database}' AS DATABASE, SCHEMA, TABLENAME, 
@@ -603,7 +1175,7 @@ export const NZ_QUERIES = {
                 FROM ${qualifySystemView(database, NZ_SYSTEM_VIEWS.TABLE)}
                 WHERE UPPER(TABLENAME) LIKE '${pattern.toUpperCase()}'
                 ORDER BY SCHEMA, TABLENAME
-                LIMIT 100
+                LIMIT 1000
             `.trim();
         }
         // Global search
@@ -618,7 +1190,7 @@ export const NZ_QUERIES = {
             WHERE UPPER(OBJNAME) LIKE '${pattern.toUpperCase()}'
                 AND OBJTYPE IN (${objTypes})
             ORDER BY DBNAME, SCHEMA, OBJNAME
-            LIMIT 100
+            LIMIT 1000
         `.trim();
     },
 
@@ -635,7 +1207,7 @@ export const NZ_QUERIES = {
             JOIN ${qualifySystemView(db, NZ_SYSTEM_VIEWS.RELATION_COLUMN)} c ON t.OBJID = c.OBJID
             WHERE UPPER(c.ATTNAME) LIKE '${pattern.toUpperCase()}'
             ORDER BY t.SCHEMA, t.TABLENAME, c.ATTNAME
-            LIMIT 100
+            LIMIT 1000
         `.trim();
     },
 
@@ -706,7 +1278,7 @@ export const NZ_QUERIES = {
      */
     listObjectsOfType: (database: string, objType: string, schema?: string): string => {
         const db = database.toUpperCase();
-        
+
         // Special handling for procedures
         if (objType === NZ_OBJECT_TYPES.PROCEDURE) {
             let query = `SELECT PROCEDURESIGNATURE AS OBJNAME, SCHEMA FROM ${qualifySystemView(db, NZ_SYSTEM_VIEWS.PROCEDURE)} WHERE DATABASE = '${db}'`;
@@ -715,7 +1287,7 @@ export const NZ_QUERIES = {
             }
             return query + ` ORDER BY SCHEMA, PROCEDURESIGNATURE`;
         }
-        
+
         // All other object types
         let query = `SELECT OBJNAME, SCHEMA FROM ${qualifySystemView(db, NZ_SYSTEM_VIEWS.OBJECT_DATA)} WHERE DBNAME = '${db}' AND OBJTYPE = '${objType}'`;
         if (schema) {

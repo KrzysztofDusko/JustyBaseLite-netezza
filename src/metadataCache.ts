@@ -161,8 +161,8 @@ export class MetadataCache {
         return this.prefetcher.prefetchColumnsForSchema(connectionName, dbName, schemaName, runQueryFn);
     }
 
-    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerRawFn): Promise<void> {
-        return this.prefetcher.prefetchAllObjects(connectionName, runQueryFn);
+    async prefetchAllObjects(connectionName: string, runQueryFn: QueryRunnerRawFn, databases?: string[]): Promise<void> {
+        return this.prefetcher.prefetchAllObjects(connectionName, runQueryFn, false, databases);
     }
 
     hasAllObjectsPrefetchTriggered(connectionName: string): boolean {

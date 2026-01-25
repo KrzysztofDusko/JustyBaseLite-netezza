@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
-import { runQueryRaw, queryResultToRows, runQueryWithCatalog } from '../core/queryRunner';
+import { runQueryRaw, queryResultToRows, QueryResult } from '../core/queryRunner';
 import { MetadataCache } from '../metadataCache';
-import { ConnectionManager } from '../core/connectionManager';
+import { ConnectionManager, ConnectionDetails } from '../core/connectionManager';
 import { searchInCodeWithMode, SourceSearchMode } from '../sql/sqlTextUtils';
-import { NZ_QUERIES } from '../metadata/systemQueries';
+import { NZ_QUERIES, NZ_SYSTEM_VIEWS } from '../metadata/systemQueries';
+import { createNzConnection } from '../core/nzConnectionFactory';
 
 interface SearchResultItem {
     NAME: string;
@@ -49,6 +50,9 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 case 'searchSource':
                     await this.searchSourceCode(data.value, data.mode || 'noCommentsNoLiterals');
                     break;
+                case 'searchCombined':
+                    await this.doCombinedSearch(data.value, data.mode || 'raw');
+                    break;
                 case 'navigate':
                     // Execute command to reveal item in schema tree
                     vscode.commands.executeCommand('netezza.revealInSchema', data);
@@ -69,7 +73,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
     private currentSearchId = 0;
 
-    private async search(term: string) {
+    private async search(term: string, searchId?: number, combined?: boolean) {
         if (!term || term.length < 2) {
             return;
         }
@@ -88,12 +92,14 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         }
 
         if (!connectionName) {
-            this._view?.webview.postMessage({ type: 'results', data: [], append: false });
+            this._view?.webview.postMessage({ type: 'results', data: [], append: combined ? true : false });
             // Optionally could notify user: vscode.window.showWarningMessage('No active connection for search');
             return;
         }
 
-        const searchId = ++this.currentSearchId;
+        if (searchId === undefined) {
+            searchId = ++this.currentSearchId;
+        }
 
         const sentIds = new Set<string>();
 
@@ -148,55 +154,119 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        // 2. Search in Database (Comprehensive results)
+        // 2. Search in Database (Comprehensive results) using parallel connections
         // Only if connection is available
         const safeTerm = term.replace(/'/g, "''").toUpperCase();
         const likeTerm = `%${safeTerm}%`;
 
-        // Combined query to search Tables, Objects, Columns by NAME/DESCRIPTION only
-        // Source code search (DEFINITION/PROCEDURESOURCE) is handled by searchSourceCode
-        const query = `
-            SELECT * FROM (
-                SELECT 1 AS PRIORITY, OBJNAME AS NAME, SCHEMA, DBNAME AS DATABASE, OBJTYPE AS TYPE, '' AS PARENT, 
-                       COALESCE(DESCRIPTION, '') AS DESCRIPTION, 'NAME' AS MATCH_TYPE
-                FROM _V_OBJECT_DATA 
-                WHERE UPPER(OBJNAME) LIKE '${likeTerm}'
-                UNION ALL
-                SELECT 1 AS PRIORITY, OBJNAME AS NAME, SCHEMA, DBNAME AS DATABASE, OBJTYPE AS TYPE, '' AS PARENT, 
-                       COALESCE(DESCRIPTION, '') AS DESCRIPTION, 'DESC' AS MATCH_TYPE
-                FROM _V_OBJECT_DATA 
-                WHERE UPPER(DESCRIPTION) LIKE '${likeTerm}' AND UPPER(OBJNAME) NOT LIKE '${likeTerm}'
-                UNION ALL
-                SELECT 2 AS PRIORITY, C.ATTNAME AS NAME, O.SCHEMA, O.DBNAME AS DATABASE, 'COLUMN' AS TYPE, O.OBJNAME AS PARENT,
-                       COALESCE(C.DESCRIPTION, '') AS DESCRIPTION, 'NAME' AS MATCH_TYPE
-                FROM _V_RELATION_COLUMN C
-                JOIN _V_OBJECT_DATA O ON C.OBJID = O.OBJID
-                WHERE UPPER(C.ATTNAME) LIKE '${likeTerm}'
-                UNION ALL
-                SELECT 3 AS PRIORITY, E1.TABLENAME AS NAME, E1.SCHEMA, E1.DATABASE, 'EXTERNAL TABLE' AS TYPE, '' AS PARENT,
-                       COALESCE(E2.EXTOBJNAME, '') AS DESCRIPTION, 'DATAOBJECT' AS MATCH_TYPE
-                FROM _V_EXTERNAL E1
-                JOIN _V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
-                WHERE UPPER(E2.EXTOBJNAME) LIKE '${likeTerm}'
-            ) AS R
-            ORDER BY PRIORITY, NAME
-            LIMIT 100
-        `;
+        // Get connection details for parallel connections
+        const details = await this.connectionManager.getConnection(connectionName);
+        if (!details) {
+            this._view?.webview.postMessage({ type: 'results', data: [], append: combined ? true : false });
+            return;
+        }
+
+        // Get list of databases to search
+        let databases: string[] = [];
+        try {
+            const dbResult = await runQueryRaw(
+                this.context,
+                NZ_QUERIES.LIST_DATABASES,
+                true,
+                this.connectionManager,
+                connectionName
+            );
+            if (dbResult && dbResult.data) {
+                const dbRows = queryResultToRows<{ DATABASE: string }>(dbResult);
+                databases = dbRows.map(d => d.DATABASE);
+            }
+        } catch (e) {
+            console.error('Error fetching databases for search:', e);
+        }
+
+        // If generic listing fails, try to get current database from connection details
+        if (databases.length === 0) {
+            if (details.database) {
+                databases = [details.database];
+            }
+        }
+
+        if (databases.length === 0) {
+            this._view?.webview.postMessage({ type: 'results', data: [], append: combined ? true : false });
+            return;
+        }
+
+        // Build search tasks for each database - use parallel execution with max 8 connections
+        const MAX_CONCURRENCY = 8;
+
+        const searchTasks = databases.map(db => async () => {
+            const cleanDb = db.toUpperCase();
+
+            // Build query for this database with all search types
+            const query = `
+                SELECT * FROM (
+                    -- Part 1: Objects (Tables, Views, etc) matching NAME
+                    SELECT 1 AS PRIORITY, OBJNAME AS NAME, SCHEMA, DBNAME AS DATABASE, OBJTYPE AS TYPE, '' AS PARENT, 
+                           COALESCE(DESCRIPTION, '') AS DESCRIPTION, 'NAME' AS MATCH_TYPE
+                    FROM ${cleanDb}..${NZ_SYSTEM_VIEWS.OBJECT_DATA}
+                    WHERE DBNAME = '${cleanDb}' AND UPPER(OBJNAME) LIKE '${likeTerm}'
+                    UNION ALL
+                    -- Part 2: Objects matching DESCRIPTION  
+                    SELECT 1 AS PRIORITY, OBJNAME AS NAME, SCHEMA, DBNAME AS DATABASE, OBJTYPE AS TYPE, '' AS PARENT, 
+                           COALESCE(DESCRIPTION, '') AS DESCRIPTION, 'OBJ_DESC' AS MATCH_TYPE
+                    FROM ${cleanDb}..${NZ_SYSTEM_VIEWS.OBJECT_DATA}
+                    WHERE DBNAME = '${cleanDb}' AND UPPER(DESCRIPTION) LIKE '${likeTerm}' AND UPPER(OBJNAME) NOT LIKE '${likeTerm}'
+                    UNION ALL
+                    -- Part 3: Columns matching NAME
+                    SELECT 2 AS PRIORITY, C.ATTNAME AS NAME, O.SCHEMA, O.DBNAME AS DATABASE, 'COLUMN' AS TYPE, O.OBJNAME AS PARENT,
+                           COALESCE(C.DESCRIPTION, '') AS DESCRIPTION, 'NAME' AS MATCH_TYPE
+                    FROM ${cleanDb}..${NZ_SYSTEM_VIEWS.RELATION_COLUMN} C
+                    JOIN ${cleanDb}..${NZ_SYSTEM_VIEWS.OBJECT_DATA} O ON C.OBJID = O.OBJID
+                    WHERE O.DBNAME = '${cleanDb}' AND UPPER(C.ATTNAME) LIKE '${likeTerm}'
+                    UNION ALL
+                    -- Part 4: Columns matching DESCRIPTION (NEW!)
+                    SELECT 2 AS PRIORITY, C.ATTNAME AS NAME, O.SCHEMA, O.DBNAME AS DATABASE, 'COLUMN' AS TYPE, O.OBJNAME AS PARENT,
+                           COALESCE(C.DESCRIPTION, '') AS DESCRIPTION, 'COL_DESC' AS MATCH_TYPE
+                    FROM ${cleanDb}..${NZ_SYSTEM_VIEWS.RELATION_COLUMN} C
+                    JOIN ${cleanDb}..${NZ_SYSTEM_VIEWS.OBJECT_DATA} O ON C.OBJID = O.OBJID
+                    WHERE O.DBNAME = '${cleanDb}' AND UPPER(C.DESCRIPTION) LIKE '${likeTerm}' AND UPPER(C.ATTNAME) NOT LIKE '${likeTerm}'
+                    UNION ALL
+                    -- Part 5: External Tables matching DATAOBJECT
+                    SELECT 3 AS PRIORITY, E1.TABLENAME AS NAME, E1.SCHEMA, E1.DATABASE, 'EXTERNAL TABLE' AS TYPE, '' AS PARENT,
+                           COALESCE(E2.EXTOBJNAME, '') AS DESCRIPTION, 'DATAOBJECT' AS MATCH_TYPE
+                    FROM ${cleanDb}..${NZ_SYSTEM_VIEWS.EXTERNAL} E1
+                    JOIN ${cleanDb}..${NZ_SYSTEM_VIEWS.EXTOBJECT} E2 ON E1.DATABASE = E2.DATABASE AND E1.SCHEMA = E2.SCHEMA AND E1.TABLENAME = E2.TABLENAME
+                    WHERE E1.DATABASE = '${cleanDb}' AND UPPER(E2.EXTOBJNAME) LIKE '${likeTerm}'
+                ) AS R
+                ORDER BY PRIORITY, NAME
+                LIMIT 200
+            `;
+
+            try {
+                const result = await this.runSearchOnDatabase(details, db, query);
+                if (result && result.data && searchId === this.currentSearchId) {
+                    return queryResultToRows<SearchResultItem & { [key: string]: unknown }>(result);
+                }
+            } catch (e) {
+                console.debug(`Error searching in database ${db}:`, e);
+            }
+            return [];
+        });
 
         try {
-            const result = await runQueryRaw(this.context, query, true, this.connectionManager, connectionName);
+            // Execute all database searches in parallel with concurrency limit
+            const resultBatches = await this.runWithConcurrencyLimit(searchTasks, MAX_CONCURRENCY);
 
             if (searchId !== this.currentSearchId) {
                 return; // Old search, ignore
             }
 
-            if (result && result.data && result.data.length > 0) {
-                const results = queryResultToRows<SearchResultItem & { [key: string]: unknown }>(result);
-                const mappedResults: SearchResultItem[] = [];
+            const mappedResults: SearchResultItem[] = [];
 
-                results.forEach((i) => {
+            for (const batch of resultBatches) {
+                for (const i of batch) {
                     const item = i as SearchResultItem;
-                    const key = `${item.NAME.toUpperCase().trim()}|${item.TYPE.toUpperCase().trim()}|${(item.PARENT || '').toUpperCase().trim()}`;
+                    const key = `${item.NAME.toUpperCase().trim()}|${item.TYPE.toUpperCase().trim()}|${(item.PARENT || '').toUpperCase().trim()}|${item.DATABASE}`;
 
                     if (!sentIds.has(key)) {
                         mappedResults.push({
@@ -207,23 +277,31 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                             PARENT: item.PARENT,
                             DESCRIPTION: item.DESCRIPTION,
                             MATCH_TYPE: item.MATCH_TYPE,
-                            connectionName: connectionName! // Pass connection name
+                            connectionName: connectionName!
                         });
                         sentIds.add(key);
                     }
-                });
-
-                // Send DB results
-                // As we might have sent cache results, we should append or refresh
-                if (mappedResults.length > 0 && this._view) {
-                    this._view.webview.postMessage({ type: 'results', data: mappedResults, append: true });
-                } else if (sentIds.size === 0 && this._view) {
-                    // No cache results and no new DB results - send empty to clear spinner
-                    this._view.webview.postMessage({ type: 'results', data: [], append: false });
                 }
+            }
+
+            // Sort results by priority and name
+            mappedResults.sort((a, b) => {
+                const getPriority = (type: string) => {
+                    if (type === 'COLUMN') return 2;
+                    if (type === 'EXTERNAL TABLE') return 3;
+                    return 1;
+                };
+                const pA = getPriority(a.TYPE);
+                const pB = getPriority(b.TYPE);
+                if (pA !== pB) return pA - pB;
+                return a.NAME.localeCompare(b.NAME);
+            });
+
+            // Send DB results
+            if (mappedResults.length > 0 && this._view) {
+                this._view.webview.postMessage({ type: 'results', data: mappedResults, append: true });
             } else if (sentIds.size === 0 && this._view) {
-                // No results from DB and no cache results - send empty to clear spinner
-                this._view.webview.postMessage({ type: 'results', data: [], append: false });
+                this._view.webview.postMessage({ type: 'results', data: [], append: combined ? true : false });
             }
         } catch (e: unknown) {
             console.error('Search error:', e);
@@ -233,11 +311,95 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    private async runSearchOnDatabase(details: ConnectionDetails, db: string, sql: string): Promise<QueryResult> {
+        const conn = createNzConnection({
+            host: details.host,
+            port: details.port || 5480,
+            database: db || details.database,
+            user: details.user,
+            password: details.password
+        });
+
+        try {
+            await conn.connect();
+            const cmd = conn.createCommand(sql);
+            // Default timeout for search 30s
+            cmd.commandTimeout = 30;
+            const reader = await cmd.executeReader();
+
+            const columns: Array<{ name: string }> = [];
+            for (let i = 0; i < reader.fieldCount; i++) {
+                columns.push({ name: reader.getName(i) }); // minimal for queryResultToRows
+            }
+
+            const data: Array<Array<unknown>> = [];
+            while (await reader.read()) {
+                const row: Array<unknown> = [];
+                for (let i = 0; i < reader.fieldCount; i++) {
+                    row.push(reader.getValue(i));
+                }
+                data.push(row);
+            }
+            await reader.close();
+
+            return {
+                columns,
+                data,
+                rowsAffected: undefined,
+                limitReached: false,
+                sql
+            };
+        } finally {
+            try {
+                await conn.close();
+            } catch {
+                // Ignore close errors
+            }
+        }
+    }
+
+    /**
+     * Helper: Run up to N promises with max concurrency limit
+     * Useful for limiting database connections to prevent overload
+     */
+    private async runWithConcurrencyLimit<T>(
+        tasks: Array<() => Promise<T>>,
+        maxConcurrency: number
+    ): Promise<T[]> {
+        const results: T[] = [];
+        let nextIndex = 0;
+        const promises: Promise<void>[] = [];
+
+        const runTask = async (index: number, task: () => Promise<T>) => {
+            try {
+                const result = await task();
+                results[index] = result;
+            } finally {
+                // Start next task if available
+                if (nextIndex < tasks.length) {
+                    const taskIndex = nextIndex++;
+                    promises.push(runTask(taskIndex, tasks[taskIndex]));
+                }
+            }
+        };
+
+        // Start initial batch
+        const initialBatchSize = Math.min(maxConcurrency, tasks.length);
+        for (let i = 0; i < initialBatchSize; i++) {
+            promises.push(runTask(i, tasks[i]));
+            nextIndex++;
+        }
+
+        // Wait for all promises
+        await Promise.all(promises);
+        return results;
+    }
+
     /**
      * Search in VIEW/PROCEDURE source code with configurable mode
      * @param mode Search mode: 'raw', 'noComments', 'noCommentsNoLiterals'
      */
-    private async searchSourceCode(term: string, mode: SourceSearchMode) {
+    private async searchSourceCode(term: string, mode: SourceSearchMode, searchId?: number, combined?: boolean) {
         if (!term || term.length < 2) {
             return;
         }
@@ -252,11 +414,19 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             connectionName = this.connectionManager.getActiveConnectionName() || undefined;
         }
         if (!connectionName) {
-            this._view?.webview.postMessage({ type: 'results', data: [], append: false });
+            this._view?.webview.postMessage({ type: 'results', data: [], append: combined ? true : false });
             return;
         }
 
-        const searchId = ++this.currentSearchId;
+        const details = await this.connectionManager.getConnection(connectionName);
+        if (!details) {
+            this._view?.webview.postMessage({ type: 'results', data: [], append: combined ? true : false });
+            return;
+        }
+
+        if (searchId === undefined) {
+            searchId = ++this.currentSearchId;
+        }
 
         // Human readable mode description
         const modeDesc = mode === 'raw' ? 'raw source' :
@@ -269,7 +439,8 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 this._view.webview.postMessage({ type: 'searching', message: `Searching in ${modeDesc}...` });
             }
 
-            const safeTerm = term.toUpperCase();
+            const safeTerm = term.replace(/'/g, "''").toUpperCase();
+            const likeTerm = `%${safeTerm}%`;
             const results: SearchResultItem[] = [];
 
             // First, get list of all databases to search across (for procedures)
@@ -292,47 +463,36 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
             // If no databases found, fallback to current database only
             if (databases.length === 0) {
-                databases = ['']; // Empty string means current database
+                databases = [details.database];
             }
 
-            // 1. Search in VIEW definitions across all databases
-            // NOTE: _V_VIEW.DEFINITION requires active connection to each database,
-            // so we use SET CATALOG to switch databases temporarily
-            const viewQuery = `
-                SELECT VIEWNAME AS NAME, SCHEMA, DATABASE, DEFINITION AS SOURCE 
-                FROM _V_VIEW 
-                WHERE DATABASE != 'SYSTEM'
-            `;
+            // RAW mode: Use WHERE LIKE to filter at database level (no need to download source)
+            // Other modes: Download source and filter in-memory
+            const useServerSideFilter = mode === 'raw';
+            const MAX_CONCURRENCY = 8;
 
-            for (const db of databases) {
-                if (searchId !== this.currentSearchId) break; // Check for cancellation
+            // 1. Search in VIEW definitions across all databases
+            // Create all view search tasks upfront
+            const viewTasks = databases.map(db => async () => {
+                const viewQuery = useServerSideFilter
+                    ? `SELECT VIEWNAME AS NAME, SCHEMA, DATABASE 
+                       FROM ${db}.._V_VIEW 
+                       WHERE DATABASE != 'SYSTEM' AND UPPER(DEFINITION) LIKE '${likeTerm}'`
+                    : `SELECT VIEWNAME AS NAME, SCHEMA, DATABASE, DEFINITION AS SOURCE 
+                       FROM ${db}.._V_VIEW 
+                       WHERE DATABASE != 'SYSTEM'`;
 
                 try {
-                    let viewResult;
-                    if (db) {
-                        // Use runQueryWithCatalog to switch to target database
-                        viewResult = await runQueryWithCatalog(
-                            db,
-                            viewQuery,
-                            this.connectionManager,
-                            connectionName
-                        );
-                    } else {
-                        // Current database - use regular query
-                        viewResult = await runQueryRaw(
-                            this.context,
-                            viewQuery,
-                            true,
-                            this.connectionManager,
-                            connectionName
-                        );
-                    }
-                    
+                    const viewResult = await this.runSearchOnDatabase(details, db, viewQuery);
+
                     if (viewResult && viewResult.data && searchId === this.currentSearchId) {
-                        const views = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(viewResult);
+                        const views = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE?: string } & { [key: string]: unknown }>(viewResult);
+                        const batchResults: SearchResultItem[] = [];
                         for (const view of views) {
-                            if (view.SOURCE && searchInCodeWithMode(view.SOURCE, safeTerm, mode)) {
-                                results.push({
+                            // For RAW mode with server-side filter, all results match
+                            // For other modes, check in-memory
+                            if (useServerSideFilter || (view.SOURCE && searchInCodeWithMode(view.SOURCE, safeTerm, mode))) {
+                                batchResults.push({
                                     NAME: view.NAME,
                                     SCHEMA: view.SCHEMA,
                                     DATABASE: view.DATABASE,
@@ -340,39 +500,41 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                                     PARENT: '',
                                     DESCRIPTION: `Found in view ${modeDesc}`,
                                     MATCH_TYPE: 'SOURCE_CODE',
-                                    connectionName
+                                    connectionName: connectionName!
                                 });
                             }
                         }
+                        return batchResults;
                     }
                 } catch (e) {
                     console.debug(`Error searching views in database ${db}:`, e);
                 }
+                return [];
+            });
+
+            // Run all view searches with concurrency limit
+            const viewResultBatches = await this.runWithConcurrencyLimit(viewTasks, MAX_CONCURRENCY);
+            for (const batchResults of viewResultBatches) {
+                results.push(...batchResults);
             }
 
             // 2. Search in PROCEDURE sources across all databases
-            // NOTE: _V_PROCEDURE.PROCEDURESOURCE can be accessed via DATABASE.._V_PROCEDURE
-            // without changing connection context
-            for (const db of databases) {
-                if (searchId !== this.currentSearchId) break; // Check for cancellation
-
-                const procQuery = db
-                    ? `SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE FROM ${db}.._V_PROCEDURE WHERE DATABASE != 'SYSTEM'`
-                    : `SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE FROM _V_PROCEDURE WHERE DATABASE != 'SYSTEM'`;
+            // Create all procedure search tasks upfront
+            const procTasks = databases.map(db => async () => {
+                const procQuery = useServerSideFilter
+                    ? `SELECT PROCEDURE AS NAME, SCHEMA, DATABASE FROM ${db}.._V_PROCEDURE WHERE DATABASE != 'SYSTEM' AND UPPER(PROCEDURESOURCE) LIKE '${likeTerm}'`
+                    : `SELECT PROCEDURE AS NAME, SCHEMA, DATABASE, PROCEDURESOURCE AS SOURCE FROM ${db}.._V_PROCEDURE WHERE DATABASE != 'SYSTEM'`;
 
                 try {
-                    const procResult = await runQueryRaw(
-                        this.context,
-                        procQuery,
-                        true,
-                        this.connectionManager,
-                        connectionName
-                    );
+                    const procResult = await this.runSearchOnDatabase(details, db, procQuery);
                     if (procResult && procResult.data && searchId === this.currentSearchId) {
-                        const procs = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE: string } & { [key: string]: unknown }>(procResult);
+                        const procs = queryResultToRows<{ NAME: string; SCHEMA: string; DATABASE: string; SOURCE?: string } & { [key: string]: unknown }>(procResult);
+                        const batchResults: SearchResultItem[] = [];
                         for (const proc of procs) {
-                            if (proc.SOURCE && searchInCodeWithMode(proc.SOURCE, safeTerm, mode)) {
-                                results.push({
+                            // For RAW mode with server-side filter, all results match
+                            // For other modes, check in-memory
+                            if (useServerSideFilter || (proc.SOURCE && searchInCodeWithMode(proc.SOURCE, safeTerm, mode))) {
+                                batchResults.push({
                                     NAME: proc.NAME,
                                     SCHEMA: proc.SCHEMA,
                                     DATABASE: proc.DATABASE,
@@ -380,19 +542,27 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                                     PARENT: '',
                                     DESCRIPTION: `Found in procedure ${modeDesc}`,
                                     MATCH_TYPE: 'SOURCE_CODE',
-                                    connectionName
+                                    connectionName: connectionName!
                                 });
                             }
                         }
+                        return batchResults;
                     }
                 } catch (e) {
                     console.debug(`Error searching procedures in database ${db}:`, e);
                 }
+                return [];
+            });
+
+            // Run all procedure searches with concurrency limit
+            const procResultBatches = await this.runWithConcurrencyLimit(procTasks, MAX_CONCURRENCY);
+            for (const batchResults of procResultBatches) {
+                results.push(...batchResults);
             }
 
-            // Send results
+            // Send results (append so combined "objects + source raw" mode sums both sets)
             if (this._view && searchId === this.currentSearchId) {
-                this._view.webview.postMessage({ type: 'results', data: results, append: false });
+                this._view.webview.postMessage({ type: 'results', data: results, append: true });
             }
         } catch (e: unknown) {
             console.error('Source code search error:', e);
@@ -401,6 +571,13 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             }
         }
     }
+
+    private async doCombinedSearch(term: string, mode: SourceSearchMode) {
+        const searchId = ++this.currentSearchId;
+        // Run both with the same searchId so they don't cancel each other
+        this.search(term, searchId, true);
+        this.searchSourceCode(term, mode, searchId, true);
+    } // End of doCombinedSearch
 
     private _getHtmlForWebview(_webview: vscode.Webview) {
         return `<!DOCTYPE html>
@@ -456,6 +633,47 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             }
             .result-item { padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; flex-direction: column; cursor: pointer; position: relative; }
             .result-item:hover { background: var(--vscode-list-hoverBackground); }
+            .group-header {
+                padding: 10px 10px 5px 10px;
+                font-weight: bold;
+                background: var(--vscode-editor-background);
+                border-bottom: 1px solid var(--vscode-panel-border);
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                cursor: pointer;
+                user-select: none;
+                position: sticky;
+                top: 0;
+                z-index: 10;
+            }
+            .group-header:hover {
+                background: var(--vscode-list-hoverBackground);
+            }
+            .group-count {
+                background: var(--vscode-badge-background);
+                color: var(--vscode-badge-foreground);
+                padding: 2px 8px;
+                border-radius: 12px;
+                font-size: 0.85em;
+                font-weight: normal;
+            }
+            .group-toggle {
+                display: inline-block;
+                width: 12px;
+                height: 12px;
+                margin-right: 6px;
+                transition: transform 0.2s;
+            }
+            .group-toggle.collapsed {
+                transform: rotate(-90deg);
+            }
+            .group-items {
+                display: contents;
+            }
+            .group-items.collapsed {
+                display: none;
+            }
             .item-header { display: flex; justify-content: space-between; font-weight: bold; }
             .item-details { font-size: 0.9em; opacity: 0.8; display: flex; gap: 10px; }
             .type-badge { font-size: 0.8em; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); padding: 2px 5px; border-radius: 3px; }
@@ -524,6 +742,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                 <select id="sourceModeSelect">
                     <option value="">Objects Only</option>
                     <option value="raw">Source: Raw</option>
+                    <option value="objectsRaw">Objects + Source Raw</option>
                     <option value="noComments">Source: No Comments</option>
                     <option value="noCommentsNoLiterals">Source: No Comments/Strings</option>
                 </select>
@@ -544,6 +763,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             const status = document.getElementById('status');
             
             let isSearching = false;
+            let allResults = [];
             
             function setSearchingState(searching) {
                 isSearching = searching;
@@ -554,13 +774,17 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             searchBtn.addEventListener('click', () => {
                 const term = searchInput.value;
                 if (term) {
-                    // Show searching indicator in results panel
+                    // Clear any previous results and show searching indicator in results panel
+                    allResults = [];
                     resultsList.innerHTML = '<li class="searching-indicator"><span class="spinner"></span> Searching...</li>';
                     status.textContent = '';
                     setSearchingState(true);
                     
                     const sourceMode = sourceModeSelect.value;
-                    if (sourceMode) {
+                    if (sourceMode === 'objectsRaw') {
+                        // Combined mode: objects + source raw
+                        vscode.postMessage({ type: 'searchCombined', value: term, mode: 'raw' });
+                    } else if (sourceMode) {
                         // Source code search with mode
                         vscode.postMessage({ type: 'searchSource', value: term, mode: sourceMode });
                     } else {
@@ -600,17 +824,20 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                     case 'error':
                         resultsList.innerHTML = '';
                         status.textContent = 'Error: ' + message.message;
+                        allResults = [];
                         setSearchingState(false);
                         break;
                     case 'cancelled':
                         resultsList.innerHTML = '';
                         status.textContent = 'Search cancelled.';
+                        allResults = [];
                         setSearchingState(false);
                         break;
                     case 'reset':
                         searchInput.value = '';
                         resultsList.innerHTML = '';
                         status.textContent = '';
+                        allResults = [];
                         setSearchingState(false);
                         break;
                 }
@@ -618,58 +845,141 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
             function renderResults(data, append) {
                 if (!append) {
-                    resultsList.innerHTML = '';
+                    allResults = data || [];
+                } else if (data && data.length > 0) {
+                    allResults = allResults.concat(data);
                 }
 
-                if (!data || data.length === 0) {
-                    if (!append && resultsList.children.length === 0) {
-                        status.textContent = 'No results found.';
-                    }
+                resultsList.innerHTML = '';
+
+                if (!allResults || allResults.length === 0) {
+                    status.textContent = 'No results found.';
                     return;
                 }
 
-                data.forEach(item => {
-                    const li = document.createElement('li');
-                    li.className = 'result-item';
+                // Deduplicate items (by NAME + DATABASE + SCHEMA + TYPE combination)
+                const seen = new Set();
+                const uniqueData = [];
+                allResults.forEach(item => {
+                    const normalizedType = (item.TYPE || 'OTHER').trim();
+                    const key = (item.NAME || '') + '|' + (item.DATABASE || '') + '|' + (item.SCHEMA || '') + '|' + normalizedType;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        uniqueData.push(item);
+                    }
+                });
 
-                    const parentInfo = item.PARENT ? \`Parent: \${item.PARENT}\` : '';
-                    const schemaInfo = item.SCHEMA ? \`Schema: \${item.SCHEMA}\` : '';
-                    const databaseInfo = item.DATABASE ? \`Database: \${item.DATABASE}\` : '';
-                    const description = item.DESCRIPTION && item.DESCRIPTION.trim() ? item.DESCRIPTION : '';
-                    
-                    // Add match type indicator
-                    const matchTypeInfo = item.MATCH_TYPE === 'DEFINITION' ? 'Match in view definition' :
-                                        item.MATCH_TYPE === 'SOURCE' ? 'Match in procedure source' :
-                                        item.MATCH_TYPE === 'NAME' ? 'Match in name' : '';
-                    
-                    li.innerHTML = \`
-                        <div class="item-header">
-                            <span>\${item.NAME}</span>
-                            <span class="type-badge">\${item.TYPE}</span>
-                        </div>
-                        <div class="item-details">
-                            <span>\${databaseInfo}</span>
-                            <span>\${schemaInfo}</span>
-                            <span>\${parentInfo}</span>
-                            \${matchTypeInfo ? \`<span style="font-style: italic; color: var(--vscode-descriptionForeground);">\${matchTypeInfo}</span>\` : ''}
-                        </div>
-                        \${description ? \`<div class="tooltip bottom">\${description}</div>\` : ''}
-                    \`;
-                    
-                    // Add double-click handler to navigate to schema tree
-                    li.addEventListener('dblclick', () => {
-                        vscode.postMessage({ 
-                            type: 'navigate', 
-                            name: item.NAME,
-                            schema: item.SCHEMA,
-                            database: item.DATABASE,
-                            objType: item.TYPE,
-                            parent: item.PARENT,
-                            connectionName: item.connectionName // Pass back connection name
-                        });
+                // Group results by TYPE (normalized to uppercase and trimmed)
+                const groups = {};
+                uniqueData.forEach(item => {
+                    const type = (item.TYPE || 'OTHER').trim().toUpperCase();
+                    if (!groups[type]) {
+                        groups[type] = [];
+                    }
+                    groups[type].push(item);
+                });
+
+                // Sort items within each group by DATABASE, then by NAME
+                Object.keys(groups).forEach(type => {
+                    groups[type].sort((a, b) => {
+                        const dbA = (a.DATABASE || '').toUpperCase();
+                        const dbB = (b.DATABASE || '').toUpperCase();
+                        if (dbA !== dbB) {
+                            return dbA.localeCompare(dbB);
+                        }
+                        const nameA = (a.NAME || '').toUpperCase();
+                        const nameB = (b.NAME || '').toUpperCase();
+                        return nameA.localeCompare(nameB);
                     });
+                });
+
+                // Render groups in order: VIEW, PROCEDURE, TABLE, COLUMN, FUNCTION, then others
+                const groupOrder = ['VIEW', 'PROCEDURE', 'TABLE', 'COLUMN', 'FUNCTION', 'INDEX', 'SYSTEM TABLE', 'SYSTEM VIEW', 'SYSTEM SEQ'];
+                const sortedTypes = Object.keys(groups).sort((a, b) => {
+                    const orderA = groupOrder.indexOf(a);
+                    const orderB = groupOrder.indexOf(b);
+                    if (orderA === -1 && orderB === -1) return a.localeCompare(b);
+                    if (orderA === -1) return 1;
+                    if (orderB === -1) return -1;
+                    return orderA - orderB;
+                });
+
+                sortedTypes.forEach(type => {
+                    const items = groups[type];
+                    const groupId = 'group-' + type;
                     
-                    resultsList.appendChild(li);
+                    // Create group header
+                    const groupHeader = document.createElement('li');
+                    groupHeader.className = 'group-header';
+                    groupHeader.setAttribute('data-group', type);
+                    groupHeader.innerHTML = \`
+                        <div>
+                            <span class="group-toggle">▼</span>
+                            <span>\${type}</span>
+                        </div>
+                        <span class="group-count">\${items.length} item\${items.length !== 1 ? 's' : ''}</span>
+                    \`;
+                    resultsList.appendChild(groupHeader);
+
+                    // Create container for group items
+                    const groupContainer = document.createElement('div');
+                    groupContainer.className = 'group-items';
+                    groupContainer.setAttribute('data-group', type);
+
+                    // Add items to group (already sorted by DATABASE, NAME)
+                    items.forEach(item => {
+                        const li = document.createElement('li');
+                        li.className = 'result-item';
+
+                        const parentInfo = item.PARENT ? \`Parent: \${item.PARENT}\` : '';
+                        const schemaInfo = item.SCHEMA ? \`Schema: \${item.SCHEMA}\` : '';
+                        const databaseInfo = item.DATABASE ? \`Database: \${item.DATABASE}\` : '';
+                        const description = item.DESCRIPTION && item.DESCRIPTION.trim() ? item.DESCRIPTION : '';
+                        
+                        // Add match type indicator
+                        const matchTypeInfo = item.MATCH_TYPE === 'DEFINITION' ? 'Match in view definition' :
+                                            item.MATCH_TYPE === 'SOURCE' ? 'Match in procedure source' :
+                                            item.MATCH_TYPE === 'SOURCE_CODE' ? 'Match in source code' :
+                                            item.MATCH_TYPE === 'NAME' ? 'Match in name' : '';
+                        
+                        li.innerHTML = \`
+                            <div class="item-header">
+                                <span>\${item.NAME}</span>
+                                <span class="type-badge">\${item.TYPE}</span>
+                            </div>
+                            <div class="item-details">
+                                <span>\${databaseInfo}</span>
+                                <span>\${schemaInfo}</span>
+                                <span>\${parentInfo}</span>
+                                \${matchTypeInfo ? \`<span style="font-style: italic; color: var(--vscode-descriptionForeground);">\${matchTypeInfo}</span>\` : ''}
+                            </div>
+                            \${description ? \`<div class="tooltip bottom">\${description}</div>\` : ''}
+                        \`;
+                        
+                        // Add double-click handler to navigate to schema tree
+                        li.addEventListener('dblclick', () => {
+                            vscode.postMessage({ 
+                                type: 'navigate', 
+                                name: item.NAME,
+                                schema: item.SCHEMA,
+                                database: item.DATABASE,
+                                objType: item.TYPE,
+                                parent: item.PARENT,
+                                connectionName: item.connectionName // Pass back connection name
+                            });
+                        });
+                        
+                        groupContainer.appendChild(li);
+                    });
+
+                    resultsList.appendChild(groupContainer);
+
+                    // Add toggle handler
+                    groupHeader.addEventListener('click', () => {
+                        const toggle = groupHeader.querySelector('.group-toggle');
+                        groupContainer.classList.toggle('collapsed');
+                        toggle.classList.toggle('collapsed');
+                    });
                 });
             }
             } catch (e) {

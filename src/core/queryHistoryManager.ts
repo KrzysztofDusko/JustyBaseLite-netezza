@@ -26,8 +26,18 @@ export class QueryHistoryManager {
     private static readonly BATCH_ARCHIVE_SIZE = 100; // How many items to move to archive at once when limit reached
     private static readonly STORAGE_VERSION = 1;
 
+    private static instance: QueryHistoryManager;
+
+    public static getInstance(context: vscode.ExtensionContext): QueryHistoryManager {
+        if (!QueryHistoryManager.instance) {
+            QueryHistoryManager.instance = new QueryHistoryManager(context);
+        }
+        return QueryHistoryManager.instance;
+    }
+
     private cache: QueryHistoryEntry[] = [];
     private initialized = false;
+    private initPromise: Promise<void> | undefined;
 
     private historyFilePath: string | undefined;
     private archiveFilePath: string | undefined;
@@ -53,6 +63,16 @@ export class QueryHistoryManager {
     }
 
     private async initialize(): Promise<void> {
+        if (this.initialized) return;
+        if (this.initPromise) return this.initPromise;
+
+        this.initPromise = this._initializeInternal().finally(() => {
+            this.initPromise = undefined;
+        });
+        return this.initPromise;
+    }
+
+    private async _initializeInternal(): Promise<void> {
         if (this.initialized) return;
 
         try {

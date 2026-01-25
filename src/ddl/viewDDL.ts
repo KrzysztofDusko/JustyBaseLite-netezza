@@ -4,6 +4,7 @@
 
 import { executeQueryHelper, quoteNameIfNeeded } from './helpers';
 import { NzConnection } from '../types';
+import { NZ_SYSTEM_VIEWS } from '../metadata';
 
 /**
  * Generate DDL code for creating a view in Netezza
@@ -20,7 +21,7 @@ export async function generateViewDDL(
             VIEWNAME,
             DEFINITION,
             OBJID::INT
-        FROM ${database.toUpperCase()}.._V_VIEW
+        FROM ${database.toUpperCase()}..${NZ_SYSTEM_VIEWS.VIEW}
         WHERE DATABASE = '${database.toUpperCase()}'
             AND SCHEMA = '${schema.toUpperCase()}'
             AND VIEWNAME = '${viewName.toUpperCase()}'

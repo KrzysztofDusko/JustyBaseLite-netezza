@@ -5,6 +5,7 @@
 import { ProcedureInfo } from './types';
 import { executeQueryHelper, quoteNameIfNeeded, fixProcReturnType } from './helpers';
 import { NzConnection } from '../types';
+import { NZ_SYSTEM_VIEWS } from '../metadata';
 
 /**
  * Generate DDL code for creating a procedure in Netezza
@@ -27,7 +28,7 @@ export async function generateProcedureDDL(
             PROCEDURE,
             ARGUMENTS,
             NULL AS LANGUAGE
-        FROM ${database.toUpperCase()}.._V_PROCEDURE
+        FROM ${database.toUpperCase()}..${NZ_SYSTEM_VIEWS.PROCEDURE}
         WHERE DATABASE = '${database.toUpperCase()}'
             AND SCHEMA = '${schema.toUpperCase()}'
             AND PROCEDURESIGNATURE = '${procName.toUpperCase()}'

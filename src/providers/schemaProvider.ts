@@ -4,6 +4,7 @@ import { ConnectionManager } from '../core/connectionManager';
 import { MetadataCache } from '../metadataCache';
 import { buildColumnMetadataQuery, parseColumnMetadata } from './tableMetadataProvider';
 import { DatabaseMetadata, TableMetadata, ColumnMetadata } from '../metadata/types';
+import { NZ_QUERIES, NZ_SYSTEM_VIEWS } from '../metadata';
 
 export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<SchemaItem | undefined | null | void> = new vscode.EventEmitter<
@@ -142,7 +143,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             try {
                 const result = await runQueryRaw(
                     this.context,
-                    'SELECT DATABASE FROM system.._v_database ORDER BY DATABASE',
+                    NZ_QUERIES.LIST_DATABASES,
                     true,
                     this.connectionManager,
                     element.connectionName
@@ -208,7 +209,7 @@ export class SchemaProvider implements vscode.TreeDataProvider<SchemaItem> {
             }
 
             try {
-                const query = `SELECT DISTINCT OBJTYPE FROM ${element.dbName}.._V_OBJECT_DATA WHERE DBNAME = '${element.dbName}' ORDER BY OBJTYPE`;
+                const query = `SELECT DISTINCT OBJTYPE FROM ${element.dbName}..${NZ_SYSTEM_VIEWS.OBJECT_DATA} WHERE DBNAME = '${element.dbName}' ORDER BY OBJTYPE`;
                 const result = await runQueryRaw(
                     this.context,
                     query,

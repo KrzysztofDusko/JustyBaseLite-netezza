@@ -957,8 +957,6 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
 
     // Create table element
     const table = document.createElement('table');
-    table.style.width = '100%';
-    table.style.borderCollapse = 'collapse';
 
     const thead = document.createElement('thead');
     thead.style.position = 'sticky';
@@ -985,10 +983,9 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         }))].sort();
 
         // Define accessor function variable to be used in both accessorFn and filterFn
-        // CRITICAL: Return empty string for null/undefined so TanStack Table infers string type
-        // This fixes global filtering when first row has NULL values
+        // Preserve nulls so UI can distinguish NULL from empty string
         const accessorFn = (row) => {
-            if (!row) return '';
+            if (!row) return null;
             let value;
             // Support both array-based data and object-based data with column names as keys
             if (Array.isArray(row)) {
@@ -998,8 +995,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             } else {
                 value = row[String(index)];
             }
-            // Return empty string for null/undefined to ensure string type inference
-            return value === null || value === undefined ? '' : value;
+            return value;
         };
 
         return {
@@ -1012,7 +1008,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
 
                 // Use accessorFn directly on original data
                 const cellValue = accessorFn(row.original);
-                const stringValue = cellValue === null || cellValue === undefined || cellValue === '' ? 'NULL' : String(cellValue);
+                const stringValue = cellValue === null || cellValue === undefined ? 'NULL' : String(cellValue);
                 const numericValue = parseFloat(String(cellValue).replace(/,/g, ''));
 
                 // Handle condition-based filters
@@ -1128,8 +1124,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         console.error('Error calculating column widths:', e);
     }
 
-    // Set table layout to fixed
-    table.style.tableLayout = 'fixed';
+    // Table layout is set to fixed in CSS
 
     // Helper to render colgroup
     function renderColGroup() {
@@ -1141,13 +1136,17 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         // Get visible columns in correct order
         const visibleCols = tanTable.getVisibleLeafColumns();
 
+        let totalWidth = 0;
         visibleCols.forEach(col => {
             const colEl = document.createElement('col');
             const w = columnWidths.get(col.id) || 100; // Default fallback
             colEl.style.width = w + 'px';
             colGroup.appendChild(colEl);
+            totalWidth += w;
         });
 
+        // Set table width to sum of column widths so it doesn't auto-distribute
+        table.style.width = totalWidth + 'px';
         table.insertBefore(colGroup, table.querySelector('thead'));
     }
 
@@ -1612,8 +1611,8 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
                 td.appendChild(indent);
             }
 
-            // Check for null, undefined, or empty string (accessorFn returns '' for nulls)
-            if (value === null || value === undefined || value === '') {
+            // Check for null, undefined. Empty string is a valid value.
+            if (value === null || value === undefined) {
                 const nullSpan = document.createElement('span');
                 nullSpan.className = 'null-value';
                 nullSpan.textContent = 'NULL';
@@ -2067,17 +2066,29 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
             const newWidth = Math.max(50, startWidth + delta); // Min width 50
 
             if (grid && grid.columnWidths) {
+                const oldWidth = grid.columnWidths.get(colId) || startWidth;
                 grid.columnWidths.set(colId, newWidth);
-                // Update col element directly for performance
-                // We need to find the correct col index
+                
+                // Update col element and th directly for immediate visual feedback
                 if (grid.tanTable) {
                     const visibleCols = grid.tanTable.getVisibleLeafColumns();
                     const colIndex = visibleCols.findIndex(c => c.id === colId);
                     if (colIndex !== -1) {
-                        const colGroup = grid.tanTable.options.meta?.colGroupElement ||
-                            document.querySelectorAll('.grid-wrapper')[rsIndex]?.querySelector('colgroup');
+                        const wrapper = document.querySelectorAll('.grid-wrapper')[rsIndex];
+                        const colGroup = wrapper?.querySelector('colgroup');
+                        const tableEl = wrapper?.querySelector('table');
+                        
                         if (colGroup && colGroup.children[colIndex]) {
                             colGroup.children[colIndex].style.width = newWidth + 'px';
+                        }
+                        // Also update th width directly
+                        th.style.width = newWidth + 'px';
+                        
+                        // Update table total width
+                        if (tableEl) {
+                            const currentTableWidth = parseFloat(tableEl.style.width) || 0;
+                            const widthDelta = newWidth - oldWidth;
+                            tableEl.style.width = (currentTableWidth + widthDelta) + 'px';
                         }
                     }
                 }
@@ -2124,7 +2135,7 @@ function showColumnFilterDropdown(column, table, anchorElement, rsIndex) {
     const allRows = table.getCoreRowModel().rows;
     allRows.forEach(row => {
         const cellValue = column.columnDef.accessorFn(row.original);
-        const stringValue = cellValue === null || cellValue === undefined || cellValue === '' ? 'NULL' : String(cellValue);
+        const stringValue = cellValue === null || cellValue === undefined ? 'NULL' : String(cellValue);
         valueCounts.set(stringValue, (valueCounts.get(stringValue) || 0) + 1);
     });
 
@@ -3477,7 +3488,7 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
                 const rowStrings = rows.map(row => {
                     return columns.map(col => {
                         const cellValue = row.getValue(col.id);
-                        if (cellValue === null || cellValue === undefined || cellValue === '') {
+                        if (cellValue === null || cellValue === undefined) {
                             return 'NULL';
                         }
                         return String(cellValue);

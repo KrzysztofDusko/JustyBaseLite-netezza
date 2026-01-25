@@ -321,10 +321,10 @@ body {
 
 /* Table Styles */
 table {
-    width: 100%;
     border-collapse: collapse;
     font-family: var(--vscode-font-family);
     font-size: 13px;
+    table-layout: fixed;
 }
 
 thead {
@@ -344,6 +344,7 @@ th {
     user-select: none;
     background-color: var(--header-bg);
     position: relative;
+    box-sizing: border-box;
 }
 
 th:hover {
@@ -359,10 +360,15 @@ th.drag-over {
 }
 
 td {
-    padding: 4px 8px;
+    padding: 2px 8px;
     border: 1px solid var(--border-color);
     color: var(--cell-fg);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 20px;
+    height: 24px;
+    box-sizing: border-box;
 }
 
 tr.even {

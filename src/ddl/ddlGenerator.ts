@@ -25,7 +25,9 @@ export async function generateDDL(
     let connection: NzConnection | null = null;
 
     try {
-        connection = await createConnectionFromDetails(connectionDetails);
+        // Connect to the specific database where the object resides.
+        // This is necessary for retrieving view definitions and procedure source correctly.
+        connection = await createConnectionFromDetails(connectionDetails, database);
 
         const upperType = objectType.toUpperCase();
 

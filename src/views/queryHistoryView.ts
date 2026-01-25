@@ -94,7 +94,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
     private async searchArchive(term: string) {
         if (!this._view) return;
 
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         const results = await historyManager.searchArchive(term);
         const stats = await historyManager.getStats();
 
@@ -115,7 +115,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             this._currentOffset = 0;
         }
 
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         const history = await historyManager.getHistory(QueryHistoryView.PAGE_SIZE, this._currentOffset);
         const stats = await historyManager.getStats();
 
@@ -136,7 +136,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         );
 
         if (confirm === 'Clear All') {
-            const historyManager = new QueryHistoryManager(this._context);
+            const historyManager = QueryHistoryManager.getInstance(this._context);
             await historyManager.clearHistory();
             this.refresh();
             vscode.window.showInformationMessage('Query history cleared');
@@ -152,7 +152,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         );
 
         if (answer === 'Delete') {
-            const historyManager = new QueryHistoryManager(this._context);
+            const historyManager = QueryHistoryManager.getInstance(this._context);
             await historyManager.deleteEntry(id);
             // Don't full refresh, just let UI remove it or refresh current view?
             // Simple refresh for now.
@@ -176,7 +176,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
     }
 
     private async toggleFavorite(id: string) {
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         await historyManager.toggleFavorite(id);
         // We could refresh, but better to just update UI state locally in webview if possible.
         // For now, let's keep it consistent by refreshing visible data? 
@@ -185,14 +185,14 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
     }
 
     private async updateEntry(id: string, tags?: string, description?: string) {
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         await historyManager.updateEntry(id, tags, description);
         this.refresh();
         vscode.window.showInformationMessage('Entry updated successfully');
     }
 
     private async requestEdit(id: string) {
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         const history = await historyManager.getHistory(); // Note: this gets only active page 0 if we changed it? 
         // Wait, getHistory now has limit. calling without limit gives ALL active.
         // We will assume the user clicks on an entry that IS loaded in UI.
@@ -261,7 +261,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             return;
         }
 
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         const favorites = await historyManager.getFavorites();
         const stats = await historyManager.getStats();
 
@@ -279,7 +279,7 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
             return;
         }
 
-        const historyManager = new QueryHistoryManager(this._context);
+        const historyManager = QueryHistoryManager.getInstance(this._context);
         const entries = await historyManager.getByTag(tag);
         const stats = await historyManager.getStats();
 

@@ -238,7 +238,7 @@ export class SessionMonitorView {
             FROM _V_QRYSTAT Q
             LEFT JOIN _V_SESSION S ON Q.QS_SESSIONID = S.ID
             ORDER BY Q.QS_TSTART DESC
-            LIMIT 100
+            LIMIT 1000
         `;
         try {
             const result = await runQueryRaw(this._context, sql, true, this._connectionManager, undefined);
