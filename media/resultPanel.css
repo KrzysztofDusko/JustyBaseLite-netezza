@@ -800,6 +800,42 @@ tfoot {
 /* Tab Content */
 .filter-tab-content {
     display: none;
+    padding: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.filter-tab-content.active {
+    display: block;
+}
+
+/* Extracted Inline Styles */
+.global-filter-input {
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border);
+    padding: 4px;
+}
+
+.toolbar-separator {
+    width: 1px;
+    height: 16px;
+    background: var(--vscode-panel-border);
+    margin: 0 2px;
+}
+
+.row-count-info {
+    margin-left: auto;
+    font-size: 12px;
+    opacity: 0.8;
+}
+
+.drag-hint {
+    opacity: 0.5;
+}
+
+.filter-tab-content {
+    display: none;
     padding: 12px;
     overflow-y: auto;
     max-height: calc(100% - 100px);

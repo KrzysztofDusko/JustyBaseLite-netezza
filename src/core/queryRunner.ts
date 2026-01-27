@@ -63,7 +63,7 @@ export async function cancelQueryByUri(docUri: string | vscode.Uri): Promise<voi
         state.isCancelled = true;
         // Notify immediately to give feedback
         vscode.window.showInformationMessage('Cancellation request sent.');
-        
+
         try {
             console.log(`[cancelQueryByUri] Calling cmd.cancel() for ${uriStr}`);
             await state.command.cancel();
@@ -132,10 +132,41 @@ interface OutputLogger {
     logCallback?: (msg: string) => void;
 }
 
+let sharedOutputChannel: vscode.OutputChannel | undefined;
+
+function getOutputChannel(): vscode.OutputChannel {
+    if (!sharedOutputChannel) {
+        sharedOutputChannel = vscode.window.createOutputChannel('Netezza SQL');
+    }
+    return sharedOutputChannel;
+}
+
+/**
+ * Dispose shared output channel if created and clear reference.
+ */
+export function disposeSharedOutputChannel(): void {
+    if (sharedOutputChannel) {
+        try {
+            sharedOutputChannel.dispose();
+        } catch {
+            // ignore disposal errors
+        }
+        // clear reference
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore - clear module-scoped variable
+        sharedOutputChannel = undefined;
+    }
+}
+
+// Helper used by tests to ensure the shared channel exists
+export function ensureSharedOutputChannel(): vscode.OutputChannel {
+    return getOutputChannel();
+}
+
 function createLogger(silent: boolean, logCallback?: (msg: string) => void): OutputLogger {
     let outputChannel: vscode.OutputChannel | undefined;
     if (!silent && !logCallback) {
-        outputChannel = vscode.window.createOutputChannel('Netezza SQL');
+        outputChannel = getOutputChannel();
         outputChannel.show(true);
     }
     return { outputChannel, logCallback };
@@ -291,7 +322,7 @@ async function executeDropSession(
                     const r = await dropCmd.executeReader();
                     await r.close();
                     vscode.window.showInformationMessage(`Session ${sessionId} dropped successfully.`);
-                    
+
                     // If keepConnectionOpen is enabled, we need to close the old persistent
                     // connection (which had the dropped session) and establish a new one
                     if (documentUri && connectionManager.getDocumentKeepConnectionOpen(documentUri)) {
@@ -421,14 +452,16 @@ async function executeQueryAndFetch(
         executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false, sessionId });
     }
 
+    let reader: NzDataReader | undefined;
+    let limitReached = false;
+
     try {
-        const reader = await cmd.executeReader();
+        reader = await cmd.executeReader();
         const columns: { name: string; type?: string }[] = [];
         const data: unknown[][] = [];
 
         const limit = 200000;
         let fetchedCount = 0;
-        let limitReached = false;
 
         // Read column metadata BEFORE the fetch loop (even if there are 0 rows)
         for (let i = 0; i < reader.fieldCount; i++) {
@@ -453,14 +486,27 @@ async function executeQueryAndFetch(
 
             if (fetchedCount >= limit) {
                 limitReached = true;
-                // Cancel the command on the server side since we don't need more data
-                // Actually, executeQueryAndFetch doesn't have ConnectionManager.
                 break;
+            }
+        }
+
+        if (limitReached) {
+            try {
+                await cmd.cancel();
+            } catch {
+                // Ignore cancel errors
             }
         }
 
         return { columns, data, limitReached };
     } finally {
+        if (reader) {
+            try {
+                await reader.close();
+            } catch {
+                // Ignore reader close errors
+            }
+        }
         if (documentUri) {
             executingCommands.delete(normalizeUriKey(documentUri));
         }
@@ -483,6 +529,48 @@ async function logQueryToHistory(
     }
 }
 
+/**
+ * Helper to handle the "Connection is already executing a command" error.
+ * Shows a warning message with "Drop Session" and "Reset Connection" options.
+ * Returns true if the specific error was handled, false otherwise.
+ */
+async function handleBusyConnectionError(
+    error: unknown,
+    connManager: ConnectionManager,
+    logger: OutputLogger,
+    documentUri?: string,
+    silent: boolean = false
+): Promise<boolean> {
+    const errObj = error as { message?: string };
+    const errMsg = errObj.message || String(error);
+
+    if (
+        errMsg.includes('Connection is already executing a command') &&
+        documentUri &&
+        !silent
+    ) {
+        const lastSessionId = connManager.getDocumentLastSessionId(normalizeUriKey(documentUri));
+        log(logger, `Error: Connection is busy (last known session: ${lastSessionId ?? 'unknown'})`);
+
+        vscode.window.showWarningMessage(
+            `The connection is busy executing another command. ${lastSessionId ? `Session ID: ${lastSessionId}` : ''}`,
+            lastSessionId ? `Drop Session ${lastSessionId}` : '',
+            'Reset Connection'
+        ).then(async selection => {
+            if (selection && lastSessionId && selection === `Drop Session ${lastSessionId}`) {
+                // Drop the session to kill the stuck query on server
+                await executeDropSession(lastSessionId, connManager, documentUri);
+            } else if (selection === 'Reset Connection') {
+                // Just close the local persistent connection so we get a fresh one next time
+                await connManager.closeDocumentPersistentConnection(documentUri);
+                vscode.window.showInformationMessage('Connection reset. You can try executing the query again.');
+            }
+        });
+        return true;
+    }
+    return false;
+}
+
 // --- Main runQueryRaw function (refactored) ---
 
 export async function runQueryRaw(
@@ -498,7 +586,7 @@ export async function runQueryRaw(
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
     // Default to true for background queries without documentUri
-    const keepConnectionOpen = documentUri 
+    const keepConnectionOpen = documentUri
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
         : true;
     const logger = createLogger(silent, logCallback);
@@ -512,7 +600,7 @@ export async function runQueryRaw(
     // Resolve variables and connection name BEFORE try block so they're available in catch for retry
     let queryToExecute: string;
     let resolvedConnectionName: string;
-    
+
     try {
         queryToExecute = await resolveQueryVariables(query, silent, extensionUri || context.extensionUri);
         resolvedConnectionName = resolveConnectionName(connManager, connectionName, documentUri);
@@ -539,8 +627,9 @@ export async function runQueryRaw(
         log(logger, 'Connected.');
 
         // Attach listener for notices
+        let noticeHandler: ((msg: unknown) => void) | undefined;
         if (logger.outputChannel) {
-            const noticeHandler = (msg: unknown) => {
+            noticeHandler = (msg: unknown) => {
                 const notification = msg as { message: string };
                 logger.outputChannel!.appendLine(`NOTICE: ${notification.message}`);
             };
@@ -553,6 +642,11 @@ export async function runQueryRaw(
             const sidReader = await sidCmd.executeReader();
             if (await sidReader.read()) {
                 sessionId = String(sidReader.getValue(0));
+                // Store session ID for this document's persistent connection
+                // This allows us to DROP SESSION later if the connection gets stuck
+                if (documentUri) {
+                    connManager.setDocumentLastSessionId(normalizeUriKey(documentUri), sessionId);
+                }
             }
             await sidReader.close();
         } catch {
@@ -598,6 +692,9 @@ export async function runQueryRaw(
                 };
             }
         } finally {
+            if (noticeHandler) {
+                connection.removeListener('notice', noticeHandler);
+            }
             if (shouldCloseConnection && connection) {
                 await connection.close();
             }
@@ -606,10 +703,10 @@ export async function runQueryRaw(
         // Check if this is a broken connection error and we have a persistent connection
         if (isConnectionBrokenError(error) && documentUri && keepConnectionOpen) {
             log(logger, 'Connection was closed by server. Reconnecting and retrying...');
-            
+
             // Close the broken persistent connection
             await connManager.closeDocumentPersistentConnection(documentUri);
-            
+
             // Retry once with a fresh connection
             try {
                 const { connection: retryConnection, shouldCloseConnection: retryClose } = await getConnectionForDocument(
@@ -635,7 +732,7 @@ export async function runQueryRaw(
                 try {
                     const config = vscode.workspace.getConfiguration('netezza');
                     const queryTimeout = config.get<number>('queryTimeout', 1800);
-                    
+
                     const { columns, data, limitReached } = await executeQueryAndFetch(
                         retryConnection,
                         queryToExecute,
@@ -679,6 +776,13 @@ export async function runQueryRaw(
         }
 
         const errObj = error as { message?: string };
+
+        // Check for "Connection is already executing a command"
+        if (await handleBusyConnectionError(error, connManager, logger, documentUri, silent)) {
+            // We still throw to stop execution flow, but the user now has a UI to fix it
+            throw new Error(`Connection is busy. Use the popup actions to resolve.`);
+        }
+
         const errorMessage = `Error: ${errObj.message || String(error)}`;
         log(logger, errorMessage);
         throw new Error(errorMessage);
@@ -778,7 +882,7 @@ export async function runQueryWithCatalog(
     connectionName: string
 ): Promise<QueryResult> {
     const connManager = connectionManager;
-    
+
     // Get or create a connection
     const { connection, shouldCloseConnection } = await getConnectionForDocument(
         connManager,
@@ -902,7 +1006,7 @@ export async function runExplainQuery(
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
     // Default to true for background queries without documentUri
-    const keepConnectionOpen = documentUri 
+    const keepConnectionOpen = documentUri
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
         : true;
 
@@ -935,7 +1039,7 @@ export async function runExplainQuery(
             cmd.commandTimeout = queryTimeout;
 
             if (documentUri) {
-                executingCommands.set(documentUri, { command: cmd, isCancelled: false });
+                executingCommands.set(normalizeUriKey(documentUri), { command: cmd, isCancelled: false });
             }
 
             try {
@@ -944,7 +1048,7 @@ export async function runExplainQuery(
                 // Consume any results (EXPLAIN usually doesn't return rows, just notices)
                 while (await reader.read()) {
                     if (documentUri) {
-                        const state = executingCommands.get(documentUri);
+                        const state = executingCommands.get(normalizeUriKey(documentUri));
                         if (state && state.isCancelled) {
                             break;
                         }
@@ -953,7 +1057,7 @@ export async function runExplainQuery(
                 }
             } finally {
                 if (documentUri) {
-                    executingCommands.delete(documentUri);
+                    executingCommands.delete(normalizeUriKey(documentUri));
                 }
             }
         } finally {
@@ -983,13 +1087,13 @@ export async function runQueriesSequentially(
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
     // Default to true for background queries without documentUri
-    const keepConnectionOpen = documentUri 
+    const keepConnectionOpen = documentUri
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
         : true;
 
     let outputChannel: vscode.OutputChannel | undefined;
     if (!logCallback) {
-        outputChannel = vscode.window.createOutputChannel('Netezza SQL');
+        outputChannel = getOutputChannel();
         outputChannel.show(true);
         outputChannel.appendLine(`Executing ${queries.length} queries sequentially...`);
     }
@@ -997,9 +1101,7 @@ export async function runQueriesSequentially(
     const allResults: QueryResult[] = [];
 
     // Resolve connection name from document or use active
-    let resolvedConnectionName = connectionManager
-        ? connectionManager.getConnectionForExecution(documentUri)
-        : undefined;
+    let resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
     if (!resolvedConnectionName) {
         resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
     }
@@ -1060,6 +1162,10 @@ export async function runQueriesSequentially(
                     const sid = sidReader.getValue(0);
                     if (sid !== undefined) {
                         sessionId = String(sid);
+                        // Store session ID for this document's persistent connection
+                        if (documentUri) {
+                            connManager.setDocumentLastSessionId(normalizeUriKey(documentUri), sessionId);
+                        }
                         if (logCallback) {
                             logCallback(`Connected. Session ID: ${sessionId}`);
                         }
@@ -1227,10 +1333,10 @@ export async function runQueriesSequentially(
         if (!_isRetry && isConnectionBrokenError(error) && documentUri && keepConnectionOpen) {
             if (outputChannel) outputChannel.appendLine('Connection was closed by server. Reconnecting and retrying...');
             if (logCallback) logCallback('Connection was closed by server. Reconnecting and retrying...');
-            
+
             // Close the broken persistent connection
             await connManager.closeDocumentPersistentConnection(documentUri);
-            
+
             // Retry once by recursively calling the function with _isRetry=true
             // This will create a new connection and re-execute all queries
             try {
@@ -1254,6 +1360,12 @@ export async function runQueriesSequentially(
         }
 
         const errObj = error as { message?: string };
+
+        // Check for "Connection is already executing a command"
+        if (await handleBusyConnectionError(error, connManager, { outputChannel, logCallback }, documentUri, false)) {
+            throw new Error(`Connection is busy. Use the popup actions to resolve.`);
+        }
+
         const errorMessage = `Error: ${errObj.message || String(error)}`;
         if (outputChannel) outputChannel.appendLine(errorMessage);
         if (logCallback) logCallback(errorMessage);
@@ -1523,7 +1635,7 @@ export async function runQueriesWithStreaming(
     const connManager = connectionManager || new ConnectionManager(context);
     // Use per-document keep connection setting if documentUri is provided
     // Default to true for background queries without documentUri
-    const keepConnectionOpen = documentUri 
+    const keepConnectionOpen = documentUri
         ? connManager.getDocumentKeepConnectionOpen(documentUri)
         : true;
 
@@ -1535,9 +1647,7 @@ export async function runQueriesWithStreaming(
     }
 
     // Resolve connection name from document or use active
-    let resolvedConnectionName = connectionManager
-        ? connectionManager.getConnectionForExecution(documentUri)
-        : undefined;
+    let resolvedConnectionName = connManager.getConnectionForExecution(documentUri);
     if (!resolvedConnectionName) {
         resolvedConnectionName = connManager.getActiveConnectionName() || undefined;
     }
@@ -1579,6 +1689,10 @@ export async function runQueriesWithStreaming(
                 const sidReader = await sidCmd.executeReader();
                 if (await sidReader.read()) {
                     sessionId = String(sidReader.getValue(0));
+                    // Store session ID for this document's persistent connection
+                    if (documentUri) {
+                        connManager.setDocumentLastSessionId(normalizeUriKey(documentUri), sessionId);
+                    }
                     if (logCallback) {
                         logCallback(`Connected. Session ID: ${sessionId}`);
                     }
@@ -1694,10 +1808,10 @@ export async function runQueriesWithStreaming(
         if (!_isRetry && isConnectionBrokenError(error) && documentUri && keepConnectionOpen) {
             if (outputChannel) outputChannel.appendLine('Connection was closed by server. Reconnecting and retrying...');
             if (logCallback) logCallback('Connection was closed by server. Reconnecting and retrying...');
-            
+
             // Close the broken persistent connection
             await connManager.closeDocumentPersistentConnection(documentUri);
-            
+
             // Retry once by recursively calling the function with _isRetry=true
             // This will create a new connection and re-execute all queries
             try {
@@ -1722,6 +1836,12 @@ export async function runQueriesWithStreaming(
         }
 
         const errObj = error as { message?: string };
+
+        // Check for "Connection is already executing a command"
+        if (await handleBusyConnectionError(error, connManager, { outputChannel, logCallback }, documentUri, false)) {
+            throw new Error(`Connection is busy. Use the popup actions to resolve.`);
+        }
+
         const errorMessage = `Error: ${errObj.message || String(error)}`;
         if (outputChannel) outputChannel.appendLine(errorMessage);
         if (logCallback) logCallback(errorMessage);

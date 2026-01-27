@@ -6,6 +6,11 @@ import { DatabaseMetadata, SchemaMetadata, TableMetadata, ColumnMetadata } from 
 import { buildColumnMetadataQuery, parseColumnMetadata } from './tableMetadataProvider';
 
 export class SqlCompletionItemProvider implements vscode.CompletionItemProvider {
+    private parsedCache = new Map<
+        string,
+        { version: number; cleanText: string; localDefs: { name: string; type: string; columns: string[] }[]; variables: string[] }
+    >();
+
     constructor(
         private context: vscode.ExtensionContext,
         private metadataCache: MetadataCache,
@@ -18,14 +23,16 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
         _token: vscode.CancellationToken,
         _context: vscode.CompletionContext
     ): Promise<vscode.CompletionItem[] | vscode.CompletionList> {
-        const text = document.getText();
-        const cleanText = this.stripComments(text);
+        if (_token.isCancellationRequested) {
+            return [];
+        }
 
-        // Parse local definitions (CTEs, Temp Tables)
-        const localDefs = this.parseLocalDefinitions(cleanText);
+        const parsed = this.getParsedContext(document, _token);
+        if (!parsed) {
+            return [];
+        }
 
-        // Parse variables (@SET ZMIENNA = ...)
-        const variables = this.parseVariables(cleanText);
+        const { cleanText, localDefs, variables } = parsed;
 
         const linePrefix = document.lineAt(position).text.substr(0, position.character);
         const upperPrefix = linePrefix.toUpperCase();
@@ -200,6 +207,45 @@ export class SqlCompletionItemProvider implements vscode.CompletionItemProvider 
 
         // 7. Keywords (Default)
         return this.getKeywords();
+    }
+
+    private getParsedContext(
+        document: vscode.TextDocument,
+        token: vscode.CancellationToken
+    ): { cleanText: string; localDefs: { name: string; type: string; columns: string[] }[]; variables: string[] } | null {
+        if (token.isCancellationRequested) {
+            return null;
+        }
+
+        const cacheKey = document.uri.toString();
+        const cached = this.parsedCache.get(cacheKey);
+        if (cached && cached.version === document.version) {
+            return cached;
+        }
+
+        const text = document.getText();
+        if (token.isCancellationRequested) {
+            return null;
+        }
+
+        const cleanText = this.stripComments(text);
+        if (token.isCancellationRequested) {
+            return null;
+        }
+
+        // Parse local definitions (CTEs, Temp Tables)
+        const localDefs = this.parseLocalDefinitions(cleanText);
+        if (token.isCancellationRequested) {
+            return null;
+        }
+
+        // Parse variables (@SET ZMIENNA = ...)
+        const variables = this.parseVariables(cleanText);
+
+        const parsed = { version: document.version, cleanText, localDefs, variables };
+        this.parsedCache.set(cacheKey, parsed);
+
+        return parsed;
     }
 
     private stripComments(text: string): string {

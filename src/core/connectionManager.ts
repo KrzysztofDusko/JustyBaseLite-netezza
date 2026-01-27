@@ -27,6 +27,9 @@ export class ConnectionManager {
     // Per-document persistent connections: Map<documentUri, NzConnection>
     private _documentPersistentConnections: Map<string, NzConnection> = new Map();
 
+    // Per-document persistent connection metadata: Map<documentUri, { connectionName: string; database: string; lastSessionId?: string }>
+    private _documentPersistentConnectionMeta: Map<string, { connectionName: string; database: string; lastSessionId?: string }> = new Map();
+
     // Per-document keep connection open setting: Map<documentUri, boolean>
     // Default is true for new documents
     private _documentKeepConnectionOpen: Map<string, boolean> = new Map();
@@ -125,7 +128,7 @@ export class ConnectionManager {
         if (this._connections[name]) {
             // Close any document persistent connections using this connection
             // (documents will need to reconnect with different connection)
-            
+
             delete this._connections[name];
 
             // If active connection was deleted, reset active
@@ -230,13 +233,21 @@ export class ConnectionManager {
         const effectiveDatabase = this._documentDatabaseOverride.get(documentUri) || details.database;
 
         const existing = this._documentPersistentConnections.get(documentUri);
+        const existingMeta = this._documentPersistentConnectionMeta.get(documentUri);
 
-        // If existing connection is for a different connection name, close it
-        if (existing) {
-            // We need to track which connection each document is using
-            // For simplicity, we'll just return the existing one
-            // The caller should close and re-get if connection changed
-            return existing;
+        // If existing connection does not match current connection/database, close it
+        if (existing && existingMeta) {
+            const metaMatches =
+                existingMeta.connectionName === targetName && existingMeta.database === effectiveDatabase;
+
+            if (metaMatches) {
+                return existing;
+            }
+
+            await this.closeDocumentPersistentConnection(documentUri);
+        } else if (existing && !existingMeta) {
+            // No metadata means we cannot safely verify; close and recreate
+            await this.closeDocumentPersistentConnection(documentUri);
         }
 
         // Create new connection for this document with effective database
@@ -252,6 +263,10 @@ export class ConnectionManager {
         await conn.connect();
 
         this._documentPersistentConnections.set(documentUri, conn);
+        this._documentPersistentConnectionMeta.set(documentUri, {
+            connectionName: targetName,
+            database: effectiveDatabase
+        });
         return conn;
     }
 
@@ -267,6 +282,7 @@ export class ConnectionManager {
                 console.error(`Error closing document connection for ${documentUri}:`, e);
             }
             this._documentPersistentConnections.delete(documentUri);
+            this._documentPersistentConnectionMeta.delete(documentUri);
         }
     }
 
@@ -349,7 +365,23 @@ export class ConnectionManager {
         this._documentDatabaseOverride.delete(documentUri);
         this.closeDocumentPersistentConnection(documentUri);
         this._documentKeepConnectionOpen.delete(documentUri);
+        this._documentPersistentConnectionMeta.delete(documentUri);
         this._onDidChangeDocumentConnection.fire(documentUri);
+    }
+
+    // Per-document session ID tracking
+    setDocumentLastSessionId(documentUri: string, sessionId: string) {
+        const meta = this._documentPersistentConnectionMeta.get(documentUri);
+        if (meta) {
+            meta.lastSessionId = sessionId;
+        } else {
+            // Should usually strictly update existing meta since connection must exist
+            // but we can be safe if it's missing (though weird flow)
+        }
+    }
+
+    getDocumentLastSessionId(documentUri: string): string | undefined {
+        return this._documentPersistentConnectionMeta.get(documentUri)?.lastSessionId;
     }
 
     /**

@@ -123,11 +123,16 @@ function init() {
         // Setup cancel button handler
         setupCancelButton();
 
+
         // Switch to the correct grid if it's not the default (0)
         // This handles the initial focus sent by extension in ViewData
         if (activeGridIndex !== 0) {
             switchToResultSet(activeGridIndex);
         }
+
+        // Signal ready to extension
+        vscode.postMessage({ command: 'ready' });
+
     } catch (e) {
         showError('Initialization error: ' + e.message);
         console.error(e);
@@ -187,9 +192,40 @@ function setupStreamingMessageHandler() {
                     window.copySelection(true); // Copy with headers
                 }
                 break;
+            case 'hydrate':
+                handleHydrate(message.data);
+                break;
         }
     });
 }
+
+function handleHydrate(data) {
+    try {
+        if (data.sourcesJson) window.sources = JSON.parse(data.sourcesJson);
+        if (data.pinnedSourcesJson) window.pinnedSources = new Set(JSON.parse(data.pinnedSourcesJson));
+        if (data.pinnedResultsJson) window.pinnedResults = JSON.parse(data.pinnedResultsJson);
+        if (data.activeSourceJson) window.activeSource = JSON.parse(data.activeSourceJson);
+        if (data.resultSetsJson) window.resultSets = JSON.parse(data.resultSetsJson);
+        if (typeof data.activeResultSetIndex === 'number') activeGridIndex = data.activeResultSetIndex;
+        if (data.executingSourcesJson) window.executingSources = new Set(JSON.parse(data.executingSourcesJson));
+
+        // Re-render components
+        renderSourceTabs();
+        renderResultSetTabs();
+        renderGrids();
+        updateLoadingState();
+
+        // Ensure active grid is correct
+        if (window.resultSets && window.resultSets.length > 0) {
+            if (activeGridIndex >= window.resultSets.length) activeGridIndex = 0;
+            switchToResultSet(activeGridIndex);
+        }
+    } catch (e) {
+        console.error('Error hydrating view:', e);
+        // show error in UI?
+    }
+}
+
 
 function handleCancelExecution(message) {
     // If the cancelled source is the active one, mark current result sets as cancelled
@@ -2077,7 +2113,7 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
             if (grid && grid.columnWidths) {
                 const oldWidth = grid.columnWidths.get(colId) || startWidth;
                 grid.columnWidths.set(colId, newWidth);
-                
+
                 // Update col element and th directly for immediate visual feedback
                 if (grid.tanTable) {
                     const visibleCols = grid.tanTable.getVisibleLeafColumns();
@@ -2086,13 +2122,13 @@ function createHeaderCellWithFilter(header, resultSet, table, rsIndex) {
                         const wrapper = document.querySelectorAll('.grid-wrapper')[rsIndex];
                         const colGroup = wrapper?.querySelector('colgroup');
                         const tableEl = wrapper?.querySelector('table');
-                        
+
                         if (colGroup && colGroup.children[colIndex]) {
                             colGroup.children[colIndex].style.width = newWidth + 'px';
                         }
                         // Also update th width directly
                         th.style.width = newWidth + 'px';
-                        
+
                         // Update table total width
                         if (tableEl) {
                             const currentTableWidth = parseFloat(tableEl.style.width) || 0;
@@ -2849,9 +2885,9 @@ function setupGlobalKeyboardShortcuts() {
 
 
 function getAllGridsExportData() {
-    if (!window.resultSets || window.resultSets.length === 0) return [];
+    if (!window.resultSets || window.resultSets.length === 0) return null;
 
-    const exportData = [];
+    const exportMetadata = [];
 
     window.resultSets.forEach((rs, index) => {
         if (rs.isLog) return; // Skip logs
@@ -2861,39 +2897,26 @@ function getAllGridsExportData() {
 
         const table = grid.tanTable;
         const filteredRows = table.getFilteredRowModel().rows;
-        const visibleHeaders = table.getAllColumns().filter(col => col.getIsVisible());
+        const visibleColumnIds = table.getAllColumns().filter(col => col.getIsVisible()).map(col => col.id);
 
-        // Build column metadata with types from original resultSet
-        // Map visible header IDs to original column definitions
-        const columns = visibleHeaders.map(h => {
-            const colIndex = parseInt(h.id);
-            const originalCol = rs.columns[colIndex];
-            return {
-                name: h.columnDef.header,
-                type: originalCol ? originalCol.type : undefined
-            };
-        });
-
-        // Build rows as arrays of values (preserving original values)
-        const rows = filteredRows.map(row =>
-            visibleHeaders.map(header => row.getValue(header.id))
-        );
-
-        exportData.push({
-            columns: columns,
-            rows: rows,
-            sql: rs.sql || '',
+        exportMetadata.push({
+            resultSetIndex: index,
+            rowIndices: filteredRows.map(row => row.index),
+            columnIds: visibleColumnIds,
             name: rs.name || `Result ${index + 1}`,
             isActive: index === activeGridIndex
         });
     });
 
-    return exportData;
+    return {
+        sourceUri: window.activeSource,
+        results: exportMetadata
+    };
 }
 
 function openInExcel() {
     const data = getAllGridsExportData();
-    if (data.length === 0) return;
+    if (!data || data.results.length === 0) return;
 
     vscode.postMessage({
         command: 'openInExcel',
@@ -2903,7 +2926,7 @@ function openInExcel() {
 
 function openInExcelXlsx() {
     const data = getAllGridsExportData();
-    if (data.length === 0) return;
+    if (!data || data.results.length === 0) return;
 
     vscode.postMessage({
         command: 'info',
@@ -2918,7 +2941,7 @@ function openInExcelXlsx() {
 
 function copyAsExcel() {
     const data = getAllGridsExportData();
-    if (data.length === 0) return;
+    if (!data || data.results.length === 0) return;
 
     vscode.postMessage({
         command: 'copyAsExcel',
@@ -2940,21 +2963,17 @@ function exportToCsv() {
 
     const table = grids[activeGridIndex].tanTable;
     const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
-
-    let csv = headers.map(h => escapeCsvValue(h.columnDef.header)).join(',') + '\n';
-
-    rows.forEach(row => {
-        const rowData = headers.map(header => {
-            const cell = row.getValue(header.id);
-            return escapeCsvValue(cell);
-        });
-        csv += rowData.join(',') + '\n';
-    });
+    const rowIndices = rows.map(r => r.index);
+    const columnIds = table.getAllColumns().filter(col => col.getIsVisible()).map(col => col.id);
 
     vscode.postMessage({
         command: 'exportCsv',
-        data: csv
+        data: {
+            sourceUri: window.activeSource,
+            resultSetIndex: activeGridIndex,
+            rowIndices: rowIndices,
+            columnIds: columnIds
+        }
     });
 }
 
@@ -3072,22 +3091,17 @@ function exportToJson() {
 
     const table = grids[activeGridIndex].tanTable;
     const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
-    const rsColumns = window.resultSets[activeGridIndex].columns;
-
-    const data = rows.map(row => {
-        const obj = {};
-        headers.forEach(header => {
-            const val = getValueForExport(row, header.id, rsColumns);
-            // Use header text as key
-            obj[header.columnDef.header] = val;
-        });
-        return obj;
-    });
+    const rowIndices = rows.map(r => r.index);
+    const columnIds = table.getAllColumns().filter(col => col.getIsVisible()).map(col => col.id);
 
     vscode.postMessage({
         command: 'exportJson',
-        data: JSON.stringify(data, null, 2)
+        data: {
+            sourceUri: window.activeSource,
+            resultSetIndex: activeGridIndex,
+            rowIndices: rowIndices,
+            columnIds: columnIds
+        }
     });
 }
 
@@ -3096,37 +3110,17 @@ function exportToXml() {
 
     const table = grids[activeGridIndex].tanTable;
     const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
-    const rsColumns = window.resultSets[activeGridIndex].columns;
-
-    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<results>\n';
-
-    rows.forEach(row => {
-        xml += '  <row>\n';
-        headers.forEach(header => {
-            const val = getValueForExport(row, header.id, rsColumns);
-            const tagName = header.columnDef.header.replace(/[^a-zA-Z0-9_-]/g, '_');
-
-            let content = '';
-            if (val !== null && val !== undefined) {
-                // simple XML escaping
-                content = String(val)
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&apos;');
-            }
-
-            xml += `    <${tagName}>${content}</${tagName}>\n`;
-        });
-        xml += '  </row>\n';
-    });
-    xml += '</results>';
+    const rowIndices = rows.map(r => r.index);
+    const columnIds = table.getAllColumns().filter(col => col.getIsVisible()).map(col => col.id);
 
     vscode.postMessage({
         command: 'exportXml',
-        data: xml
+        data: {
+            sourceUri: window.activeSource,
+            resultSetIndex: activeGridIndex,
+            rowIndices: rowIndices,
+            columnIds: columnIds
+        }
     });
 }
 
@@ -3135,44 +3129,17 @@ function exportToSqlInsert() {
 
     const table = grids[activeGridIndex].tanTable;
     const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
-    const rsColumns = window.resultSets[activeGridIndex].columns;
-
-    const tableName = 'EXPORT_TABLE';
-    const colNames = headers.map(h => h.columnDef.header.replace(/[^a-zA-Z0-9_]/g, '') || 'COL').join(', ');
-
-    let sql = '';
-
-    rows.forEach(row => {
-        const values = headers.map(header => {
-            const val = getValueForExport(row, header.id, rsColumns);
-
-            if (val === null || val === undefined) {
-                return 'NULL';
-            }
-
-            if (typeof val === 'number') {
-                return val;
-            }
-
-            if (typeof val === 'boolean') {
-                return val ? 'TRUE' : 'FALSE';
-            }
-
-            // Handle BigInt (might come as number or string depending on serialization)
-            // But typeof val would catch it if it was supported as primitive, assuming serialization handled it.
-
-            // String escaping for SQL
-            const str = String(val);
-            return `'${str.replace(/'/g, "''")}'`;
-        });
-
-        sql += `INSERT INTO ${tableName} (${colNames}) VALUES (${values.join(', ')});\n`;
-    });
+    const rowIndices = rows.map(r => r.index);
+    const columnIds = table.getAllColumns().filter(col => col.getIsVisible()).map(col => col.id);
 
     vscode.postMessage({
         command: 'exportSqlInsert',
-        data: sql
+        data: {
+            sourceUri: window.activeSource,
+            resultSetIndex: activeGridIndex,
+            rowIndices: rowIndices,
+            columnIds: columnIds
+        }
     });
 }
 
@@ -3181,29 +3148,17 @@ function exportToMarkdown() {
 
     const table = grids[activeGridIndex].tanTable;
     const rows = table.getFilteredRowModel().rows;
-    const headers = table.getAllColumns().filter(col => col.getIsVisible());
-    const rsColumns = window.resultSets[activeGridIndex].columns;
-
-    // Header
-    let md = '| ' + headers.map(h => h.columnDef.header.replace(/\|/g, '\\|')).join(' | ') + ' |\n';
-
-    // Separator
-    md += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
-
-    // Rows
-    rows.forEach(row => {
-        const rowData = headers.map(header => {
-            const val = getValueForExport(row, header.id, rsColumns);
-            if (val === null || val === undefined) return '';
-            // Escape pipes and newlines
-            return String(val).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
-        });
-        md += '| ' + rowData.join(' | ') + ' |\n';
-    });
+    const rowIndices = rows.map(r => r.index);
+    const columnIds = table.getAllColumns().filter(col => col.getIsVisible()).map(col => col.id);
 
     vscode.postMessage({
         command: 'exportMarkdown',
-        data: md
+        data: {
+            sourceUri: window.activeSource,
+            resultSetIndex: activeGridIndex,
+            rowIndices: rowIndices,
+            columnIds: columnIds
+        }
     });
 }
 

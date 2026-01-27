@@ -57,7 +57,7 @@ export class NetezzaDataType {
         if (this.dbType === 'NVARCHAR') {
             return `${this.dbType}(${this.length})`;
         }
-        return `TODO !!! ${this.dbType}`;
+        return `NVARCHAR(255)`; // Default fallback
     }
 }
 

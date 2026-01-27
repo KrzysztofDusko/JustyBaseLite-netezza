@@ -11,6 +11,7 @@ import { SchemaCommandsDependencies } from './types';
 interface RevealData {
     name: string;
     objType?: string;
+    type?: string;
     parent?: string;
     database?: string;
     schema?: string;
@@ -51,7 +52,8 @@ export function registerUtilityCommands(deps: SchemaCommandsDependencies): vscod
                     return;
                 }
 
-                const searchType = data.objType?.trim().toUpperCase();
+                // Accept either `objType` (old callers) or `type` (webview payload)
+                const searchType = (data.objType || data.type)?.trim().toUpperCase();
                 let searchName = data.name;
 
                 if (searchType === 'COLUMN') {

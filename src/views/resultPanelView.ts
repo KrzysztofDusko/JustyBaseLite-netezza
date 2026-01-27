@@ -1,7 +1,40 @@
 import * as vscode from 'vscode';
 import { AnalysisPanelView } from './analysisPanelView';
 import { ResultSet } from '../types';
-import { ResultsHtmlGenerator, ViewData, ViewScriptUris } from './resultsHtmlGenerator';
+import { ResultsHtmlGenerator, ViewScriptUris } from './resultsHtmlGenerator';
+import { exportResultSetToFile } from '../export/resultExporter';
+
+interface ViewData {
+    sourcesJson: string;
+    pinnedSourcesJson: string;
+    pinnedResultsJson: string;
+    activeSourceJson: string;
+    resultSetsJson: string;
+    activeResultSetIndex: number;
+    executingSourcesJson: string;
+}
+
+interface ExportMetadata {
+    sourceUri: string;
+    resultSetIndex: number;
+    rowIndices?: number[];
+    columnIds?: string[];
+}
+
+interface ExcelExportMetadata {
+    sourceUri: string;
+    results: {
+        resultSetIndex: number;
+        rowIndices: number[];
+        columnIds: string[];
+        name: string;
+        isActive: boolean;
+    }[];
+}
+
+interface ExportRequest extends ExportMetadata {
+    format: 'csv' | 'json' | 'xml' | 'sql' | 'markdown';
+}
 
 export class ResultPanelView implements vscode.WebviewViewProvider {
     public static readonly viewType = 'netezza.results';
@@ -26,6 +59,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     private _onDidCancel = new vscode.EventEmitter<string>();
     public readonly onDidCancel = this._onDidCancel.event;
 
+    private _isViewReady: boolean = false;
+    private _htmlGenerator: ResultsHtmlGenerator | undefined;
+
     constructor(extensionUri: vscode.Uri) {
         this._extensionUri = extensionUri;
     }
@@ -46,10 +82,15 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')]
         };
 
+        this._htmlGenerator = new ResultsHtmlGenerator(webviewView.webview.cspSource);
         webviewView.webview.html = this._getHtmlForWebview();
 
         webviewView.webview.onDidReceiveMessage(message => {
             switch (message.command) {
+                case 'ready':
+                    this._isViewReady = true;
+                    this._updateWebview();
+                    return;
                 case 'analyze':
                     AnalysisPanelView.createOrShow(this._extensionUri, message.data);
                     return;
@@ -82,6 +123,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     return;
                 case 'exportMarkdown':
                     this.exportMarkdown(message.data);
+                    return;
+                case 'export':
+                    this.handleExport(message);
                     return;
                 case 'switchSource':
                     this._activeSourceUri = message.sourceUri;
@@ -121,7 +165,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 case 'cancelQuery':
                     if (message.sourceUri) {
                         // Call the command to cancel
-                        console.log(`[resultPanelView] Received cancelQuery message for: ${message.sourceUri}`);
+                        console.log(`[resultPanelView] Received cancelQuery message for: ${message.sourceUri} `);
                         vscode.commands.executeCommand('netezza.cancelQuery', message.sourceUri, message.currentRowCounts);
                     }
                     return;
@@ -167,13 +211,13 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             return;
         }
         if (this._activeSourceUri === sourceUri) return;
-        
+
         // Only switch to this source if it already has results
         // Don't create empty tabs for files that never ran SQL
         if (!this._resultsMap.has(sourceUri)) {
             return;
         }
-        
+
         this._activeSourceUri = sourceUri;
         this._updateWebview();
     }
@@ -249,7 +293,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         oldPinIds.forEach(id => this._pinnedResults.delete(id));
 
         // Re-pin Log at index 0
-        const logResultId = `result_${++this._resultIdCounter} `;
+        const logResultId = `result_${++this._resultIdCounter}`;
         const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
         this._pinnedResults.set(logResultId, {
             sourceUri,
@@ -260,12 +304,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         // Re-pin others (shifted by 1)
         otherPinnedInfo.forEach(([_oldId, _info], idx) => {
-            const newId = `result_${++this._resultIdCounter} `;
+            const newId = `result_${++this._resultIdCounter}`;
             this._pinnedResults.set(newId, {
                 sourceUri,
                 resultSetIndex: idx + 1, // 0 is Log
                 timestamp: Date.now(),
-                label: `${filename} - Result ${idx + 1} ` // +1 because 0 is Log, 1 is Result 1
+                label: `${filename} - Result ${idx + 1}` // +1 because 0 is Log, 1 is Result 1
             });
         });
 
@@ -441,7 +485,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             // Check if we already have a pin pointing to existingLog
             const isLogPinned = Array.from(remappedPins.values()).includes(existingLog);
             if (!isLogPinned) {
-                const logResultId = `result_${++this._resultIdCounter} `;
+                const logResultId = `result_${++this._resultIdCounter}`;
                 const filename = sourceUri.split(/[\\\\/]/).pop() || sourceUri;
                 this._pinnedResults.set(logResultId, {
                     sourceUri,
@@ -455,13 +499,13 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         // 6. Auto-pin new results so they don't get lost on next updateResults call
         const filename = sourceUri.split(/[\\\\/]/).pop() || sourceUri;
         newResultSets.forEach((rs, idx) => {
-            const resultId = `result_${++this._resultIdCounter} `;
+            const resultId = `result_${++this._resultIdCounter}`;
             const resultIndex = newResultsStartIndex + idx;
             this._pinnedResults.set(resultId, {
                 sourceUri,
                 resultSetIndex: resultIndex,
                 timestamp: Date.now(),
-                label: rs.isLog ? `${filename} - Logs` : `${filename} - Result ${resultIndex} `
+                label: rs.isLog ? `${filename} - Logs` : `${filename} - Result ${resultIndex}`
             });
             // Track as auto-pinned (will be unpinned after execution completes)
             this._autoPinnedResults.add(resultId);
@@ -543,13 +587,13 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
             // Auto-pin the new result set
             const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
-            const resultId = `result_${++this._resultIdCounter} `;
+            const resultId = `result_${++this._resultIdCounter}`;
             const resultSetIndex = existingResults.length - 1;
             this._pinnedResults.set(resultId, {
                 sourceUri,
                 resultSetIndex,
                 timestamp: Date.now(),
-                label: `${filename} - Result ${resultSetIndex} `
+                label: `${filename} - Result ${resultSetIndex}`
             });
             this._autoPinnedResults.add(resultId);
 
@@ -595,7 +639,19 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     }
 
     private _updateWebview() {
-        if (this._view) {
+        if (!this._view) {
+            return;
+        }
+
+        const viewData = this._prepareViewData();
+
+        if (this._isViewReady) {
+            this._postMessageToWebview({
+                command: 'hydrate',
+                data: viewData
+            });
+        } else {
+            // Initial load
             this._view.webview.html = this._getHtmlForWebview();
         }
     }
@@ -614,10 +670,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             this._pinnedResults.delete(existingPin[0]);
         } else {
             // Pin the result
-            const resultId = `result_${++this._resultIdCounter} `;
+            const resultId = `result_${++this._resultIdCounter}`;
             const timestamp = Date.now();
             const filename = sourceUri.split(/[\\/]/).pop() || sourceUri;
-            const label = `${filename} - Result ${resultSetIndex + 1} `;
+            const label = `${filename} - Result ${resultSetIndex + 1}`;
 
             this._pinnedResults.set(resultId, {
                 sourceUri,
@@ -645,7 +701,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async exportCsv(csvContent: string) {
+    private async exportCsv(csvContent: string | ExportMetadata) {
+        if (typeof csvContent === 'object') {
+            // New format: { sourceUri, resultSetIndex, rowIndices, columnIds }
+            this.handleExport({ format: 'csv', ...csvContent });
+            return;
+        }
         const uri = await vscode.window.showSaveDialog({
             filters: {
                 'CSV Files': ['csv']
@@ -659,19 +720,69 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
+    private async handleExport(message: ExportRequest) {
+        const { sourceUri, resultSetIndex, format, rowIndices, columnIds } = message;
+        const results = this._resultsMap.get(sourceUri);
+        if (!results || resultSetIndex === undefined || results[resultSetIndex] === undefined) {
+            vscode.window.showErrorMessage('Export failed: Result set not found');
+            return;
+        }
+
+        const resultSet = results[resultSetIndex];
+        const extensions: Record<string, string> = {
+            csv: 'csv',
+            json: 'json',
+            xml: 'xml',
+            sql: 'sql',
+            markdown: 'md'
+        };
+
+        const uri = await vscode.window.showSaveDialog({
+            filters: { [`${format.toUpperCase()} Files`]: [extensions[format] || format] },
+            saveLabel: `Export ${format.toUpperCase()} `
+        });
+
+        if (!uri) return;
+
+        try {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: `Exporting to ${format.toUpperCase()}...`,
+                cancellable: false
+            }, async () => {
+                await exportResultSetToFile(resultSet, uri.fsPath, {
+                    format,
+                    rowIndices,
+                    columnIds
+                });
+            });
+            vscode.window.showInformationMessage(`Results exported to ${uri.fsPath} `);
+        } catch (err: unknown) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Export failed: ${errorMsg} `);
+        }
+    }
+
     private async openInExcel(data: unknown, sql?: string) {
-        // Data can now be a string (CSV) OR an array of { csv, sql, name } objects
-        // If it's the old format (string), we wrap it? Or just pass it?
-        // The command handler will need to handle both provided we update it.
+        // Hydrate data if it's metadata
+        if (data && typeof data === 'object' && 'results' in data) {
+            data = this.hydrateExportData(data as ExcelExportMetadata);
+        }
         vscode.commands.executeCommand('netezza.exportCurrentResultToXlsbAndOpen', data, sql);
     }
 
     private async copyAsExcel(data: unknown, sql?: string) {
+        if (data && typeof data === 'object' && 'results' in data) {
+            data = this.hydrateExportData(data as ExcelExportMetadata);
+        }
         vscode.commands.executeCommand('netezza.copyCurrentResultToXlsbClipboard', data, sql);
     }
 
     private async openInExcelXlsx(data: unknown, sql?: string) {
         try {
+            if (data && typeof data === 'object' && 'results' in data) {
+                data = this.hydrateExportData(data as ExcelExportMetadata);
+            }
             await vscode.commands.executeCommand('netezza.exportCurrentResultToXlsxAndOpen', data, sql);
         } catch (error: unknown) {
             const errorMsg = error instanceof Error ? error.message : String(error);
@@ -679,7 +790,45 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async exportJson(content: string) {
+    private hydrateExportData(metadata: ExcelExportMetadata): unknown[] {
+        if (!metadata || !metadata.results) return [];
+        const { sourceUri, results } = metadata;
+        const allResults = this._resultsMap.get(sourceUri);
+        if (!allResults) return [];
+
+        return results.map((m) => {
+            const rs = allResults[m.resultSetIndex];
+            if (!rs) return null;
+
+            const visibleColumns = m.columnIds.map((id) => {
+                const idx = parseInt(id);
+                const originalCol = rs.columns[idx];
+                return {
+                    name: originalCol.name,
+                    type: originalCol.type
+                };
+            });
+
+            const rows = m.rowIndices.map((idx) => {
+                const row = rs.data[idx];
+                return m.columnIds.map((colId) => row[parseInt(colId)]);
+            });
+
+            return {
+                columns: visibleColumns,
+                rows: rows,
+                sql: rs.sql || '',
+                name: m.name,
+                isActive: m.isActive
+            };
+        }).filter((r) => r !== null);
+    }
+
+    private async exportJson(content: string | ExportMetadata) {
+        if (typeof content === 'object') {
+            this.handleExport({ format: 'json', ...content });
+            return;
+        }
         const uri = await vscode.window.showSaveDialog({
             filters: { 'JSON Files': ['json'] },
             saveLabel: 'Export JSON'
@@ -690,7 +839,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async exportXml(content: string) {
+    private async exportXml(content: string | ExportMetadata) {
+        if (typeof content === 'object') {
+            this.handleExport({ format: 'xml', ...content });
+            return;
+        }
         const uri = await vscode.window.showSaveDialog({
             filters: { 'XML Files': ['xml'] },
             saveLabel: 'Export XML'
@@ -701,7 +854,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async exportSqlInsert(content: string) {
+    private async exportSqlInsert(content: string | ExportMetadata) {
+        if (typeof content === 'object') {
+            this.handleExport({ format: 'sql', ...content });
+            return;
+        }
         const uri = await vscode.window.showSaveDialog({
             filters: { 'SQL Files': ['sql'] },
             saveLabel: 'Export SQL'
@@ -712,7 +869,11 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         }
     }
 
-    private async exportMarkdown(content: string) {
+    private async exportMarkdown(content: string | ExportMetadata) {
+        if (typeof content === 'object') {
+            this.handleExport({ format: 'markdown', ...content });
+            return;
+        }
         const uri = await vscode.window.showSaveDialog({
             filters: { 'Markdown Files': ['md'] },
             saveLabel: 'Export Markdown'
@@ -788,7 +949,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         // Keep only the log result (if it exists)
         const logIndex = results.findIndex(r => r.isLog);
-        
+
         if (logIndex === -1) {
             // No log, remove all results
             results.splice(0);
@@ -829,15 +990,9 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     }
 
     private _getHtmlForWebview() {
-        if (!this._view) {
-            return '';
-        }
-
+        if (!this._htmlGenerator) return '';
         const uris = this._getScriptUris();
-        const viewData = this._prepareViewData();
-        const generator = new ResultsHtmlGenerator(this._view.webview.cspSource);
-
-        return generator.generateHtml(uris, viewData);
+        return this._htmlGenerator.generateHtml(uris);
     }
 
     private _getScriptUris(): ViewScriptUris {

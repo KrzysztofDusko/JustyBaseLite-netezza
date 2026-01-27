@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { runQueryRaw, queryResultToRows, QueryResult } from '../core/queryRunner';
+import { SchemaSearchHtmlGenerator } from '../views/schemaSearchHtmlGenerator';
 import { MetadataCache } from '../metadataCache';
 import { ConnectionManager, ConnectionDetails } from '../core/connectionManager';
 import { searchInCodeWithMode, SourceSearchMode } from '../sql/sqlTextUtils';
@@ -40,7 +41,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
             localResourceRoots: [this._extensionUri]
         };
 
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+        webviewView.webview.html = new SchemaSearchHtmlGenerator().generateHtml();
 
         webviewView.webview.onDidReceiveMessage(async data => {
             switch (data.type) {
@@ -73,7 +74,31 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
     private currentSearchId = 0;
 
-    private async search(term: string, searchId?: number, combined?: boolean) {
+    private async getDatabases(connectionName: string, details?: ConnectionDetails): Promise<string[]> {
+        let databases: string[] = [];
+        try {
+            const dbResult = await runQueryRaw(
+                this.context,
+                NZ_QUERIES.LIST_DATABASES,
+                true,
+                this.connectionManager,
+                connectionName
+            );
+            if (dbResult && dbResult.data) {
+                const dbRows = queryResultToRows<{ DATABASE: string }>(dbResult);
+                databases = dbRows.map(d => d.DATABASE);
+            }
+        } catch (e) {
+            console.error('Error fetching databases for search:', e);
+        }
+
+        if (databases.length === 0 && details && details.database) {
+            databases = [details.database];
+        }
+        return databases;
+    }
+
+    private async search(term: string, searchId?: number, combined?: boolean, preloadedDatabases?: string[]) {
         if (!term || term.length < 2) {
             return;
         }
@@ -119,7 +144,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                             NAME: item.name,
                             SCHEMA: item.schema || '',
                             DATABASE: item.database || '',
-                            TYPE: item.type,
+                            TYPE: (item.type || '').toString().trim().toUpperCase(),
                             PARENT: item.parent || '',
                             DESCRIPTION: 'Result from Cache',
                             MATCH_TYPE: 'NAME', // Cache mostly matches by name
@@ -168,27 +193,11 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
         // Get list of databases to search
         let databases: string[] = [];
-        try {
-            const dbResult = await runQueryRaw(
-                this.context,
-                NZ_QUERIES.LIST_DATABASES,
-                true,
-                this.connectionManager,
-                connectionName
-            );
-            if (dbResult && dbResult.data) {
-                const dbRows = queryResultToRows<{ DATABASE: string }>(dbResult);
-                databases = dbRows.map(d => d.DATABASE);
-            }
-        } catch (e) {
-            console.error('Error fetching databases for search:', e);
-        }
 
-        // If generic listing fails, try to get current database from connection details
-        if (databases.length === 0) {
-            if (details.database) {
-                databases = [details.database];
-            }
+        if (preloadedDatabases) {
+            databases = preloadedDatabases;
+        } else {
+            databases = await this.getDatabases(connectionName, details);
         }
 
         if (databases.length === 0) {
@@ -273,7 +282,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
                             NAME: item.NAME,
                             SCHEMA: item.SCHEMA,
                             DATABASE: item.DATABASE,
-                            TYPE: item.TYPE,
+                            TYPE: (item.TYPE || '').toString().trim().toUpperCase(),
                             PARENT: item.PARENT,
                             DESCRIPTION: item.DESCRIPTION,
                             MATCH_TYPE: item.MATCH_TYPE,
@@ -415,7 +424,7 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
      * Search in VIEW/PROCEDURE source code with configurable mode
      * @param mode Search mode: 'raw', 'noComments', 'noCommentsNoLiterals'
      */
-    private async searchSourceCode(term: string, mode: SourceSearchMode, searchId?: number, combined?: boolean) {
+    private async searchSourceCode(term: string, mode: SourceSearchMode, searchId?: number, combined?: boolean, preloadedDatabases?: string[]) {
         if (!term || term.length < 2) {
             return;
         }
@@ -461,25 +470,12 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
             // First, get list of all databases to search across (for procedures)
             let databases: string[] = [];
-            try {
-                const dbResult = await runQueryRaw(
-                    this.context,
-                    NZ_QUERIES.LIST_DATABASES,
-                    true,
-                    this.connectionManager,
-                    connectionName
-                );
-                if (dbResult && dbResult.data) {
-                    const dbRows = queryResultToRows<{ DATABASE: string }>(dbResult);
-                    databases = dbRows.map(d => d.DATABASE).filter(db => db !== 'SYSTEM');
-                }
-            } catch (e) {
-                console.error('Error fetching databases:', e);
-            }
 
-            // If no databases found, fallback to current database only
-            if (databases.length === 0) {
-                databases = [details.database];
+            if (preloadedDatabases) {
+                databases = preloadedDatabases.filter(db => db !== 'SYSTEM');
+            } else {
+                const allDbs = await this.getDatabases(connectionName, details);
+                databases = allDbs.filter(db => db !== 'SYSTEM');
             }
 
             // RAW mode: Use WHERE LIKE to filter at database level (no need to download source)
@@ -590,419 +586,27 @@ export class SchemaSearchProvider implements vscode.WebviewViewProvider {
 
     private async doCombinedSearch(term: string, mode: SourceSearchMode) {
         const searchId = ++this.currentSearchId;
-        // Run both with the same searchId so they don't cancel each other
-        this.search(term, searchId, true);
-        this.searchSourceCode(term, mode, searchId, true);
+
+        // Optimization: Fetch databases once and share
+        let connectionName: string | undefined;
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor && activeEditor.document.languageId === 'sql') {
+            connectionName = this.connectionManager.getConnectionForExecution(activeEditor.document.uri.toString());
+        }
+        if (!connectionName) {
+            connectionName = this.connectionManager.getActiveConnectionName() || undefined;
+        }
+
+        let databases: string[] | undefined;
+        if (connectionName) {
+            const details = await this.connectionManager.getConnection(connectionName);
+            if (details) {
+                databases = await this.getDatabases(connectionName, details);
+            }
+        }
+
+        // Run both with the same searchId
+        this.search(term, searchId, true, databases);
+        this.searchSourceCode(term, mode, searchId, true, databases);
     } // End of doCombinedSearch
-
-    private _getHtmlForWebview(_webview: vscode.Webview) {
-        return `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Schema Search</title>
-        <style>
-            body { 
-                font-family: var(--vscode-font-family); 
-                padding: 0; 
-                margin: 0;
-                color: var(--vscode-foreground); 
-                display: flex;
-                flex-direction: column;
-                height: 100vh;
-                overflow: hidden;
-            }
-            .search-box { 
-                display: flex; 
-                gap: 5px; 
-                padding: 10px;
-                flex-shrink: 0;
-                border-bottom: 1px solid var(--vscode-panel-border);
-            }
-            input { flex-grow: 1; padding: 5px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); }
-            button {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                gap: 6px;
-                background-color: var(--vscode-button-secondaryBackground);
-                color: var(--vscode-button-secondaryForeground);
-                border: 1px solid var(--vscode-contrastBorder, transparent);
-                padding: 4px 10px;
-                cursor: pointer;
-                border-radius: 2px;
-                font-family: var(--vscode-font-family);
-                font-size: 12px;
-                line-height: 18px;
-            }
-            button:hover { background-color: var(--vscode-button-secondaryHoverBackground); }
-            button.primary { background-color: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-            button.primary:hover { background-color: var(--vscode-button-hoverBackground); }
-            #status { padding: 5px 10px; flex-shrink: 0; }
-            .results { 
-                list-style: none; 
-                padding: 0; 
-                margin: 0; 
-                flex-grow: 1; 
-                overflow-y: auto; 
-            }
-            .result-item { padding: 8px 10px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; flex-direction: column; cursor: pointer; position: relative; }
-            .result-item:hover { background: var(--vscode-list-hoverBackground); }
-            .group-header {
-                padding: 10px 10px 5px 10px;
-                font-weight: bold;
-                background: var(--vscode-editor-background);
-                border-bottom: 1px solid var(--vscode-panel-border);
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                cursor: pointer;
-                user-select: none;
-                position: sticky;
-                top: 0;
-                z-index: 10;
-            }
-            .group-header:hover {
-                background: var(--vscode-list-hoverBackground);
-            }
-            .group-count {
-                background: var(--vscode-badge-background);
-                color: var(--vscode-badge-foreground);
-                padding: 2px 8px;
-                border-radius: 12px;
-                font-size: 0.85em;
-                font-weight: normal;
-            }
-            .group-toggle {
-                display: inline-block;
-                width: 12px;
-                height: 12px;
-                margin-right: 6px;
-                transition: transform 0.2s;
-            }
-            .group-toggle.collapsed {
-                transform: rotate(-90deg);
-            }
-            .group-items {
-                display: contents;
-            }
-            .group-items.collapsed {
-                display: none;
-            }
-            .item-header { display: flex; justify-content: space-between; font-weight: bold; }
-            .item-details { font-size: 0.9em; opacity: 0.8; display: flex; gap: 10px; }
-            .type-badge { font-size: 0.8em; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); padding: 2px 5px; border-radius: 3px; }
-            .tooltip { position: absolute; background: var(--vscode-editorHoverWidget-background); color: var(--vscode-editorHoverWidget-foreground); border: 1px solid var(--vscode-editorHoverWidget-border); padding: 8px; border-radius: 4px; font-size: 0.9em; max-width: 300px; word-wrap: break-word; z-index: 1000; opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; pointer-events: none; }
-            .result-item:hover .tooltip { opacity: 1; visibility: visible; }
-            .tooltip.top { bottom: 100%; left: 0; margin-bottom: 5px; }
-            .tooltip.bottom { top: 100%; left: 0; margin-top: 5px; }
-            .cache-badge { background-color: var(--vscode-charts-green); color: white; padding: 1px 4px; border-radius: 2px; font-size: 0.7em; margin-left: 5px; }
-            .spinner {
-                border: 2px solid transparent;
-                border-top: 2px solid var(--vscode-progressBar-background);
-                border-radius: 50%;
-                width: 14px;
-                height: 14px;
-                animation: spin 1s linear infinite;
-                display: inline-block;
-                vertical-align: middle;
-                margin-right: 8px;
-            }
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            .options-row {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 5px 10px;
-                font-size: 12px;
-                border-bottom: 1px solid var(--vscode-panel-border);
-            }
-            .options-row label {
-                display: flex;
-                align-items: center;
-                gap: 4px;
-                cursor: pointer;
-            }
-            .options-row select {
-                background: var(--vscode-dropdown-background);
-                color: var(--vscode-dropdown-foreground);
-                border: 1px solid var(--vscode-dropdown-border);
-                padding: 3px 6px;
-                border-radius: 2px;
-                cursor: pointer;
-                font-size: 12px;
-            }
-            .searching-indicator {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 20px;
-                color: var(--vscode-descriptionForeground);
-            }
-        </style>
-    </head>
-    <body>
-        <div class="search-box">
-            <input type="text" id="searchInput" placeholder="Search tables, columns, view definitions, procedure source..." />
-            <button id="searchBtn" class="primary">Search</button>
-            <button id="cancelBtn" style="display: none;" title="Cancel search">✕</button>
-            <button id="resetBtn" title="Reset search">↺</button>
-        </div>
-        <div class="options-row">
-            <label>
-                Source search mode:
-                <select id="sourceModeSelect">
-                    <option value="">Objects Only</option>
-                    <option value="raw">Source: Raw</option>
-                    <option value="objectsRaw">Objects + Source Raw</option>
-                    <option value="noComments">Source: No Comments</option>
-                    <option value="noCommentsNoLiterals">Source: No Comments/Strings</option>
-                </select>
-            </label>
-        </div>
-        <div id="status"></div>
-        <ul class="results" id="resultsList"></ul>
-
-        <script>
-            try {
-            const vscode = acquireVsCodeApi();
-            const searchInput = document.getElementById('searchInput');
-            const searchBtn = document.getElementById('searchBtn');
-            const cancelBtn = document.getElementById('cancelBtn');
-            const resetBtn = document.getElementById('resetBtn');
-            const sourceModeSelect = document.getElementById('sourceModeSelect');
-            const resultsList = document.getElementById('resultsList');
-            const status = document.getElementById('status');
-            
-            let isSearching = false;
-            let allResults = [];
-            
-            function setSearchingState(searching) {
-                isSearching = searching;
-                cancelBtn.style.display = searching ? 'inline-flex' : 'none';
-                searchBtn.disabled = searching;
-            }
-
-            searchBtn.addEventListener('click', () => {
-                const term = searchInput.value;
-                if (term) {
-                    // Clear any previous results and show searching indicator in results panel
-                    allResults = [];
-                    resultsList.innerHTML = '<li class="searching-indicator"><span class="spinner"></span> Searching...</li>';
-                    status.textContent = '';
-                    setSearchingState(true);
-                    
-                    const sourceMode = sourceModeSelect.value;
-                    if (sourceMode === 'objectsRaw') {
-                        // Combined mode: objects + source raw
-                        vscode.postMessage({ type: 'searchCombined', value: term, mode: 'raw' });
-                    } else if (sourceMode) {
-                        // Source code search with mode
-                        vscode.postMessage({ type: 'searchSource', value: term, mode: sourceMode });
-                    } else {
-                        // Object search (cache + database)
-                        vscode.postMessage({ type: 'search', value: term });
-                    }
-                }
-            });
-            
-            cancelBtn.addEventListener('click', () => {
-                vscode.postMessage({ type: 'cancel' });
-            });
-            
-            resetBtn.addEventListener('click', () => {
-                vscode.postMessage({ type: 'reset' });
-            });
-
-            searchInput.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') {
-                    searchBtn.click();
-                }
-            });
-
-            window.addEventListener('message', event => {
-                const message = event.data;
-                switch (message.type) {
-                    case 'searching':
-                        // Show searching indicator in results panel
-                        resultsList.innerHTML = '<li class="searching-indicator"><span class="spinner"></span> ' + (message.message || 'Searching...') + '</li>';
-                        status.textContent = '';
-                        break;
-                    case 'results':
-                        status.textContent = '';
-                        setSearchingState(false);
-                        renderResults(message.data, message.append);
-                        break;
-                    case 'error':
-                        resultsList.innerHTML = '';
-                        status.textContent = 'Error: ' + message.message;
-                        allResults = [];
-                        setSearchingState(false);
-                        break;
-                    case 'cancelled':
-                        resultsList.innerHTML = '';
-                        status.textContent = 'Search cancelled.';
-                        allResults = [];
-                        setSearchingState(false);
-                        break;
-                    case 'reset':
-                        searchInput.value = '';
-                        resultsList.innerHTML = '';
-                        status.textContent = '';
-                        allResults = [];
-                        setSearchingState(false);
-                        break;
-                }
-            });
-
-            function renderResults(data, append) {
-                if (!append) {
-                    allResults = data || [];
-                } else if (data && data.length > 0) {
-                    allResults = allResults.concat(data);
-                }
-
-                resultsList.innerHTML = '';
-
-                if (!allResults || allResults.length === 0) {
-                    status.textContent = 'No results found.';
-                    return;
-                }
-
-                // Deduplicate items (by NAME + DATABASE + SCHEMA + TYPE combination)
-                const seen = new Set();
-                const uniqueData = [];
-                allResults.forEach(item => {
-                    const normalizedType = (item.TYPE || 'OTHER').trim();
-                    const key = (item.NAME || '') + '|' + (item.DATABASE || '') + '|' + (item.SCHEMA || '') + '|' + normalizedType;
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        uniqueData.push(item);
-                    }
-                });
-
-                // Group results by TYPE (normalized to uppercase and trimmed)
-                const groups = {};
-                uniqueData.forEach(item => {
-                    const type = (item.TYPE || 'OTHER').trim().toUpperCase();
-                    if (!groups[type]) {
-                        groups[type] = [];
-                    }
-                    groups[type].push(item);
-                });
-
-                // Sort items within each group by DATABASE, then by NAME
-                Object.keys(groups).forEach(type => {
-                    groups[type].sort((a, b) => {
-                        const dbA = (a.DATABASE || '').toUpperCase();
-                        const dbB = (b.DATABASE || '').toUpperCase();
-                        if (dbA !== dbB) {
-                            return dbA.localeCompare(dbB);
-                        }
-                        const nameA = (a.NAME || '').toUpperCase();
-                        const nameB = (b.NAME || '').toUpperCase();
-                        return nameA.localeCompare(nameB);
-                    });
-                });
-
-                // Render groups in order: VIEW, PROCEDURE, TABLE, COLUMN, FUNCTION, then others
-                const groupOrder = ['VIEW', 'PROCEDURE', 'TABLE', 'COLUMN', 'FUNCTION', 'INDEX', 'SYSTEM TABLE', 'SYSTEM VIEW', 'SYSTEM SEQ'];
-                const sortedTypes = Object.keys(groups).sort((a, b) => {
-                    const orderA = groupOrder.indexOf(a);
-                    const orderB = groupOrder.indexOf(b);
-                    if (orderA === -1 && orderB === -1) return a.localeCompare(b);
-                    if (orderA === -1) return 1;
-                    if (orderB === -1) return -1;
-                    return orderA - orderB;
-                });
-
-                sortedTypes.forEach(type => {
-                    const items = groups[type];
-                    const groupId = 'group-' + type;
-                    
-                    // Create group header
-                    const groupHeader = document.createElement('li');
-                    groupHeader.className = 'group-header';
-                    groupHeader.setAttribute('data-group', type);
-                    groupHeader.innerHTML = \`
-                        <div>
-                            <span class="group-toggle">▼</span>
-                            <span>\${type}</span>
-                        </div>
-                        <span class="group-count">\${items.length} item\${items.length !== 1 ? 's' : ''}</span>
-                    \`;
-                    resultsList.appendChild(groupHeader);
-
-                    // Create container for group items
-                    const groupContainer = document.createElement('div');
-                    groupContainer.className = 'group-items';
-                    groupContainer.setAttribute('data-group', type);
-
-                    // Add items to group (already sorted by DATABASE, NAME)
-                    items.forEach(item => {
-                        const li = document.createElement('li');
-                        li.className = 'result-item';
-
-                        const parentInfo = item.PARENT ? \`Parent: \${item.PARENT}\` : '';
-                        const schemaInfo = item.SCHEMA ? \`Schema: \${item.SCHEMA}\` : '';
-                        const databaseInfo = item.DATABASE ? \`Database: \${item.DATABASE}\` : '';
-                        const description = item.DESCRIPTION && item.DESCRIPTION.trim() ? item.DESCRIPTION : '';
-                        
-                        // Add match type indicator
-                        const matchTypeInfo = item.MATCH_TYPE === 'DEFINITION' ? 'Match in view definition' :
-                                            item.MATCH_TYPE === 'SOURCE' ? 'Match in procedure source' :
-                                            item.MATCH_TYPE === 'SOURCE_CODE' ? 'Match in source code' :
-                                            item.MATCH_TYPE === 'NAME' ? 'Match in name' : '';
-                        
-                        li.innerHTML = \`
-                            <div class="item-header">
-                                <span>\${item.NAME}</span>
-                                <span class="type-badge">\${item.TYPE}</span>
-                            </div>
-                            <div class="item-details">
-                                <span>\${databaseInfo}</span>
-                                <span>\${schemaInfo}</span>
-                                <span>\${parentInfo}</span>
-                                \${matchTypeInfo ? \`<span style="font-style: italic; color: var(--vscode-descriptionForeground);">\${matchTypeInfo}</span>\` : ''}
-                            </div>
-                            \${description ? \`<div class="tooltip bottom">\${description}</div>\` : ''}
-                        \`;
-                        
-                        // Add double-click handler to navigate to schema tree
-                        li.addEventListener('dblclick', () => {
-                            vscode.postMessage({ 
-                                type: 'navigate', 
-                                name: item.NAME,
-                                schema: item.SCHEMA,
-                                database: item.DATABASE,
-                                objType: item.TYPE,
-                                parent: item.PARENT,
-                                connectionName: item.connectionName // Pass back connection name
-                            });
-                        });
-                        
-                        groupContainer.appendChild(li);
-                    });
-
-                    resultsList.appendChild(groupContainer);
-
-                    // Add toggle handler
-                    groupHeader.addEventListener('click', () => {
-                        const toggle = groupHeader.querySelector('.group-toggle');
-                        groupContainer.classList.toggle('collapsed');
-                        toggle.classList.toggle('collapsed');
-                    });
-                });
-            }
-            } catch (e) {
-                document.body.innerHTML = '<pre style="color:red;">Error loading Schema Search: ' + e.message + '\\n' + e.stack + '</pre>';
-            }
-        </script>
-    </body>
-    </html>`;
-    }
 }

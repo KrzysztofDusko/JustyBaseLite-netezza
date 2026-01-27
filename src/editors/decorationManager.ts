@@ -5,48 +5,6 @@
 import * as vscode from 'vscode';
 import { SqlParser } from '../sql/sqlParser';
 
-// Regex for detecting Python script invocations
-const scriptRegex = /(^|\s)(?:[A-Za-z]:\\|\\|\/)?[\w.\-\\/]+\.py\b|(^|\s)python(?:\.exe)?\s+[^\n]*\.py\b/i;
-
-/**
- * CodeLens provider for Python script lines
- */
-export class ScriptCodeLensProvider implements vscode.CodeLensProvider {
-    private _onDidChange = new vscode.EventEmitter<void>();
-    readonly onDidChangeCodeLenses = this._onDidChange.event;
-
-    public provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-        const lenses: vscode.CodeLens[] = [];
-        for (let i = 0; i < document.lineCount; i++) {
-            const line = document.lineAt(i);
-            if (scriptRegex.test(line.text)) {
-                const range = line.range;
-                const cmd: vscode.Command = {
-                    title: 'Run as script',
-                    command: 'netezza.runScriptFromLens',
-                    arguments: [document.uri, range]
-                };
-                lenses.push(new vscode.CodeLens(range, cmd));
-            }
-        }
-        return lenses;
-    }
-
-    public refresh() {
-        this._onDidChange.fire();
-    }
-}
-
-/**
- * Create decoration type for script lines
- */
-export function createScriptDecoration(): vscode.TextEditorDecorationType {
-    return vscode.window.createTextEditorDecorationType({
-        backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'),
-        borderRadius: '3px'
-    });
-}
-
 /**
  * Create decoration type for SQL statement highlighting
  */
@@ -61,25 +19,7 @@ export function createSqlStatementDecoration(): vscode.TextEditorDecorationType 
 /**
  * Update script decorations for an editor
  */
-export function updateScriptDecorations(
-    scriptDecoration: vscode.TextEditorDecorationType,
-    editor?: vscode.TextEditor
-): void {
-    const active = editor || vscode.window.activeTextEditor;
-    if (!active) return;
-
-    const doc = active.document;
-    const ranges: vscode.DecorationOptions[] = [];
-
-    for (let i = 0; i < doc.lineCount; i++) {
-        const line = doc.lineAt(i);
-        if (scriptRegex.test(line.text)) {
-            ranges.push({ range: line.range, hoverMessage: 'Python script invocation' });
-        }
-    }
-
-    active.setDecorations(scriptDecoration, ranges);
-}
+// Script invocation decorations and CodeLens were removed intentionally.
 
 /**
  * Update SQL statement highlighting based on cursor position
@@ -124,19 +64,8 @@ export function updateSqlHighlight(
  */
 export function registerDecorationSubscriptions(
     context: vscode.ExtensionContext,
-    scriptDecoration: vscode.TextEditorDecorationType,
     sqlStatementDecoration: vscode.TextEditorDecorationType
 ): void {
-    // Script decorations
-    context.subscriptions.push(
-        vscode.window.onDidChangeActiveTextEditor(() => updateScriptDecorations(scriptDecoration)),
-        vscode.workspace.onDidChangeTextDocument(e => {
-            if (vscode.window.activeTextEditor && e.document === vscode.window.activeTextEditor.document) {
-                updateScriptDecorations(scriptDecoration, vscode.window.activeTextEditor);
-            }
-        })
-    );
-
     // SQL statement highlighting
     context.subscriptions.push(
         vscode.window.onDidChangeTextEditorSelection(e => {
@@ -152,7 +81,6 @@ export function registerDecorationSubscriptions(
         })
     );
 
-    // Initial updates
-    updateScriptDecorations(scriptDecoration, vscode.window.activeTextEditor);
+    // Initial update for SQL highlighting
     updateSqlHighlight(sqlStatementDecoration, vscode.window.activeTextEditor);
 }

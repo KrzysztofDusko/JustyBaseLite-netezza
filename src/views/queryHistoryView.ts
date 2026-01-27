@@ -98,9 +98,11 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         const results = await historyManager.searchArchive(term);
         const stats = await historyManager.getStats();
 
+        const sanitized = results.map(({ schema: _schema, ...rest }) => rest);
+
         this._view.webview.postMessage({
             type: 'archiveSearchResults',
-            history: results,
+            history: sanitized,
             stats: stats,
             term: term
         });
@@ -119,10 +121,12 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         const history = await historyManager.getHistory(QueryHistoryView.PAGE_SIZE, this._currentOffset);
         const stats = await historyManager.getStats();
 
+        const sanitized = history.map(({ schema: _schema, ...rest }) => rest);
+
         console.log(`QueryHistoryView: sending history to webview, entries=${history.length}, offset=${this._currentOffset}, reset=${reset}`);
         this._view.webview.postMessage({
             type: 'historyData',
-            history: history,
+            history: sanitized,
             stats: stats,
             reset: reset
         });
@@ -265,9 +269,11 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         const favorites = await historyManager.getFavorites();
         const stats = await historyManager.getStats();
 
+        const sanitized = favorites.map(({ schema: _schema, ...rest }) => rest);
+
         this._view.webview.postMessage({
             type: 'historyData',
-            history: favorites,
+            history: sanitized,
             stats: stats,
             filter: 'favorites',
             reset: true // Favorites are usually few, assume full list fits or scrollable enough
@@ -283,9 +289,11 @@ export class QueryHistoryView implements vscode.WebviewViewProvider {
         const entries = await historyManager.getByTag(tag);
         const stats = await historyManager.getStats();
 
+        const sanitized = entries.map(({ schema: _schema, ...rest }) => rest);
+
         this._view.webview.postMessage({
             type: 'historyData',
-            history: entries,
+            history: sanitized,
             stats: stats,
             filter: `tag: ${tag}`,
             reset: true

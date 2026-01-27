@@ -6,7 +6,7 @@
  */
 
 import * as vscode from 'vscode';
-import { runQueryRaw } from './core/queryRunner';
+import { runQueryRaw, disposeSharedOutputChannel } from './core/queryRunner';
 import { ConnectionManager } from './core/connectionManager';
 import { LoginPanel } from './views/loginPanel';
 import { SchemaProvider } from './providers/schemaProvider';
@@ -58,8 +58,6 @@ import {
     updateKeepConnectionStatusBar
 } from './services/statusBarManager';
 import {
-    ScriptCodeLensProvider,
-    createScriptDecoration,
     createSqlStatementDecoration,
     registerDecorationSubscriptions
 } from './editors/decorationManager';
@@ -204,6 +202,11 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push({
         dispose: () => {
             connectionManager.closeAllDocumentPersistentConnections();
+            try {
+                disposeSharedOutputChannel();
+            } catch (e) {
+                console.warn('Failed to dispose shared output channel', e);
+            }
         }
     });
 
@@ -290,13 +293,9 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // ========== Decorations ==========
-    const scriptDecoration = createScriptDecoration();
+    // Script decorations and CodeLens for Python script invocations have been disabled.
     const sqlStatementDecoration = createSqlStatementDecoration();
-    registerDecorationSubscriptions(context, scriptDecoration, sqlStatementDecoration);
-
-    // CodeLens for scripts
-    const scriptLensProvider = new ScriptCodeLensProvider();
-    context.subscriptions.push(vscode.languages.registerCodeLensProvider({ scheme: 'file' }, scriptLensProvider));
+    registerDecorationSubscriptions(context, sqlStatementDecoration);
 
     // Sync result view with active editor
     context.subscriptions.push(

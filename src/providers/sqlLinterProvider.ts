@@ -14,6 +14,8 @@ import { allRules, LintIssue, parseSeverity, RuleSeverityConfig } from './linter
 export class SqlLinterProvider {
     private diagnosticCollection: vscode.DiagnosticCollection;
     private disposables: vscode.Disposable[] = [];
+    private lintTimers: Map<string, NodeJS.Timeout> = new Map();
+    private readonly lintDebounceMs = 400;
 
     constructor() {
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection('netezza-sql-linter');
@@ -39,7 +41,7 @@ export class SqlLinterProvider {
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument(event => {
                 if (this.shouldLint(event.document)) {
-                    this.lintDocument(event.document);
+                    this.scheduleLint(event.document);
                 }
             })
         );
@@ -115,6 +117,21 @@ export class SqlLinterProvider {
         this.diagnosticCollection.set(document.uri, diagnostics);
     }
 
+    private scheduleLint(document: vscode.TextDocument): void {
+        const key = document.uri.toString();
+        const existing = this.lintTimers.get(key);
+        if (existing) {
+            clearTimeout(existing);
+        }
+
+        const timer = setTimeout(() => {
+            this.lintTimers.delete(key);
+            this.lintDocument(document);
+        }, this.lintDebounceMs);
+
+        this.lintTimers.set(key, timer);
+    }
+
     /**
      * Lint SQL text and return issues
      * This is a pure function that can be used for testing
@@ -171,6 +188,10 @@ export class SqlLinterProvider {
      */
     public dispose(): void {
         this.diagnosticCollection.dispose();
+        for (const timer of this.lintTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.lintTimers.clear();
         for (const disposable of this.disposables) {
             disposable.dispose();
         }

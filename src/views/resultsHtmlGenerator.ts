@@ -8,16 +8,6 @@ export interface ViewScriptUris {
     workerUri: vscode.Uri;
 }
 
-export interface ViewData {
-    sourcesJson: string;
-    pinnedSourcesJson: string;
-    pinnedResultsJson: string;
-    activeSourceJson: string;
-    resultSetsJson: string;
-    activeResultSetIndex: number;
-    executingSourcesJson: string;
-}
-
 export class ResultsHtmlGenerator {
     private _cspSource: string;
 
@@ -25,7 +15,7 @@ export class ResultsHtmlGenerator {
         this._cspSource = cspSource;
     }
 
-    public generateHtml(uris: ViewScriptUris, viewData: ViewData): string {
+    public generateHtml(uris: ViewScriptUris): string {
         const icons = this._getIcons();
         return `<!DOCTYPE html>
         <html lang="en">
@@ -48,7 +38,7 @@ export class ResultsHtmlGenerator {
                 <button id="cancelQueryBtn" class="secondary" title="Cancel the current query">Cancel</button>
             </div>
             <div class="controls">
-                <input type="text" id="globalFilter" placeholder="Filter..." onkeyup="onFilterChanged()" style="background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 4px;">
+                <input type="text" id="globalFilter" class="global-filter-input" placeholder="Filter..." onkeyup="onFilterChanged()">
                 <button onclick="toggleRowView()" title="Toggle Row View">${icons.eye} Row View</button>
                 
                 <!-- Split Button for Export -->
@@ -86,19 +76,19 @@ export class ResultsHtmlGenerator {
                     </div>
                 </div>
 
-                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 2px;"></div>
+                <div class="toolbar-separator"></div>
                 <button onclick="copyAsExcel()" title="Copy results as Excel to clipboard">${icons.excel} Excel Copy</button>
-                <div style="width: 1px; height: 16px; background: var(--vscode-panel-border); margin: 0 2px;"></div>
+                <div class="toolbar-separator"></div>
                 <button onclick="selectAll()" title="Select all rows">${icons.checkAll} Select All</button>
                 <button onclick="copySelection(false)" title="Copy selected cells to clipboard">${icons.copy} Copy</button>
                 <button onclick="copySelection(true)" title="Copy selected cells with headers">${icons.copy} Copy w/ Headers</button>
                 <button onclick="clearAllFilters()" title="Clear all column filters">${icons.clear} Clear Filters</button>
                 <button id="clearLogsBtn" onclick="clearLogs()" title="Clear execution logs" style="display: none;">${icons.trash} Clear Logs</button>
-                <span id="rowCountInfo" style="margin-left: auto; font-size: 12px; opacity: 0.8;"></span>
+                <span id="rowCountInfo" class="row-count-info"></span>
             </div>
 
             <div id="groupingPanel" class="grouping-panel" ondragover="onDragOverGroup(event)" ondragleave="onDragLeaveGroup(event)" ondrop="onDropGroup(event)">
-                <span style="opacity: 0.5;">Drag headers here to group</span>
+                <span class="drag-hint">Drag headers here to group</span>
             </div>
 
             <div id="mainSplitView" class="main-split-view">
@@ -116,15 +106,16 @@ export class ResultsHtmlGenerator {
             
             <script>
                 const vscode = acquireVsCodeApi();
-                window.sources = ${viewData.sourcesJson};
-                window.pinnedSources = new Set(${viewData.pinnedSourcesJson});
-                window.pinnedResults = ${viewData.pinnedResultsJson};
-                window.activeSource = ${viewData.activeSourceJson};
-                window.resultSets = ${viewData.resultSetsJson};
-                window.executingSources = new Set(${viewData.executingSourcesJson});
+                // Initialize empty state
+                window.sources = [];
+                window.pinnedSources = new Set();
+                window.pinnedResults = [];
+                window.activeSource = '';
+                window.resultSets = [];
+                window.executingSources = new Set();
                 
                 let grids = [];
-                let activeGridIndex = ${viewData.activeResultSetIndex};
+                let activeGridIndex = 0;
                 const workerUri = "${uris.workerUri}";
             </script>
             <script src="${uris.mainScriptUri}"></script>
