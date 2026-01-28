@@ -8,6 +8,56 @@ import { NzConnection } from '../types';
 import { NZ_SYSTEM_VIEWS } from '../metadata';
 
 /**
+ * Generate DDL code for creating a procedure in Netezza from a metadata object
+ */
+export function buildProcedureDDLFromCache(
+    database: string,
+    schema: string,
+    procInfo: ProcedureInfo
+): string {
+    const cleanDatabase = quoteNameIfNeeded(database);
+    const cleanSchema = quoteNameIfNeeded(schema);
+    const cleanProcName = quoteNameIfNeeded(procInfo.procedureName);
+
+    const ddlLines: string[] = [];
+    let procHeader = `CREATE OR REPLACE PROCEDURE ${cleanDatabase}.${cleanSchema}.${cleanProcName}`;
+
+    // Add arguments
+    if (procInfo.arguments) {
+        const args = procInfo.arguments.trim();
+        // Check if parens already present
+        if (args.startsWith('(') && args.endsWith(')')) {
+            procHeader += args;
+        } else {
+            procHeader += `(${args})`;
+        }
+    } else {
+        procHeader += '()';
+    }
+
+    ddlLines.push(procHeader);
+    ddlLines.push(`RETURNS ${procInfo.returns}`);
+
+    if (procInfo.executeAsOwner) {
+        ddlLines.push('EXECUTE AS OWNER');
+    } else {
+        ddlLines.push('EXECUTE AS CALLER');
+    }
+
+    ddlLines.push('LANGUAGE NZPLSQL AS');
+    ddlLines.push('BEGIN_PROC');
+    ddlLines.push(procInfo.procedureSource);
+    ddlLines.push('END_PROC;');
+
+    if (procInfo.description) {
+        const cleanComment = procInfo.description.replace(/'/g, "''");
+        ddlLines.push(`COMMENT ON PROCEDURE ${cleanProcName} IS '${cleanComment}';`);
+    }
+
+    return ddlLines.join('\n');
+}
+
+/**
  * Generate DDL code for creating a procedure in Netezza
  */
 export async function generateProcedureDDL(
@@ -66,44 +116,5 @@ export async function generateProcedureDDL(
         arguments: row.ARGUMENTS || null
     };
 
-    const cleanDatabase = quoteNameIfNeeded(database);
-    const cleanSchema = quoteNameIfNeeded(schema);
-    const cleanProcName = quoteNameIfNeeded(procInfo.procedureName);
-
-    const ddlLines: string[] = [];
-    let procHeader = `CREATE OR REPLACE PROCEDURE ${cleanDatabase}.${cleanSchema}.${cleanProcName}`;
-
-    // Add arguments
-    if (procInfo.arguments) {
-        const args = procInfo.arguments.trim();
-        // Check if parens already present
-        if (args.startsWith('(') && args.endsWith(')')) {
-            procHeader += args;
-        } else {
-            procHeader += `(${args})`;
-        }
-    } else {
-        procHeader += '()';
-    }
-
-    ddlLines.push(procHeader);
-    ddlLines.push(`RETURNS ${procInfo.returns}`);
-
-    if (procInfo.executeAsOwner) {
-        ddlLines.push('EXECUTE AS OWNER');
-    } else {
-        ddlLines.push('EXECUTE AS CALLER');
-    }
-
-    ddlLines.push('LANGUAGE NZPLSQL AS');
-    ddlLines.push('BEGIN_PROC');
-    ddlLines.push(procInfo.procedureSource);
-    ddlLines.push('END_PROC;');
-
-    if (procInfo.description) {
-        const cleanComment = procInfo.description.replace(/'/g, "''");
-        ddlLines.push(`COMMENT ON PROCEDURE ${cleanProcName} IS '${cleanComment}';`);
-    }
-
-    return ddlLines.join('\n');
+    return buildProcedureDDLFromCache(database, schema, procInfo);
 }

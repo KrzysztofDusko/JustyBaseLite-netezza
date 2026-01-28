@@ -1,16 +1,18 @@
-/**
- * DDL Generator - Batch DDL Generation
- * Bulk fetches metadata and generates DDL for multiple objects
- */
-
-import { ColumnInfo, KeyInfo, BatchDDLOptions, BatchDDLResult } from './types';
-import { executeQueryHelper, createConnectionFromDetails } from './helpers';
+import {
+    ColumnInfo,
+    KeyInfo,
+    BatchDDLOptions,
+    BatchDDLResult,
+    ProcedureInfo,
+    ExternalTableInfo
+} from './types';
+import { executeQueryHelper, createConnectionFromDetails, fixProcReturnType } from './helpers';
 import { NzConnection } from '../types';
 import { buildTableDDLFromCache } from './tableDDL';
-import { generateViewDDL } from './viewDDL';
-import { generateProcedureDDL } from './procedureDDL';
-import { generateExternalTableDDL } from './externalTableDDL';
-import { generateSynonymDDL } from './synonymDDL';
+import { buildViewDDLFromCache } from './viewDDL';
+import { buildProcedureDDLFromCache } from './procedureDDL';
+import { buildExternalTableDDLFromCache } from './externalTableDDL';
+import { buildSynonymDDLFromCache } from './synonymDDL';
 
 /**
  * Generate DDL for multiple objects in a database
@@ -250,6 +252,192 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
             }
         }
 
+        const allProcedures = new Map<string, ProcedureInfo>();
+        const allViews = new Map<string, string>();
+        const allSynonyms = new Map<string, { refObjName: string; owner: string; description: string | null }>();
+        const allExternalTables = new Map<string, ExternalTableInfo>();
+
+        // Bulk fetch procedures
+        if (typesToProcess.includes('PROCEDURE')) {
+            const schemaClause = schemaFilter ? `AND SCHEMA = '${schemaFilter}'` : '';
+            const procQuery = `
+                SELECT 
+                    SCHEMA,
+                    PROCEDURESOURCE,
+                    OBJID::INT,
+                    RETURNS,
+                    EXECUTEDASOWNER,
+                    DESCRIPTION,
+                    PROCEDURESIGNATURE,
+                    PROCEDURE,
+                    ARGUMENTS
+                FROM ${database}.._V_PROCEDURE
+                WHERE DATABASE = '${database}'
+                    ${schemaClause}
+            `;
+            try {
+                interface ProcRow {
+                    SCHEMA: string;
+                    PROCEDURESOURCE: string;
+                    OBJID: number;
+                    RETURNS: string;
+                    EXECUTEDASOWNER: boolean | number | string;
+                    DESCRIPTION: string;
+                    PROCEDURESIGNATURE: string;
+                    PROCEDURE: string;
+                    ARGUMENTS: string;
+                }
+                const procResults = await executeQueryHelper<ProcRow>(connection!, procQuery);
+                for (const row of procResults) {
+                    const key = `${row.SCHEMA}.${row.PROCEDURESIGNATURE}`;
+                    allProcedures.set(key, {
+                        schema: row.SCHEMA,
+                        procedureSource: row.PROCEDURESOURCE,
+                        objId: row.OBJID,
+                        returns: fixProcReturnType(row.RETURNS),
+                        executeAsOwner: Boolean(row.EXECUTEDASOWNER),
+                        description: row.DESCRIPTION || null,
+                        procedureSignature: row.PROCEDURESIGNATURE,
+                        procedureName: row.PROCEDURE,
+                        arguments: row.ARGUMENTS || null
+                    });
+                }
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                errors.push(`Error bulk fetching procedures: ${msg}`);
+            }
+        }
+
+        // Bulk fetch views
+        if (typesToProcess.includes('VIEW')) {
+            const schemaClause = schemaFilter ? `AND SCHEMA = '${schemaFilter}'` : '';
+            const viewQuery = `
+                SELECT SCHEMA, VIEWNAME, DEFINITION
+                FROM ${database}.._V_VIEW
+                WHERE DATABASE = '${database}'
+                    ${schemaClause}
+            `;
+            try {
+                interface ViewRow { SCHEMA: string; VIEWNAME: string; DEFINITION: string; }
+                const viewResults = await executeQueryHelper<ViewRow>(connection!, viewQuery);
+                for (const row of viewResults) {
+                    allViews.set(`${row.SCHEMA}.${row.VIEWNAME}`, row.DEFINITION || '');
+                }
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                errors.push(`Error bulk fetching views: ${msg}`);
+            }
+        }
+
+        // Bulk fetch synonyms
+        if (typesToProcess.includes('SYNONYM')) {
+            const schemaClause = schemaFilter ? `AND SCHEMA = '${schemaFilter}'` : '';
+            const synonymQuery = `
+                SELECT SCHEMA, OWNER, SYNONYM_NAME, REFOBJNAME, DESCRIPTION
+                FROM ${database}.._V_SYNONYM
+                WHERE DATABASE = '${database}'
+                    ${schemaClause}
+            `;
+            try {
+                interface SynonymRow { SCHEMA: string; OWNER: string; SYNONYM_NAME: string; REFOBJNAME: string; DESCRIPTION: string; }
+                const synonymResults = await executeQueryHelper<SynonymRow>(connection!, synonymQuery);
+                for (const row of synonymResults) {
+                    allSynonyms.set(`${row.SCHEMA}.${row.SYNONYM_NAME}`, {
+                        refObjName: row.REFOBJNAME,
+                        owner: row.OWNER,
+                        description: row.DESCRIPTION || null
+                    });
+                }
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                errors.push(`Error bulk fetching synonyms: ${msg}`);
+            }
+        }
+
+        // Bulk fetch external tables
+        if (typesToProcess.includes('EXTERNAL TABLE')) {
+            const schemaClause = schemaFilter ? `AND E1.SCHEMA = '${schemaFilter}'` : '';
+            const extQuery = `
+                SELECT 
+                    E1.SCHEMA, E1.TABLENAME, E2.EXTOBJNAME, E2.OBJID::INT, E1.DELIM, E1.ENCODING, E1.TIMESTYLE,
+                    E1.REMOTESOURCE, E1.SKIPROWS, E1.MAXERRORS, E1.ESCAPE, E1.LOGDIR, E1.DECIMALDELIM,
+                    E1.QUOTEDVALUE, E1.NULLVALUE, E1.CRINSTRING, E1.TRUNCSTRING, E1.CTRLCHARS, E1.IGNOREZERO,
+                    E1.TIMEEXTRAZEROS, E1.Y2BASE, E1.FILLRECORD, E1.COMPRESS, E1.INCLUDEHEADER, E1.LFINSTRING,
+                    E1.DATESTYLE, E1.DATEDELIM, E1.TIMEDELIM, E1.BOOLSTYLE, E1.FORMAT, E1.SOCKETBUFSIZE,
+                    E1.RECORDDELIM, E1.MAXROWS, E1.REQUIREQUOTES, E1.RECORDLENGTH, E1.DATETIMEDELIM, E1.REJECTFILE
+                FROM ${database}.._V_EXTERNAL E1
+                JOIN ${database}.._V_EXTOBJECT E2 ON E1.DATABASE = E2.DATABASE
+                    AND E1.SCHEMA = E2.SCHEMA
+                    AND E1.TABLENAME = E2.TABLENAME
+                WHERE E1.DATABASE = '${database}'
+                    ${schemaClause}
+            `;
+            try {
+                interface ExtRow {
+                    SCHEMA: string; TABLENAME: string; EXTOBJNAME: string; OBJID: number; DELIM: string;
+                    ENCODING: string; TIMESTYLE: string; REMOTESOURCE: string; SKIPROWS: number;
+                    MAXERRORS: number; ESCAPE: string; LOGDIR: string; DECIMALDELIM: string;
+                    QUOTEDVALUE: string; NULLVALUE: string; CRINSTRING: unknown; TRUNCSTRING: unknown;
+                    CTRLCHARS: unknown; IGNOREZERO: unknown; TIMEEXTRAZEROS: unknown; Y2BASE: number; FILLRECORD: unknown;
+                    COMPRESS: unknown; INCLUDEHEADER: unknown; LFINSTRING: unknown; DATESTYLE: string; DATEDELIM: string;
+                    TIMEDELIM: string; BOOLSTYLE: string; FORMAT: string; SOCKETBUFSIZE: number;
+                    RECORDDELIM: string; MAXROWS: number; REQUIREQUOTES: unknown; RECORDLENGTH: string;
+                    DATETIMEDELIM: string; REJECTFILE: string;
+                }
+                const parseBool = (val: unknown): boolean | null => {
+                    if (val === null || val === undefined) return null;
+                    if (typeof val === 'boolean') return val;
+                    if (typeof val === 'number') return val !== 0;
+                    const s = String(val).toLowerCase();
+                    return s === 't' || s === 'true' || s === '1' || s === 'yes' || s === 'on';
+                };
+                const extResults = await executeQueryHelper<ExtRow>(connection!, extQuery);
+                for (const row of extResults) {
+                    allExternalTables.set(`${row.SCHEMA}.${row.TABLENAME}`, {
+                        schema: row.SCHEMA,
+                        tableName: row.TABLENAME,
+                        dataObject: row.EXTOBJNAME || null,
+                        delimiter: row.DELIM || null,
+                        encoding: row.ENCODING || null,
+                        timeStyle: row.TIMESTYLE || null,
+                        remoteSource: row.REMOTESOURCE || null,
+                        skipRows: row.SKIPROWS || null,
+                        maxErrors: row.MAXERRORS || null,
+                        escapeChar: row.ESCAPE || null,
+                        logDir: row.LOGDIR || null,
+                        decimalDelim: row.DECIMALDELIM || null,
+                        quotedValue: row.QUOTEDVALUE || null,
+                        nullValue: row.NULLVALUE || null,
+                        crInString: parseBool(row.CRINSTRING),
+                        truncString: parseBool(row.TRUNCSTRING),
+                        ctrlChars: parseBool(row.CTRLCHARS),
+                        ignoreZero: parseBool(row.IGNOREZERO),
+                        timeExtraZeros: parseBool(row.TIMEEXTRAZEROS),
+                        y2Base: row.Y2BASE || null,
+                        fillRecord: parseBool(row.FILLRECORD),
+                        compress: parseBool(row.COMPRESS),
+                        includeHeader: parseBool(row.INCLUDEHEADER),
+                        lfInString: parseBool(row.LFINSTRING),
+                        dateStyle: row.DATESTYLE || null,
+                        dateDelim: row.DATEDELIM || null,
+                        timeDelim: row.TIMEDELIM || null,
+                        boolStyle: row.BOOLSTYLE || null,
+                        format: row.FORMAT || null,
+                        socketBufSize: row.SOCKETBUFSIZE || null,
+                        recordDelim: row.RECORDDELIM ? String(row.RECORDDELIM).replace(/\r/g, '\\r').replace(/\n/g, '\\n') : null,
+                        maxRows: row.MAXROWS || null,
+                        requireQuotes: parseBool(row.REQUIREQUOTES),
+                        recordLength: row.RECORDLENGTH || null,
+                        dateTimeDelim: row.DATETIMEDELIM || null,
+                        rejectFile: row.REJECTFILE || null
+                    });
+                }
+            } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                errors.push(`Error bulk fetching external tables: ${msg}`);
+            }
+        }
+
         // =====================================================
         // GENERATE DDL using pre-fetched data
         // =====================================================
@@ -304,19 +492,49 @@ export async function generateBatchDDL(options: BatchDDLOptions): Promise<BatchD
                             );
                             break;
                         case 'VIEW':
-                            // Views still need individual query for DEFINITION
-                            ddlCode = await generateViewDDL(connection!, database, obj.schema, obj.name);
+                            ddlCode = buildViewDDLFromCache(
+                                database,
+                                obj.schema,
+                                obj.name,
+                                allViews.get(key) || ''
+                            );
                             break;
                         case 'PROCEDURE':
-                            // Procedures still need individual query for source
-                            ddlCode = await generateProcedureDDL(connection!, database, obj.schema, obj.name);
+                            const procData = allProcedures.get(key);
+                            if (procData) {
+                                ddlCode = buildProcedureDDLFromCache(database, obj.schema, procData);
+                            } else {
+                                throw new Error(`Metadata for procedure ${key} not found`);
+                            }
                             break;
                         case 'EXTERNAL TABLE':
-                            // External tables still need individual query for USING clause
-                            ddlCode = await generateExternalTableDDL(connection!, database, obj.schema, obj.name);
+                            const extData = allExternalTables.get(key);
+                            if (extData) {
+                                ddlCode = buildExternalTableDDLFromCache(
+                                    database,
+                                    obj.schema,
+                                    obj.name,
+                                    extData,
+                                    allColumns.get(key) || []
+                                );
+                            } else {
+                                throw new Error(`Metadata for external table ${key} not found`);
+                            }
                             break;
                         case 'SYNONYM':
-                            ddlCode = await generateSynonymDDL(connection!, database, obj.schema, obj.name);
+                            const synData = allSynonyms.get(key);
+                            if (synData) {
+                                ddlCode = buildSynonymDDLFromCache(
+                                    database,
+                                    obj.name,
+                                    synData.refObjName,
+                                    synData.owner,
+                                    obj.schema,
+                                    synData.description
+                                );
+                            } else {
+                                throw new Error(`Metadata for synonym ${key} not found`);
+                            }
                             break;
                         default:
                             skipped++;

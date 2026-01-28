@@ -56,7 +56,7 @@ export async function exportResultSetToFile(
 
 async function streamCsv(
     stream: fs.WriteStream,
-    columns: { name: string }[],
+    columns: { name: string; type?: string }[],
     rows: unknown[][],
     columnIndices: number[]
 ) {
@@ -64,7 +64,7 @@ async function streamCsv(
     stream.write(columns.map(c => escapeCsv(c.name)).join(',') + '\n');
 
     for (const row of rows) {
-        const line = columnIndices.map(idx => escapeCsv(row[idx])).join(',') + '\n';
+        const line = columnIndices.map(idx => escapeCsv(formatValue(row[idx], columns[columnIndices.indexOf(idx)].type))).join(',') + '\n';
         if (!stream.write(line)) {
             await new Promise(resolve => stream.once('drain', resolve));
         }
@@ -73,7 +73,7 @@ async function streamCsv(
 
 async function streamJson(
     stream: fs.WriteStream,
-    columns: { name: string }[],
+    columns: { name: string; type?: string }[],
     rows: unknown[][],
     columnIndices: number[]
 ) {
@@ -82,7 +82,8 @@ async function streamJson(
         const row = rows[i];
         const obj: Record<string, unknown> = {};
         columnIndices.forEach((colIdx, j) => {
-            obj[columns[j].name] = row[colIdx];
+            const val = row[colIdx];
+            obj[columns[j].name] = (val instanceof Date) ? formatValue(val, columns[j].type) : val;
         });
 
         const line = '  ' + JSON.stringify(obj, bigIntReplacer) + (i < rows.length - 1 ? ',' : '') + '\n';
@@ -95,7 +96,7 @@ async function streamJson(
 
 async function streamXml(
     stream: fs.WriteStream,
-    columns: { name: string }[],
+    columns: { name: string; type?: string }[],
     rows: unknown[][],
     columnIndices: number[]
 ) {
@@ -105,7 +106,7 @@ async function streamXml(
         columnIndices.forEach((colIdx, j) => {
             const val = row[colIdx];
             const tagName = columns[j].name.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const content = escapeXml(val);
+            const content = escapeXml(formatValue(val, columns[j].type));
             stream.write(`    <${tagName}>${content}</${tagName}>\n`);
         });
         stream.write('  </row>\n');
@@ -141,7 +142,7 @@ async function streamSql(
 
 async function streamMarkdown(
     stream: fs.WriteStream,
-    columns: { name: string }[],
+    columns: { name: string; type?: string }[],
     rows: unknown[][],
     columnIndices: number[]
 ) {
@@ -151,10 +152,11 @@ async function streamMarkdown(
     stream.write('| ' + columns.map(() => '---').join(' | ') + ' |\n');
 
     for (const row of rows) {
-        const rowData = columnIndices.map(colIdx => {
+        const rowData = columnIndices.map((colIdx, j) => {
             const val = row[colIdx];
             if (val === null || val === undefined) return '';
-            return String(val).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+            const formatted = formatValue(val, columns[j].type);
+            return String(formatted).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
         });
         const line = '| ' + rowData.join(' | ') + ' |\n';
         if (!stream.write(line)) {
@@ -196,6 +198,50 @@ function formatSqlValue(val: unknown, type?: string): string {
     if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
 
     return `'${String(val).replace(/'/g, "''")}'`;
+}
+
+function formatValue(val: unknown, type?: string): string {
+    if (val === null || val === undefined) return '';
+    if (val instanceof Date) {
+        const y = val.getFullYear();
+        const m = String(val.getMonth() + 1).padStart(2, '0');
+        const d = String(val.getDate()).padStart(2, '0');
+
+        const lowerType = (type || '').toLowerCase();
+        if (lowerType === 'date') {
+            return `${y}-${m}-${d}`;
+        } else if (lowerType.includes('timestamp') || lowerType.includes('datetime') || lowerType.includes('time')) {
+            const hh = String(val.getHours()).padStart(2, '0');
+            const mm = String(val.getMinutes()).padStart(2, '0');
+            const ss = String(val.getSeconds()).padStart(2, '0');
+            return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+        }
+        try {
+            return val.toISOString().replace('T', ' ').substring(0, 19);
+        } catch (_e) {
+            return String(val);
+        }
+    }
+
+    // Handle generic objects that might be Time/Interval or just need string representation
+    if (typeof val === 'object' && val !== null) {
+        // If it has a custom toString (different from [object Object]), use it
+        const str = String(val);
+        if (str !== '[object Object]') {
+            return str;
+        }
+
+        // Handle common Time object structures: {hours, minutes, seconds}
+        const v = val as { hours?: number; minutes?: number; seconds?: number };
+        if ('hours' in v || 'minutes' in v || 'seconds' in v) {
+            const hh = String(v.hours || 0).padStart(2, '0');
+            const mm = String(v.minutes || 0).padStart(2, '0');
+            const ss = String(v.seconds || 0).padStart(2, '0');
+            return `${hh}:${mm}:${ss}`;
+        }
+    }
+
+    return String(val);
 }
 
 const bigIntReplacer = (_key: string, value: unknown) => {

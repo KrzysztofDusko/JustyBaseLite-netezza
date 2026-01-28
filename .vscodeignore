@@ -6,7 +6,7 @@ src/
 .eslintrc.json
 tsconfig.json
 esbuild.js
-*.map
+**/*.map
 .prettierrc
 .npmrc
 *.vsix
@@ -18,14 +18,26 @@ coverage/
 
 .vs/
 
-dist/*.map
-
 # Exclude bundled sources
 node_modules/
 libs/
 
 # Icon.png
 IconSanta.png
+
+# Redundant media sources (already in dist/media)
+media/resultPanel.js
+media/editDataPanel.js
+media/analysisPanel.js
+media/queryHistory.js
+media/sessionMonitor.js
+media/src/
+
+# Build and config files
+analyze-bundle.js
+eslint.config.mjs
+jest.config.js
+.prettierignore
 
 samples/
 docs/

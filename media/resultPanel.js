@@ -1,3 +1,5 @@
+import { decode } from '@msgpack/msgpack';
+
 // Enhanced resultPanel.js with Excel-like column filtering
 // Add CSS for Console View
 const style = document.createElement('style');
@@ -108,6 +110,7 @@ document.head.appendChild(style);
 
 // Entry point for resultPanelView.ts
 function init() {
+    console.log('[resultPanel.js] init() called');
     try {
         renderSourceTabs();
         renderResultSetTabs();
@@ -131,11 +134,12 @@ function init() {
         }
 
         // Signal ready to extension
+        console.log('[resultPanel.js] posting ready message');
         vscode.postMessage({ command: 'ready' });
 
     } catch (e) {
         showError('Initialization error: ' + e.message);
-        console.error(e);
+        console.error('[resultPanel.js] Initialization error:', e);
     }
 }
 
@@ -195,21 +199,113 @@ function setupStreamingMessageHandler() {
             case 'hydrate':
                 handleHydrate(message.data);
                 break;
+            case 'setActiveSource':
+                handleSetActiveSource(message);
+                break;
         }
     });
 }
 
+// Map of sourceUri -> { resultSets, activeGridIndex, scrollStates }
+window.sourceResultsCache = {};
+
+function handleSetActiveSource(message) {
+    const { sourceUri, activeResultSetIndex } = message;
+    console.log('[resultPanel.js] setActiveSource:', sourceUri);
+
+    // Save current active source state before switching
+    if (window.activeSource && window.resultSets) {
+        saveCurrentSourceToCache();
+    }
+
+    window.activeSource = sourceUri;
+
+    // Check if we have data for this source in cache
+    if (window.sourceResultsCache[sourceUri]) {
+        console.log('[resultPanel.js] restoring from cache for:', sourceUri);
+        const cached = window.sourceResultsCache[sourceUri];
+        window.resultSets = cached.resultSets;
+        // Przywróć ostatnio aktywną zakładkę jeśli istnieje i jest poprawna
+        if (typeof cached.activeGridIndex === 'number' && cached.activeGridIndex >= 0 && cached.activeGridIndex < (cached.resultSets?.length || 0)) {
+            activeGridIndex = cached.activeGridIndex;
+        } else {
+            activeGridIndex = 0;
+        }
+
+        renderSourceTabs();
+        renderResultSetTabs();
+        renderGrids();
+
+        // Ręcznie przywróć scroll dla wrappera aktywnej zakładki (po zmianie dokumentu)
+        const gridWrappers = document.querySelectorAll('.grid-wrapper');
+        const grid = window.resultSets && window.resultSets[activeGridIndex];
+        if (grid && grid.executionTimestamp) {
+            const savedState = getSavedStateFor(activeGridIndex, grid.executionTimestamp);
+            const wrapper = gridWrappers[activeGridIndex];
+            if (wrapper && savedState && (savedState.scrollTop !== undefined || savedState.scrollLeft !== undefined)) {
+                wrapper.scrollTop = savedState.scrollTop !== undefined ? savedState.scrollTop : 0;
+                wrapper.scrollLeft = savedState.scrollLeft !== undefined ? savedState.scrollLeft : 0;
+            }
+        }
+
+
+        switchToResultSet(activeGridIndex);
+        // --- END scroll restore ---
+    } else {
+        // We don't have data, request it? 
+        // Or wait for a subsequent hydrate if the extension decides to send it.
+        console.log('[resultPanel.js] no cache for:', sourceUri, ', waiting for data');
+    }
+}
+
+function saveCurrentSourceToCache() {
+    if (!window.activeSource) return;
+    window.sourceResultsCache[window.activeSource] = {
+        resultSets: window.resultSets,
+        activeGridIndex: activeGridIndex
+    };
+}
+
 function handleHydrate(data) {
+    console.log('[resultPanel.js] handleHydrate received data:', Object.keys(data));
     try {
+        if (data.activeSourceJson) {
+            // Save old source before updating window.activeSource
+            if (window.activeSource && window.resultSets) {
+                saveCurrentSourceToCache();
+            }
+            window.activeSource = JSON.parse(data.activeSourceJson);
+        }
+
         if (data.sourcesJson) window.sources = JSON.parse(data.sourcesJson);
         if (data.pinnedSourcesJson) window.pinnedSources = new Set(JSON.parse(data.pinnedSourcesJson));
         if (data.pinnedResultsJson) window.pinnedResults = JSON.parse(data.pinnedResultsJson);
-        if (data.activeSourceJson) window.activeSource = JSON.parse(data.activeSourceJson);
-        if (data.resultSetsJson) window.resultSets = JSON.parse(data.resultSetsJson);
+
+        if (data.resultSetsMsgPack) {
+            console.log('[resultPanel.js] decoding MessagePack resultSets');
+            try {
+                const buffer = data.resultSetsMsgPack instanceof Uint8Array ? data.resultSetsMsgPack : new Uint8Array(data.resultSetsMsgPack.data || data.resultSetsMsgPack);
+                window.resultSets = decode(buffer);
+                console.log('[resultPanel.js] decoded resultSets, count:', window.resultSets.length);
+            } catch (e) {
+                console.error('[resultPanel.js] Failed to decode MessagePack resultSets:', e);
+                showError('Failed to decode data: ' + e.message);
+            }
+        } else if (data.resultSetsJson) {
+            console.log('[resultPanel.js] parsing JSON resultSets');
+            window.resultSets = JSON.parse(data.resultSetsJson);
+        }
+
+        // Cache the newly received data
+        if (window.activeSource && window.resultSets) {
+            saveCurrentSourceToCache();
+        }
+
         if (typeof data.activeResultSetIndex === 'number') activeGridIndex = data.activeResultSetIndex;
         if (data.executingSourcesJson) window.executingSources = new Set(JSON.parse(data.executingSourcesJson));
 
         // Re-render components
+        console.log('[resultPanel.js] re-rendering tabs and grids');
         renderSourceTabs();
         renderResultSetTabs();
         renderGrids();
@@ -221,9 +317,61 @@ function handleHydrate(data) {
             switchToResultSet(activeGridIndex);
         }
     } catch (e) {
-        console.error('Error hydrating view:', e);
-        // show error in UI?
+        console.error('[resultPanel.js] Error hydrating view:', e);
+        showError('Hydration error: ' + e.message);
     }
+}
+
+function formatCellValue(value, type) {
+    if (value === null || value === undefined) return null;
+
+    const lowerType = (type || '').toLowerCase();
+
+    if (value instanceof Date) {
+        const y = value.getFullYear();
+        const m = String(value.getMonth() + 1).padStart(2, '0');
+        const d = String(value.getDate()).padStart(2, '0');
+
+        if (lowerType === 'date') {
+            return `${y}-${m}-${d}`;
+        } else if (lowerType.includes('timestamp') || lowerType.includes('datetime') || lowerType.includes('time')) {
+            const hh = String(value.getHours()).padStart(2, '0');
+            const mm = String(value.getMinutes()).padStart(2, '0');
+            const ss = String(value.getSeconds()).padStart(2, '0');
+            return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+        }
+        // Fallback for other Date objects
+        try {
+            return value.toISOString().replace('T', ' ').substring(0, 19);
+        } catch (e) {
+            return String(value);
+        }
+    }
+
+    // Handle Netezza DATE represented as YYYYMMDD integer
+    if (typeof value === 'number' && lowerType === 'date' && value > 19000000 && value < 21000000) {
+        const s = String(value);
+        return `${s.substring(0, 4)}-${s.substring(4, 6)}-${s.substring(6, 8)}`;
+    }
+
+    // Handle generic objects that might be Time/Interval or just need string representation
+    if (typeof value === 'object' && value !== null) {
+        // If it has a custom toString (different from [object Object]), use it
+        const str = String(value);
+        if (str !== '[object Object]') {
+            return str;
+        }
+
+        // Handle common Time object structures: {hours, minutes, seconds}
+        if ('hours' in value || 'minutes' in value || 'seconds' in value) {
+            const hh = String(value.hours || 0).padStart(2, '0');
+            const mm = String(value.minutes || 0).padStart(2, '0');
+            const ss = String(value.seconds || 0).padStart(2, '0');
+            return `${hh}:${mm}:${ss}`;
+        }
+    }
+
+    return String(value);
 }
 
 
@@ -260,7 +408,18 @@ function handleCancelExecution(message) {
 
 // Handle incremental row append during streaming
 function handleAppendRows(message) {
-    const { resultSetIndex, rows, totalRows, isLastChunk, limitReached } = message;
+    let { resultSetIndex, rows, totalRows, isLastChunk, limitReached } = message;
+
+    // Decode MessagePack if rows is a Uint8Array
+    if (rows instanceof Uint8Array || (rows && rows.type === 'Buffer') || (rows && typeof rows === 'object' && rows.data instanceof Array)) {
+        try {
+            // Handle VS Code's potential serialization of Uint8Array as {type: 'Buffer', data: [...]}
+            const buffer = rows instanceof Uint8Array ? rows : new Uint8Array(rows.data || rows);
+            rows = decode(buffer);
+        } catch (e) {
+            console.error('Failed to decode MessagePack rows:', e);
+        }
+    }
 
     // Update the data in window.resultSets
     if (window.resultSets && window.resultSets[resultSetIndex]) {
@@ -1015,7 +1174,8 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         // Get unique values for this column
         const uniqueValues = [...new Set(rs.data.map(row => {
             const value = Array.isArray(row) ? row[index] : (col.accessorKey ? row[col.accessorKey] : row[String(index)]);
-            return value === null || value === undefined ? 'NULL' : String(value);
+            const formatted = formatCellValue(value, col.type);
+            return formatted === null || formatted === undefined ? 'NULL' : formatted;
         }))].sort();
 
         // Define accessor function variable to be used in both accessorFn and filterFn
@@ -1038,6 +1198,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
             id: String(index),
             accessorFn: accessorFn,
             header: col.name || `Col ${index}`,
+            dataType: col.type,
             uniqueValues: uniqueValues,
             filterFn: (row, columnId, filterValue) => {
                 if (!filterValue) return true;
@@ -1655,7 +1816,7 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
                 td.appendChild(nullSpan);
             } else {
                 const valueSpan = document.createElement('span');
-                valueSpan.textContent = String(value);
+                valueSpan.textContent = formatCellValue(value, cell.column.columnDef.dataType);
                 td.appendChild(valueSpan);
             }
 
@@ -1680,8 +1841,9 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
         firstCell.appendChild(indicator);
 
         const groupValue = row.getGroupingValue(row.groupingColumnId);
+        const formattedGroupValue = formatCellValue(groupValue, resultSet.columns[parseInt(row.groupingColumnId)].type);
         const groupText = document.createElement('span');
-        groupText.textContent = ` ${resultSet.columns[parseInt(row.groupingColumnId)].name}: ${groupValue} (${row.subRows.length} row${row.subRows.length !== 1 ? 's' : ''})`;
+        groupText.textContent = ` ${resultSet.columns[parseInt(row.groupingColumnId)].name}: ${formattedGroupValue} (${row.subRows.length} row${row.subRows.length !== 1 ? 's' : ''})`;
         firstCell.appendChild(groupText);
 
         tr.appendChild(firstCell);
@@ -1747,7 +1909,9 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
                 const s = new Set();
                 subRows.forEach(r => {
                     const v = r.getValue(col.id);
-                    if (v !== null && v !== undefined) s.add(String(v));
+                    if (v !== null && v !== undefined) {
+                        s.add(formatCellValue(v, col.columnDef.dataType));
+                    }
                 });
                 result = String(s.size);
             }
@@ -1774,10 +1938,10 @@ function createResultSetGrid(rs, rsIndex, container, createTable, getCoreRowMode
     // Restore scroll position and globalFilter input value after initial render
     if (savedState) {
         // Restore scroll position (use requestAnimationFrame to ensure DOM is ready)
-        if (savedState.scrollTop || savedState.scrollLeft) {
+        if (savedState.scrollTop !== undefined || savedState.scrollLeft !== undefined) {
             requestAnimationFrame(() => {
-                wrapper.scrollTop = savedState.scrollTop || 0;
-                wrapper.scrollLeft = savedState.scrollLeft || 0;
+                wrapper.scrollTop = savedState.scrollTop !== undefined ? savedState.scrollTop : 0;
+                wrapper.scrollLeft = savedState.scrollLeft !== undefined ? savedState.scrollLeft : 0;
             });
         }
     }
@@ -3455,7 +3619,7 @@ function setupCellSelectionEvents(wrapper, table, columnCount) {
                         if (cellValue === null || cellValue === undefined) {
                             return 'NULL';
                         }
-                        return String(cellValue);
+                        return formatCellValue(cellValue, col.columnDef.dataType);
                     }).join('\t');
                 });
 
@@ -3693,6 +3857,14 @@ document.addEventListener('keydown', function (e) {
 });
 
 // Global functions acting on active grid
+window.init = init;
+window.executeSplitExport = executeSplitExport;
+window.toggleExportMenu = toggleExportMenu;
+window.selectExportFormat = selectExportFormat;
+window.clearLogs = function () {
+    vscode.postMessage({ command: 'clearLogs', sourceUri: window.activeSource });
+};
+
 window.copySelection = function (withHeaders) {
     if (grids[activeGridIndex] && grids[activeGridIndex].copySelection) {
         grids[activeGridIndex].copySelection(withHeaders);

@@ -380,7 +380,7 @@ export class EditDataProvider {
     private static _getHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.Uri, title: string) {
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'tanstack-table-core.js'));
         const virtualUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'tanstack-virtual-core.js'));
-        const mainScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'editDataPanel.js'));
+        const mainScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'media', 'editDataPanel.js'));
         const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'editDataPanel.css'));
         // codiconsUri not used, font loaded via inline style
         const codiconsFontUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'codicon.ttf'));

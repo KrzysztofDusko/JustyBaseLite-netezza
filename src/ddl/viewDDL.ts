@@ -7,6 +7,26 @@ import { NzConnection } from '../types';
 import { NZ_SYSTEM_VIEWS } from '../metadata';
 
 /**
+ * Build view DDL from definition string
+ */
+export function buildViewDDLFromCache(
+    database: string,
+    schema: string,
+    viewName: string,
+    definition: string
+): string {
+    const cleanDatabase = quoteNameIfNeeded(database);
+    const cleanSchema = quoteNameIfNeeded(schema);
+    const cleanViewName = quoteNameIfNeeded(viewName);
+
+    const ddlLines: string[] = [];
+    ddlLines.push(`CREATE OR REPLACE VIEW ${cleanDatabase}.${cleanSchema}.${cleanViewName} AS`);
+    ddlLines.push(definition || '');
+
+    return ddlLines.join('\n');
+}
+
+/**
  * Generate DDL code for creating a view in Netezza
  */
 export async function generateViewDDL(
@@ -41,13 +61,5 @@ export async function generateViewDDL(
     }
 
     const row = rows[0];
-    const cleanDatabase = quoteNameIfNeeded(database);
-    const cleanSchema = quoteNameIfNeeded(schema);
-    const cleanViewName = quoteNameIfNeeded(viewName);
-
-    const ddlLines: string[] = [];
-    ddlLines.push(`CREATE OR REPLACE VIEW ${cleanDatabase}.${cleanSchema}.${cleanViewName} AS`);
-    ddlLines.push(row.DEFINITION || '');
-
-    return ddlLines.join('\n');
+    return buildViewDDLFromCache(database, schema, viewName, row.DEFINITION);
 }

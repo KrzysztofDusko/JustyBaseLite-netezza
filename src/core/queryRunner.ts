@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ConnectionManager } from './connectionManager';
 import { QueryHistoryManager } from './queryHistoryManager';
 import { extractVariables, parseSetVariables, replaceVariablesInSql } from './variableUtils';
+import { promptForVariableValues, resolveQueryVariables } from './variableResolver';
 import { NzConnection, NzCommand, QueryResult, ColumnDefinition, NzDataReader } from '../types';
 
 // Re-export QueryResult for backward compatibility
@@ -80,48 +81,6 @@ export async function cancelQueryByUri(docUri: string | vscode.Uri): Promise<voi
     }
 }
 
-/**
- * Prompt user for values for each variable. If `silent` is true and variables exist,
- * throw an error because we cannot prompt in silent mode.
- */
-async function promptForVariableValues(
-    variables: Set<string>,
-    silent: boolean,
-    defaults?: Record<string, string>,
-    extensionUri?: vscode.Uri
-): Promise<Record<string, string>> {
-    const values: Record<string, string> = {};
-    if (variables.size === 0) return values;
-
-    if (silent) {
-        // If silent but defaults present for all variables, use them. Otherwise error.
-        const missing = Array.from(variables).filter(v => !(defaults && defaults[v] !== undefined));
-        if (missing.length > 0) {
-            throw new Error(
-                'Query contains variables but silent mode is enabled; cannot prompt for values. Missing: ' +
-                missing.join(', ')
-            );
-        }
-        for (const v of variables) {
-            values[v] = defaults![v];
-        }
-        return values;
-    }
-
-    // Use webview panel for better UX
-    const { VariableInputPanel } = require('../views/variableInputPanel');
-    const result = await VariableInputPanel.show(
-        Array.from(variables),
-        defaults,
-        extensionUri
-    );
-
-    if (!result) {
-        throw new Error('Variable input cancelled by user');
-    }
-
-    return result;
-}
 
 // QueryResult is now imported from '../types' and re-exported above
 
@@ -198,42 +157,6 @@ function log(logger: OutputLogger, message: string): void {
     }
 }
 
-async function resolveQueryVariables(
-    query: string,
-    silent: boolean,
-    extensionUri?: vscode.Uri
-): Promise<string> {
-    const parsed = parseSetVariables(query);
-    let queryToExecute = parsed.sql;
-    const setDefaults = parsed.setValues;
-
-    const vars = extractVariables(queryToExecute);
-    if (vars.size > 0) {
-        // Only prompt for variables that do NOT have a value set via @SET
-        const missingVars = new Set<string>();
-        for (const v of vars) {
-            // DEBUG LOG
-            console.log(`[VariableDebug] Checking variable '${v}'. Value in defaults: '${setDefaults[v]}'`);
-            if (setDefaults[v] === undefined) {
-                missingVars.add(v);
-            }
-        }
-
-        let promptedValues: Record<string, string> = {};
-        if (missingVars.size > 0) {
-            console.log(`[VariableDebug] Prompting for missing vars: ${Array.from(missingVars).join(', ')}`);
-            // We only prompt for missing variables. defined ones are used automatically.
-            promptedValues = await promptForVariableValues(missingVars, silent, undefined, extensionUri);
-        } else {
-            console.log(`[VariableDebug] All variables defined in defaults. Skipping prompt.`);
-        }
-
-        const finalValues = { ...setDefaults, ...promptedValues };
-        queryToExecute = replaceVariablesInSql(queryToExecute, finalValues);
-    }
-
-    return queryToExecute;
-}
 
 function resolveConnectionName(
     connManager: ConnectionManager,

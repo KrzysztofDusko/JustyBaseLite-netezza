@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { encode } from '@msgpack/msgpack';
 import { AnalysisPanelView } from './analysisPanelView';
 import { ResultSet } from '../types';
 import { ResultsHtmlGenerator, ViewScriptUris } from './resultsHtmlGenerator';
@@ -9,7 +10,7 @@ interface ViewData {
     pinnedSourcesJson: string;
     pinnedResultsJson: string;
     activeSourceJson: string;
-    resultSetsJson: string;
+    resultSetsMsgPack: Uint8Array;
     activeResultSetIndex: number;
     executingSourcesJson: string;
 }
@@ -54,6 +55,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
     private _resultIdCounter: number = 0;
     private _executingSources: Set<string> = new Set();
     private _cancelledSources: Set<string> = new Set();
+    private _dataVersions: Map<string, number> = new Map(); // Increment on metadata/data changes
+    private _sentDataVersions: Map<string, number> = new Map(); // Last version sent to webview
+    private _lastSentGlobalStateVersion: number = 0; // Tracks if global list of sources changed
+    private _globalStateVersion: number = 0;
 
     // Event emitter for cancel notifications
     private _onDidCancel = new vscode.EventEmitter<string>();
@@ -79,7 +84,10 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         webviewView.webview.options = {
             enableScripts: true,
-            localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')]
+            localResourceRoots: [
+                vscode.Uri.joinPath(this._extensionUri, 'media'),
+                vscode.Uri.joinPath(this._extensionUri, 'dist', 'media')
+            ]
         };
 
         this._htmlGenerator = new ResultsHtmlGenerator(webviewView.webview.cspSource);
@@ -141,6 +149,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     } else {
                         this._pinnedSources.add(message.sourceUri);
                     }
+                    this._globalStateVersion++;
                     this._updateWebview();
                     return;
                 case 'toggleResultPin':
@@ -151,6 +160,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     return;
                 case 'unpinResult':
                     this._pinnedResults.delete(message.resultId);
+                    this._globalStateVersion++;
                     this._updateWebview();
                     return;
                 case 'closeSource':
@@ -177,7 +187,8 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     vscode.window.showInformationMessage(message.text);
                     return;
                 case 'error':
-                    vscode.window.showErrorMessage(message.text);
+                    console.error('[Webview Error]', message.text);
+                    vscode.window.showErrorMessage(`Webview Error: ${message.text}`);
                     return;
                 case 'setContext':
                     vscode.commands.executeCommand('setContext', message.key, message.value);
@@ -399,6 +410,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             }
         }
         this._autoPinnedResults.clear();
+        this._globalStateVersion++;
         this._updateWebview();
     }
 
@@ -530,6 +542,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         this._activeSourceUri = sourceUri;
         this._activeResultSetIndexMap.set(sourceUri, newResultsStartIndex); // Switch to the first of new results
+        this._incrementDataVersion(sourceUri);
 
         if (this._view) {
             this._updateWebview();
@@ -537,6 +550,12 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
         } else {
             vscode.window.showInformationMessage('Query completed. Please open "Query Results" panel to view data.');
         }
+    }
+
+    private _incrementDataVersion(sourceUri: string) {
+        const current = this._dataVersions.get(sourceUri) || 0;
+        this._dataVersions.set(sourceUri, current + 1);
+        this._globalStateVersion++; // Any change affects global state too
     }
 
     /**
@@ -613,7 +632,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 this._postMessageToWebview({
                     command: 'appendRows',
                     resultSetIndex: existingResults.length - 1,
-                    rows: chunk.rows,
+                    rows: encode(this._sanitizeForMessagePack(chunk.rows)),
                     totalRows: chunk.totalRowsSoFar,
                     isLastChunk: chunk.isLastChunk,
                     limitReached: chunk.limitReached
@@ -623,6 +642,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
 
         // Update row count on last chunk
         if (chunk.isLastChunk) {
+            this._incrementDataVersion(sourceUri);
             this._postMessageToWebview({
                 command: 'streamingComplete',
                 resultSetIndex: existingResults.length - 1,
@@ -643,9 +663,31 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
             return;
         }
 
+        const activeSource = this._activeSourceUri;
+        const currentVersion = activeSource ? this._dataVersions.get(activeSource) || 0 : 0;
+        const lastSentVersion = activeSource ? this._sentDataVersions.get(activeSource) || -1 : -1;
+        const globalChanged = this._globalStateVersion !== this._lastSentGlobalStateVersion;
+
+        if (!globalChanged && activeSource && currentVersion === lastSentVersion) {
+            // Data hasn't changed for this source, and global list is same. Just switch.
+            console.log(`[ResultPanelView] Data for ${activeSource} is current (v${currentVersion}), sending setActiveSource`);
+            this._postMessageToWebview({
+                command: 'setActiveSource',
+                sourceUri: activeSource,
+                activeResultSetIndex: this._activeResultSetIndexMap.get(activeSource)
+            });
+            return;
+        }
+
         const viewData = this._prepareViewData();
 
         if (this._isViewReady) {
+            if (activeSource) {
+                this._sentDataVersions.set(activeSource, currentVersion);
+            }
+            this._lastSentGlobalStateVersion = this._globalStateVersion;
+
+            console.log('[ResultPanelView] Sending hydrate with data');
             this._postMessageToWebview({
                 command: 'hydrate',
                 data: viewData
@@ -682,6 +724,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 label
             });
         }
+        this._globalStateVersion++;
         this._updateWebview();
     }
 
@@ -984,6 +1027,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 logResultSet.data = [];
                 const timestamp = new Date().toLocaleTimeString();
                 logResultSet.data.push([timestamp, '--- Logs Cleared ---']);
+                this._incrementDataVersion(sourceUri);
                 this._updateWebview();
             }
         }
@@ -1004,7 +1048,7 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                 vscode.Uri.joinPath(this._extensionUri, 'media', 'tanstack-virtual-core.js')
             ),
             mainScriptUri: this._view!.webview.asWebviewUri(
-                vscode.Uri.joinPath(this._extensionUri, 'media', 'resultPanel.js')
+                vscode.Uri.joinPath(this._extensionUri, 'dist', 'media', 'resultPanel.js')
             ),
             workerUri: this._view!.webview.asWebviewUri(
                 vscode.Uri.joinPath(this._extensionUri, 'media', 'searchWorker.js')
@@ -1057,25 +1101,66 @@ export class ResultPanelView implements vscode.WebviewViewProvider {
                     ? 0
                     : 0;
 
-        // Serialize data safely with BigInt support
-        const bigIntReplacer = (_key: string, value: unknown) => {
-            if (typeof value === 'bigint') {
-                if (value >= Number.MIN_SAFE_INTEGER && value <= Number.MAX_SAFE_INTEGER) {
-                    return Number(value);
-                }
-                return value.toString();
-            }
-            return value;
-        };
-
         return {
             sourcesJson: JSON.stringify(sources),
             pinnedSourcesJson: JSON.stringify(pinnedSources),
             pinnedResultsJson: JSON.stringify(pinnedResults),
             activeSourceJson: JSON.stringify(activeSource),
-            resultSetsJson: JSON.stringify(activeResultSets, bigIntReplacer),
+            resultSetsMsgPack: encode(this._sanitizeForMessagePack(activeResultSets)),
             activeResultSetIndex: activeResultSetIndex,
             executingSourcesJson: JSON.stringify(Array.from(this._executingSources))
         };
+    }
+
+    /**
+     * Sanitize data for MessagePack encoding, specifically handling BigInt
+     * Uses a fast recursive walker instead of JSON.stringify to avoid performance penalty.
+     */
+    private _sanitizeForMessagePack(data: unknown): unknown {
+        if (data === null || typeof data !== 'object') {
+            if (typeof data === 'bigint') {
+                if (data >= Number.MIN_SAFE_INTEGER && data <= Number.MAX_SAFE_INTEGER) {
+                    return Number(data);
+                }
+                return data.toString();
+            }
+            if (typeof data === 'function') {
+                return undefined;
+            }
+            return data;
+        }
+
+        if (data instanceof Date) {
+            return data;
+        }
+
+        if (Array.isArray(data)) {
+            const arr = new Array(data.length);
+            for (let i = 0; i < data.length; i++) {
+                arr[i] = this._sanitizeForMessagePack(data[i]);
+            }
+            return arr;
+        }
+
+        // Handle Buffer/Uint8Array as they are supported by MessagePack
+        if (data instanceof Uint8Array || (typeof Buffer !== 'undefined' && Buffer.isBuffer(data))) {
+            return data;
+        }
+
+        // If object has a toJSON method (like some driver types for Time/Interval), use it
+        if (typeof (data as { toJSON?: unknown }).toJSON === 'function') {
+            return (data as { toJSON: () => unknown }).toJSON();
+        }
+
+        const obj: Record<string, unknown> = {};
+        for (const key in (data as Record<string, unknown>)) {
+            if (Object.prototype.hasOwnProperty.call(data, key)) {
+                const val = this._sanitizeForMessagePack((data as Record<string, unknown>)[key]);
+                if (val !== undefined) {
+                    obj[key] = val;
+                }
+            }
+        }
+        return obj;
     }
 }

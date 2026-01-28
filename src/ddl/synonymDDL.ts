@@ -6,6 +6,32 @@ import { executeQueryHelper, quoteNameIfNeeded } from './helpers';
 import { NzConnection } from '../types';
 
 /**
+ * Build synonym DDL from metadata
+ */
+export function buildSynonymDDLFromCache(
+    database: string,
+    synonymName: string,
+    refObjName: string,
+    owner: string,
+    schema: string,
+    description: string | null
+): string {
+    const cleanDatabase = quoteNameIfNeeded(database);
+    const ownerSchema = quoteNameIfNeeded(owner || schema);
+    const cleanSynonymName = quoteNameIfNeeded(synonymName);
+
+    const ddlLines: string[] = [];
+    ddlLines.push(`CREATE SYNONYM ${cleanDatabase}.${ownerSchema}.${cleanSynonymName} FOR ${refObjName};`);
+
+    if (description) {
+        const cleanComment = description.replace(/'/g, "''");
+        ddlLines.push(`COMMENT ON SYNONYM ${cleanSynonymName} IS '${cleanComment}';`);
+    }
+
+    return ddlLines.join('\n');
+}
+
+/**
  * Generate DDL code for creating a synonym in Netezza
  */
 export async function generateSynonymDDL(
@@ -42,18 +68,12 @@ export async function generateSynonymDDL(
     }
 
     const row = rows[0];
-    const cleanDatabase = quoteNameIfNeeded(database);
-    const ownerSchema = quoteNameIfNeeded(row.OWNER || schema);
-    const cleanSynonymName = quoteNameIfNeeded(synonymName);
-    const refObjName = row.REFOBJNAME;
-
-    const ddlLines: string[] = [];
-    ddlLines.push(`CREATE SYNONYM ${cleanDatabase}.${ownerSchema}.${cleanSynonymName} FOR ${refObjName};`);
-
-    if (row.DESCRIPTION) {
-        const cleanComment = row.DESCRIPTION.replace(/'/g, "''");
-        ddlLines.push(`COMMENT ON SYNONYM ${cleanSynonymName} IS '${cleanComment}';`);
-    }
-
-    return ddlLines.join('\n');
+    return buildSynonymDDLFromCache(
+        database,
+        synonymName,
+        row.REFOBJNAME,
+        row.OWNER,
+        schema,
+        row.DESCRIPTION
+    );
 }
